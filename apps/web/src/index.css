@@ -1,0 +1,245 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0c09;
+  --color-surface: #14160f;
+  --color-surface-2: #1d2015;
+  --color-border: #2b2f1e;
+  --color-border-strong: #3a402a;
+  --color-text: #edefe3;
+  --color-text-2: #a9b298;
+  --color-accent: #8fd429;
+  --color-accent-hover: #a9e84d;
+  --color-accent-active: #79bc1f;
+  --color-on-accent: #0e1405;
+  --color-accent-subtle: rgba(143, 212, 41, 0.12);
+  --color-accent-border: rgba(143, 212, 41, 0.32);
+  --color-warning: #d9a62e;
+  --color-danger: #e5484d;
+  --color-danger-hover: #f2665c;
+  --color-danger-fill: #d63c42;
+  --color-danger-fill-hover: #c33236;
+  --color-medal-gold: #e5b84b;
+  --color-medal-silver: #c4ccc2;
+  --color-medal-bronze: #c99055;
+  --font-display: "Rajdhani", sans-serif;
+  --font-body: "IBM Plex Sans", sans-serif;
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.45), 0 6px 20px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 10px 36px rgba(0, 0, 0, 0.6);
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    scrollbar-color: #3a402a #0b0c09;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: #8fd429;
+    color: #0e1405;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2b2f1e;
+    border: 2px solid #0b0c09;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a402a;
+  }
+
+  * {
+    caret-color: #8fd429;
+  }
+
+  a {
+    text-underline-offset: 3px;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent-hover);
+    outline-offset: 2px;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #7f8a6e;
+  }
+
+  .tabular,
+  td[data-numeric],
+  .stat-value {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Escala tipográfica de DESIGN.md §2.1 */
+@layer components {
+  .type-display-xl {
+    font-family: var(--font-display);
+    font-size: 28px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  .type-display-l {
+    font-family: var(--font-display);
+    font-size: 24px;
+    line-height: 1.15;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  .type-display-m {
+    font-family: var(--font-display);
+    font-size: 18px;
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .type-label {
+    font-family: var(--font-display);
+    font-size: 12px;
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .type-button {
+    font-family: var(--font-display);
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .type-body {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .type-body-lg {
+    font-size: 16px;
+    line-height: 1.6;
+    max-width: 68ch;
+  }
+
+  .type-caption {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .type-number-l {
+    font-size: 28px;
+    line-height: 1;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .type-number-m {
+    font-size: 14px;
+    line-height: 1.2;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .type-mono {
+    font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+}
+
+@media (min-width: 768px) {
+  .type-display-xl {
+    font-size: 32px;
+  }
+}
+
+/* Skeleton shimmer (excepción de gradiente permitida por DESIGN.md §4) */
+.skeleton {
+  background-color: var(--color-surface-2);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    rgba(237, 239, 227, 0.05),
+    transparent
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.4s infinite ease-out;
+  border-radius: 2px;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Textura de franjas diagonales del hero de perfil (§3.3, única textura permitida) */
+.hero-texture {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 8px,
+    rgba(143, 212, 41, 0.03) 8px 9px
+  );
+}
+
+/* Momento de marca: check del paso 4 de vinculación (§7) */
+.check-draw path {
+  stroke-dasharray: 28;
+  stroke-dashoffset: 28;
+  animation: check-draw-anim 400ms ease-out 150ms forwards;
+}
+
+@keyframes check-draw-anim {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .skeleton {
+    animation: none;
+    background-image: none;
+    opacity: 0.6;
+  }
+
+  .check-draw path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
