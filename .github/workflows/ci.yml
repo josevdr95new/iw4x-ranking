@@ -1,0 +1,47 @@
+# CI del monorepo iw4x-ranking (npm workspaces).
+# Sin servicios externos: la API usa SQLite (better-sqlite3 + Prisma) y los
+# tests son autocontenidos (tests/global-setup.ts genera su propia test.db y
+# su DB mock de IW4MAdmin), por lo que no hace falta ningún paso previo
+# (ni `mock:db` ni `db:push` manuales) ni secrets.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api:
+    name: Build & Test (API)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies (workspaces)
+        run: npm ci
+
+      # `build` = prisma generate && tsc (ver apps/api/package.json).
+      # Garantiza el cliente de Prisma generado antes de correr los tests.
+      - name: Build API
+        run: npm run build -w apps/api
+
+      - name: Test API (vitest)
+        run: npm test -w apps/api
+
+      # TODO: descomentar cuando exista apps/web/package.json
+      # (apps/web es hoy un placeholder README; el frontend se está
+      # implementando en paralelo).
+      # - name: Build Web
+      #   run: npm run build -w apps/web
+
+      - name: Smoke (build y tests OK)
+        if: success()
+        run: echo "CI OK — build y tests de la API pasaron en Node 20 / ubuntu-latest"

@@ -121,3 +121,14 @@ Vitest (36 tests): auth (registro/login/me/validaciones), sync defensivo con DB 
 | Leaderboard vacío | No corriste `npm run sync` después de crear/mock la DB |
 | `link/complete` devuelve 0 candidatos | El jugador no se conectó en los últimos `LINK_WINDOW_MINUTES` minutos, o no hubo sync desde entonces |
 | Tokens se invalidan al reiniciar | `JWT_SECRET` no configurado en dev (se genera efímero); configúralo |
+
+## CI
+
+El workflow [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) corre en cada push a `main` y en cada pull request (runner `ubuntu-latest`, Node 20 con cache de npm). Valida:
+
+1. **Instalación limpia**: `npm ci` en la raíz (instala los workspaces y genera el cliente de Prisma).
+2. **API**: `npm run build -w apps/api` (`prisma generate` + `tsc`) y `npm test -w apps/api` (los 36 tests de vitest). No necesita pasos previos: el global setup de vitest crea su propia `test.db` y su DB mock de IW4MAdmin, sin tocar `dev.db` ni bases reales.
+3. **Web**: el paso de build del frontend está comentado con un TODO hasta que exista `apps/web/package.json` (hoy `apps/web` es un placeholder).
+4. **Smoke**: paso final que confirma que el pipeline completo terminó OK.
+
+No usa secrets ni servicios externos (sin Postgres): todo funciona con SQLite efímera generada en el propio runner.
