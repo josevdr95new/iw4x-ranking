@@ -1,0 +1,96 @@
+// Esquema de la base propia del ranking (SQLite vía Prisma).
+// La base de IW4MAdmin NO se modela aquí: se lee read-only con better-sqlite3.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  email        String        @unique
+  passwordHash String
+  displayName  String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  link         PlayerLink?
+  linkAttempts LinkAttempt[]
+}
+
+/// Intento de vinculación cuenta↔GUID (POST /api/link/start)
+model LinkAttempt {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    String   @default("pending") // pending | completed
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/// Jugador agregado desde IW4MAdmin (1 fila por NetworkId/GUID)
+model Player {
+  id              Int         @id @default(autoincrement())
+  guid            String      @unique // NetworkId como string decimal (puede superar 2^53)
+  name            String      @default("unknown") // último nombre conocido (CurrentName ?? Name)
+  kills           Int         @default(0)
+  deaths          Int         @default(0)
+  kd              Float       @default(0)
+  timePlayed      Int         @default(0) // segundos (TotalConnectionTime)
+  connections     Int         @default(0) // nº de conexiones/partidas
+  skill           Float       @default(0) // heurística: kd*10 + kills/hora
+  firstConnection DateTime?
+  lastConnection  DateTime?
+  updatedAt       DateTime    @updatedAt
+  link            PlayerLink?
+}
+
+/// Vinculación 1 a 1 usuario web ↔ GUID del juego
+model PlayerLink {
+  id       Int      @id @default(autoincrement())
+  userId   Int      @unique
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guid     String   @unique
+  player   Player   @relation(fields: [guid], references: [guid], onDelete: Cascade)
+  linkedAt DateTime @default(now())
+}
+
+/// Evento individual de kill (para perfil: historial reciente y series temporales)
+model KillEvent {
+  id         Int      @id @default(autoincrement())
+  originGuid String
+  targetGuid String
+  isKill     Boolean  @default(true) // false = evento no letal en IW4MAdmin
+  damage     Int      @default(0)
+  weapon     String?  // id crudo del arma (INTEGER en IW4MAdmin)
+  server     String?  // etiqueta de servidor si la fuente la expone
+  time       DateTime
+  timeEpoch  Int // epoch en segundos
+
+  @@index([originGuid, timeEpoch])
+  @@index([targetGuid, timeEpoch])
+  @@index([timeEpoch])
+}
+
+/// Estado incremental por fuente (evita reimportar kill events ya conocidos)
+model SyncState {
+  id            Int       @id @default(autoincrement())
+  source        String    @unique // ruta de la DB fuente
+  lastKillEpoch Int       @default(0)
+  lastRunAt     DateTime?
+}
+
+/// Auditoría de sincronizaciones
+model SyncRun {
+  id              Int       @id @default(autoincrement())
+  startedAt       DateTime  @default(now())
+  finishedAt      DateTime?
+  ok              Boolean   @default(false)
+  playersSynced   Int       @default(0)
+  killEventsSynced Int      @default(0)
+  warnings        String?
+}

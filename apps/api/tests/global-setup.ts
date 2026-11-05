@@ -1,0 +1,31 @@
+import { execSync } from 'node:child_process';
+import { mkdirSync, rmSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { generateMockDb } from '../../scripts/mock-iw4madmin.js';
+
+const here = dirname(fileURLToPath(import.meta.url)); // apps/api/tests
+const apiRoot = resolve(here, '..');
+const prismaDir = resolve(apiRoot, 'prisma');
+const testDbFile = resolve(prismaDir, 'test.db');
+const mockDbFile = resolve(here, 'data', 'mock-iw4madmin.sqlite');
+
+/**
+ * Prepara el entorno de tests:
+ * 1. Recrea la SQLite de la app (prisma db push) con DATABASE_URL de vitest.config.
+ * 2. Genera la DB mock de IW4MAdmin con datos deterministas (seed fija).
+ */
+export default function globalSetup(): void {
+  for (const suffix of ['', '-journal', '-wal', '-shm']) {
+    rmSync(testDbFile + suffix, { force: true });
+  }
+  execSync('npx prisma db push --skip-generate', {
+    cwd: apiRoot,
+    stdio: 'inherit',
+    env: { ...process.env, DATABASE_URL: 'file:./test.db' },
+  });
+
+  mkdirSync(dirname(mockDbFile), { recursive: true });
+  rmSync(mockDbFile, { force: true });
+  generateMockDb(mockDbFile, { players: 12, killEvents: 300, servers: 4, seed: 7, recentCandidates: 3 });
+}

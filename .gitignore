@@ -1,0 +1,32 @@
+# Dependencias
+node_modules/
+
+# Builds
+dist/
+*.tsbuildinfo
+
+# Entorno (nunca commitear secretos)
+.env
+.env.*
+!.env.example
+
+# Bases de datos (Prisma dev/test, IW4MAdmin mock)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+Database/
+
+# Tests temporales
+tests/data/
+
+# Logs
+*.log
+npm-debug.log*
+
+# SO / editores
+.DS_Store
+Thumbs.db
+.vite/

@@ -1,0 +1,29 @@
+{
+  "name": "iw4x-ranking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sistema de ranking web para comunidad IW4x (CoD MW2 2009)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:api": "npm run dev --workspace apps/api",
+    "build": "npm run build --workspace apps/api",
+    "start:api": "npm run start --workspace apps/api",
+    "test": "npm run test --workspace apps/api",
+    "db:push": "npm run db:push --workspace apps/api",
+    "sync": "npm run sync --workspace apps/api",
+    "mock:db": "tsx scripts/mock-iw4madmin.ts",
+    "smoke": "tsx scripts/smoke-api.ts"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^12.4.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.4"
+  }
+}
