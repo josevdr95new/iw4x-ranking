@@ -3,8 +3,10 @@ import { prisma } from '../lib/prisma.js';
 import { parseWith } from '../middleware/validate.js';
 import { leaderboardQuerySchema } from '../dto/leaderboard.dto.js';
 import type { LeaderboardQuery } from '../dto/leaderboard.dto.js';
+import { getGlobalRanksByGuid } from './ranking.service.js';
 
 export interface LeaderboardEntry {
+  /** Posición GLOBAL (kills desc, empate name asc) — independiente de búsqueda/filtros/paginación. */
   rank: number;
   guid: string;
   name: string;
@@ -16,6 +18,8 @@ export interface LeaderboardEntry {
   connections: number;
   skill: number;
   lastConnection: string | null;
+  /** true si el GUID tiene una cuenta web vinculada. */
+  linked: boolean;
 }
 
 export interface LeaderboardResponse {
@@ -46,10 +50,14 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       orderBy,
       skip: (q.page - 1) * q.pageSize,
       take: q.pageSize,
+      include: { link: { select: { guid: true } } },
     }),
   ]);
 
   const offset = (q.page - 1) * q.pageSize;
+  // rank es SIEMPRE la posición global (kills desc, name asc), aunque la
+  // búsqueda/filtros reduzcan el resultado o se esté en una página intermedia.
+  const globalRanks = await getGlobalRanksByGuid(rows.map((row) => row.guid));
 
   return {
     page: q.page,
@@ -59,7 +67,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
     sort: q.sort,
     order: q.order,
     players: rows.map((player, index) => ({
-      rank: offset + index + 1,
+      rank: globalRanks.get(player.guid) ?? offset + index + 1,
       guid: player.guid,
       name: player.name,
       kills: player.kills,
@@ -69,6 +77,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       connections: player.connections,
       skill: player.skill,
       lastConnection: player.lastConnection?.toISOString() ?? null,
+      linked: player.link !== null,
     })),
   };
 }

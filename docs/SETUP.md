@@ -62,6 +62,17 @@ npm run mock:db -- --out C:/temp/mi-mock.sqlite
 
 > ⚠️ Si **regeneras** el mock, borra también `apps/api/prisma/dev.db` y repite `db:push` + `sync`: el cursor incremental de kill events (`SyncState`) asume una fuente que solo crece.
 
+### Refrescar candidatos de vinculación (demo/E2E)
+
+Si ya pasó la ventana de 10 minutos y `POST /api/link/complete` devuelve 0 candidatos, refresca la última conexión de 3 jugadores en la mock y re-sincroniza:
+
+```powershell
+npm run mock:refresh-connections   #LastConnection = hace ~2 min para 3 jugadores al azar
+npm run sync
+```
+
+Acepta `--count N`, `--minutes N`, `--exclude guid1,guid2` (útil para excluir GUIDs ya vinculados) y `--db <ruta>`.
+
 Smoke test end-to-end (con el server corriendo y datos sincronizados):
 
 ```powershell
@@ -119,7 +130,7 @@ Vitest (36 tests): auth (registro/login/me/validaciones), sync defensivo con DB 
 | `503 SYNC_SOURCE_UNAVAILABLE` | Ruta incorrecta o archivo bloqueado; usa barras normales en el path |
 | `sync` con `warnings` de columnas | Versión de IW4MAdmin con esquema distinto: es comportamiento defensivo; revisa qué columnas lista el warning |
 | Leaderboard vacío | No corriste `npm run sync` después de crear/mock la DB |
-| `link/complete` devuelve 0 candidatos | El jugador no se conectó en los últimos `LINK_WINDOW_MINUTES` minutos, o no hubo sync desde entonces |
+| `link/complete` devuelve 0 candidatos | El jugador no se conectó en los últimos `LINK_WINDOW_MINUTES` minutos, o no hubo sync desde entonces → con el mock: `npm run mock:refresh-connections` + `npm run sync` |
 | Tokens se invalidan al reiniciar | `JWT_SECRET` no configurado en dev (se genera efímero); configúralo |
 
 ## CI

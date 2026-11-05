@@ -56,6 +56,29 @@ describe('Sync desde IW4MAdmin (defensivo, read-only)', () => {
     expect(result.playersSynced).toBe(12);
   });
 
+  it('GET /api/sync/status es público y expone lastSyncAt', async () => {
+    // Sin token: ahora es un endpoint público.
+    const res = await req().get('/api/sync/status');
+    expect(res.status).toBe(200);
+
+    const body = res.body as { lastSyncAt: string | null; configured: boolean; intervalMinutes: number; windowMinutes: number };
+    expect(body.configured).toBe(true);
+    expect(body.intervalMinutes).toBe(0);
+    expect(body.windowMinutes).toBe(10);
+    // Ya hubo un sync exitoso en este archivo → lastSyncAt no es null.
+    expect(body.lastSyncAt).not.toBeNull();
+    expect(Number.isNaN(Date.parse(body.lastSyncAt as string))).toBe(false);
+  });
+
+  it('lastSyncAt es null en una base sin sincronizaciones exitosas', async () => {
+    await prisma.syncRun.deleteMany();
+    const res = await req().get('/api/sync/status');
+    expect(res.status).toBe(200);
+    expect((res.body as { lastSyncAt: string | null }).lastSyncAt).toBeNull();
+    // Deja un sync exitoso para los tests siguientes.
+    await runSync();
+  });
+
   it('computeSkill sigue la fórmula documentada', () => {
     // kd=2.0 → 20 + kills/hora (60 kills en 3600s = 60 kills/h) → 80
     expect(computeSkill(60, 30, 3600)).toBe(80);
@@ -74,7 +97,7 @@ describe('GET /api/leaderboard', () => {
       totalPages: number;
       page: number;
       sort: string;
-      players: Array<{ rank: number; kills: number }>;
+      players: Array<{ rank: number; kills: number; linked: boolean }>;
     };
     expect(body.sort).toBe('kills');
     expect(body.total).toBe(12);
@@ -84,6 +107,30 @@ describe('GET /api/leaderboard', () => {
     expect([...kills].sort((a, b) => b - a)).toEqual(kills);
     expect(body.players[0]?.rank).toBe(1);
     expect(body.players[4]?.rank).toBe(5);
+    // Campo nuevo: linked (en tests, el mock no tiene cuentas vinculadas aún).
+    expect(body.players.every((player) => typeof player.linked === 'boolean')).toBe(true);
+    expect(body.players[0]?.linked).toBe(false);
+  });
+
+  it('rank es SIEMPRE la posición global, incluso con búsqueda y paginación', async () => {
+    const all = await req().get('/api/leaderboard?sort=kills&order=desc&pageSize=100');
+    const list = (all.body as { players: Array<{ guid: string; name: string; rank: number }> }).players;
+    const target = list[5]; // 6º del ranking global (índice 0-based)
+    expect(target).toBeDefined();
+
+    // Con búsqueda activa: aunque haya un único match, su rank NO pasa a ser 1.
+    const search = await req().get(`/api/leaderboard?search=${encodeURIComponent(target.name)}&pageSize=100`);
+    expect(search.status).toBe(200);
+    const found = (search.body as { players: Array<{ guid: string; rank: number }> }).players;
+    const matched = found.find((player) => player.guid === target.guid);
+    expect(matched).toBeDefined();
+    expect(matched?.rank).toBe(6);
+
+    // Paginación: la página 2 arranca en el rank global 6 (continuo, no 1,2,3...).
+    const page2 = await req().get('/api/leaderboard?sort=kills&order=desc&pageSize=5&page=2');
+    const firstOfPage2 = (page2.body as { players: Array<{ guid: string; rank: number }> }).players[0];
+    expect(firstOfPage2?.guid).toBe(target.guid);
+    expect(firstOfPage2?.rank).toBe(6);
   });
 
   it('ordena por kd y timePlayed', async () => {
@@ -129,26 +176,34 @@ describe('GET /api/leaderboard', () => {
 });
 
 describe('GET /api/players/:guid', () => {
-  it('devuelve perfil con eventos recientes y resumen por servidor', async () => {
-    const lb = await req().get('/api/leaderboard?sort=kills&order=desc&pageSize=1');
-    const top = (lb.body as { players: Array<{ guid: string; name: string; kills: number }> }).players[0];
-    expect(top).toBeDefined();
+  it('devuelve perfil con rank global, eventos recientes y resumen por servidor', async () => {
+    const lb = await req().get('/api/leaderboard?sort=kills&order=desc&pageSize=3');
+    const ranked = (lb.body as { players: Array<{ guid: string; name: string; kills: number }> }).players;
+    expect(ranked.length).toBeGreaterThanOrEqual(2);
 
-    const res = await req().get(`/api/players/${top.guid}`);
+    const res = await req().get(`/api/players/${ranked[0].guid}`);
     expect(res.status).toBe(200);
 
     const body = res.body as {
       player: { guid: string; name: string; kills: number; linked: boolean };
+      rank: number | null;
       recentEvents: Array<{ direction: string; opponentGuid: string; time: string }>;
       byServer: Array<{ server: string; kills: number; deaths: number }>;
     };
-    expect(body.player.guid).toBe(top.guid);
-    expect(body.player.name).toBe(top.name);
-    expect(body.player.kills).toBe(top.kills);
+    expect(body.player.guid).toBe(ranked[0].guid);
+    expect(body.player.name).toBe(ranked[0].name);
+    expect(body.player.kills).toBe(ranked[0].kills);
+    // Rank global con el criterio por defecto del leaderboard (kills desc, nombre asc).
+    expect(body.rank).toBe(1);
+
+    const second = await req().get(`/api/players/${ranked[1].guid}`);
+    expect(second.status).toBe(200);
+    expect((second.body as { rank: number | null }).rank).toBe(2);
+
     expect(body.recentEvents.length).toBeLessThanOrEqual(20);
     for (const event of body.recentEvents) {
       expect(['kill', 'death']).toContain(event.direction);
-      expect(event.opponentGuid).not.toBe(top.guid);
+      expect(event.opponentGuid).not.toBe(ranked[0].guid);
     }
     expect(body.byServer.length).toBeGreaterThanOrEqual(0);
   });

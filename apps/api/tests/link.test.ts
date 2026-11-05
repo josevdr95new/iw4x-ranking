@@ -34,7 +34,7 @@ describe('Vinculación cuenta ↔ GUID', () => {
     const body = res.body as {
       status: string;
       windowMinutes: number;
-      candidates: Array<{ guid: string; name: string; lastConnection: string }>;
+      candidates: Array<{ guid: string; name: string; lastConnection: string; server: string | null }>;
     };
     expect(body.status).toBe('candidates');
     expect(body.windowMinutes).toBe(10);
@@ -44,7 +44,12 @@ describe('Vinculación cuenta ↔ GUID', () => {
       const link = await prisma.playerLink.findUnique({ where: { guid: candidate.guid } });
       expect(link).toBeNull();
       expect(Number.isNaN(Date.parse(candidate.lastConnection))).toBe(false);
+      // Campo nuevo: server (etiqueta o null si no hay datos).
+      expect('server' in candidate).toBe(true);
+      expect(candidate.server === null || typeof candidate.server === 'string').toBe(true);
     }
+    // Con el mock (kills con ServerId), al menos un candidato debe tener server conocido.
+    expect(body.candidates.some((candidate) => candidate.server !== null)).toBe(true);
   });
 
   it('complete con guid vincula la cuenta (uno a uno) y /me lo refleja', async () => {

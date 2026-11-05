@@ -40,10 +40,12 @@ npm run dev:api                           # http://localhost:3000
 | Comando          | Descripción                                            |
 | ---------------- | ------------------------------------------------------ |
 | `npm run dev:api`  | API en modo watch (tsx)                               |
+| `npm run dev:web`  | Frontend en modo dev (vite, puerto 5173)              |
 | `npm run build`    | Compila apps/api → `dist/`                            |
 | `npm run start:api`| Ejecuta el build compilado                            |
 | `npm run sync`     | Corre una sincronización manual (CLI)                 |
 | `npm run mock:db`  | Genera la SQLite mock de IW4MAdmin                    |
+| `npm run mock:refresh-connections` | Refresca `LastConnection` de 3 jugadores del mock (para probar vinculación GUID) |
 | `npm run test`     | Tests (vitest)                                        |
 | `npm run smoke`    | Prueba de humo end-to-end contra la API corriendo     |
 

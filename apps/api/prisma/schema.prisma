@@ -37,6 +37,7 @@ model Player {
   id              Int         @id @default(autoincrement())
   guid            String      @unique // NetworkId como string decimal (puede superar 2^53)
   name            String      @default("unknown") // último nombre conocido (CurrentName ?? Name)
+  lastServer      String?     // servidor de la última conexión (EFClientConnectionHistory si la fuente lo expone)
   kills           Int         @default(0)
   deaths          Int         @default(0)
   kd              Float       @default(0)

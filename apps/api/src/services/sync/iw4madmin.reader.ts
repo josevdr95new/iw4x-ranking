@@ -256,6 +256,46 @@ export class IW4MAdminReader {
   }
 
   /**
+   * Servidor de la ÚLTIMA CONEXIÓN por cliente, desde EFClientConnectionHistory
+   * (tabla presente en IW4MAdmin reales, ausente en el mock). Devuelve el
+   * ServerId crudo; la resolución de etiqueta la hace el caller con readServerLabels().
+   * Si la tabla/columnas esenciales no existen, devuelve mapa vacío (defensivo).
+   */
+  readLastServerByClient(): Map<number, number> {
+    const map = new Map<number, number>();
+    const table = 'EFClientConnectionHistory';
+    const cols = this.getColumns(table);
+    if (cols.length === 0) return map; // tabla ausente: comportamiento normal con el mock
+    const missing = ['ClientId', 'ServerId'].filter((col) => !cols.includes(col));
+    if (missing.length > 0) {
+      this.warnings.push(`[${table}] faltan columnas (${missing.join(', ')}): se omite el servidor de conexión.`);
+      return map;
+    }
+    if (!cols.includes('Time')) {
+      this.warnings.push(`[${table}] sin columna Time: se omite el servidor de conexión.`);
+      return map;
+    }
+    try {
+      // Truco documentado de SQLite: con MAX(), las columnas bare (ClientId/ServerId)
+      // provienen de la fila que contiene el máximo → última conexión por cliente.
+      const rows = this.assertOpen()
+        .prepare(`SELECT "ClientId" AS clientId, "ServerId" AS serverId, MAX("Time") FROM "${table}" GROUP BY "ClientId"`)
+        .all() as Array<Row>;
+      for (const row of rows) {
+        const clientId = toNumber(row['clientId']);
+        const serverId = toNumber(row['serverId']);
+        if (Number.isInteger(clientId) && clientId > 0 && Number.isInteger(serverId)) {
+          map.set(clientId, serverId);
+        }
+      }
+    } catch (err) {
+      this.warnings.push(`[${table}] lectura falló: ${errMessage(err)}`);
+      return new Map();
+    }
+    return map;
+  }
+
+  /**
    * Kill events de forma incremental (Time > afterEpoch), ordenados por tiempo.
    * Devuelve como mucho `limit` filas; `hasMore` indica si hay más que leer.
    */

@@ -36,12 +36,9 @@ jobs:
       - name: Test API (vitest)
         run: npm test -w apps/api
 
-      # TODO: descomentar cuando exista apps/web/package.json
-      # (apps/web es hoy un placeholder README; el frontend se está
-      # implementando en paralelo).
-      # - name: Build Web
-      #   run: npm run build -w apps/web
+      - name: Build Web
+        run: npm run build -w apps/web
 
       - name: Smoke (build y tests OK)
         if: success()
-        run: echo "CI OK — build y tests de la API pasaron en Node 20 / ubuntu-latest"
+        run: echo "CI OK — build y tests de la API y la web pasaron en Node 20 / ubuntu-latest"

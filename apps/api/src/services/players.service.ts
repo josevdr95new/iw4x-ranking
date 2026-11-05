@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { clampInt, GUID_PATTERN } from '../lib/validation.js';
+import { computeDefaultRank } from './ranking.service.js';
 
 type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { link: { select: { guid: true } } } }>;
 
@@ -35,6 +36,13 @@ export interface KillEventDto {
 
 export interface PlayerProfileDto {
   player: PlayerDto;
+  /**
+   * Posición global en el ranking por defecto (kills desc, empate por nombre asc
+   * — el mismo orden de GET /api/leaderboard con sus valores por defecto).
+   * null si el jugador no clasifica en ese ranking (reservado; con los criterios
+   * actuales todo jugador sincronizado tiene rank).
+   */
+  rank: number | null;
   recentEvents: KillEventDto[];
   byServer: Array<{ server: string; kills: number; deaths: number }>;
 }
@@ -82,6 +90,7 @@ function assertValidGuid(guidRaw: string): string {
 export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDto> {
   const guid = assertValidGuid(guidRaw);
   const player = await getPlayerOrThrow(guid);
+  const rank = await computeDefaultRank(player.kills, player.name);
 
   const events = await prisma.killEvent.findMany({
     where: { OR: [{ originGuid: guid }, { targetGuid: guid }] },
@@ -130,6 +139,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
 
   return {
     player: toPlayerDto(player),
+    rank,
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),
   };

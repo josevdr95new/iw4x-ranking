@@ -153,8 +153,16 @@ Request: `{ "guid": "263534314041025950" }`
 Response **200**:
 
 ```json
-{ "status": "linked", "guid": "263534314041025950", "name": "ZombieSlayer69", "linkedAt": "2026-11-05T22:06:10.000Z" }
+{
+  "status": "linked",
+  "guid": "263534314041025950",
+  "name": "ZombieSlayer69",
+  "server": "192.0.2.5",
+  "linkedAt": "2026-11-05T22:06:10.000Z"
+}
 ```
+
+`server` es el último servidor conocido del jugador (misma resolución que en los candidatos: conexión si la fuente la expone, si no último evento registrado; `null` si no hay dato).
 
 Errores: `400 VALIDATION_ERROR` (formato no numérico), `404 PLAYER_NOT_FOUND`, `409 USER_ALREADY_LINKED`, `409 GUID_ALREADY_LINKED`.
 
@@ -200,7 +208,8 @@ Response **200** (ejemplo real):
       "timePlayed": 593392,
       "connections": 29,
       "skill": 17.63,
-      "lastConnection": "2026-11-02T21:59:06.318Z"
+      "lastConnection": "2026-11-02T21:59:06.318Z",
+      "linked": false
     },
     {
       "rank": 2,
@@ -212,13 +221,18 @@ Response **200** (ejemplo real):
       "timePlayed": 521415,
       "connections": 424,
       "skill": 20.23,
-      "lastConnection": "2026-10-04T21:59:06.318Z"
+      "lastConnection": "2026-10-04T21:59:06.318Z",
+      "linked": true
     }
   ]
 }
 ```
 
-Unidades: `timePlayed` en **segundos**; `rank` es global según la página actual. Errores: `400 VALIDATION_ERROR` (p. ej. `sort=hacks`).
+Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación).
+
+> **`rank` es SIEMPRE la posición GLOBAL** del jugador en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, el único match de un jugador que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
+
+Errores: `400 VALIDATION_ERROR` (p. ej. `sort=hacks`).
 
 ---
 
@@ -243,6 +257,7 @@ Response **200** (ejemplo real, truncado):
     "lastConnection": "2026-11-02T21:59:06.318Z",
     "linked": false
   },
+  "rank": 1,
   "recentEvents": [
     {
       "id": 8925,
@@ -266,6 +281,7 @@ Response **200** (ejemplo real, truncado):
 
 Notas para el frontend:
 
+- `rank`: posición global del jugador con el **mismo criterio por defecto del leaderboard** (`sort=kills&order=desc`, empate por `name` asc). Es `null` solo si el jugador no clasifica en ese ranking (con los criterios actuales, todo jugador sincronizado tiene rank). Evita hacer lookup al top-N para calcular la posición.
 - `recentEvents`: últimos 20 eventos del jugador, más reciente primero. `direction` es `kill` (el jugador fue el origen) o `death` (fue el objetivo). `isKill: false` = evento no letal registrado por IW4MAdmin.
 - `weapon` es el **id crudo** (número como string) que guarda IW4MAdmin; el mapping a nombre de arma no está implementado aún.
 - `server` puede ser `null` si la fuente no expone servidor (columna `ServerId` ausente en EFClientKill o tabla EFServer sin datos).
@@ -320,29 +336,26 @@ Response **200** (ejemplo real de primera corrida con mock):
 
 `warnings` acumula problemas no fatales del esquema fuente (columnas/tablas ausentes) — el sync continúa con lo que pueda leer. Errores: `401`, `503 SYNC_NOT_CONFIGURED`, `503 SYNC_SOURCE_UNAVAILABLE`.
 
-### `GET /api/sync/status` 🔒
+### `GET /api/sync/status` (público, sin auth)
+
+> **Cambio de contrato (v0.2):** antes requería auth y devolvía el historial de corridas (`lastRun`, `runs`). Ahora es público y ligero, pensado para mostrar "último sync" sin login.
 
 Response **200**:
 
 ```json
 {
+  "lastSyncAt": "2026-11-05T22:50:07.723Z",
   "configured": true,
   "intervalMinutes": 0,
-  "windowMinutes": 10,
-  "lastRun": {
-    "id": 2,
-    "startedAt": "2026-11-05T22:02:01.432Z",
-    "finishedAt": "2026-11-05T22:02:02.042Z",
-    "ok": true,
-    "playersSynced": 50,
-    "killEventsSynced": 0,
-    "warnings": []
-  },
-  "runs": [ "…últimas 10 corridas, más reciente primero…" ]
+  "windowMinutes": 10
 }
 ```
 
-`killEventsSynced: 0` en corridas posteriores = incremental sin novedades (comportamiento esperado).
+- `lastSyncAt`: timestamp ISO de la última sincronización **exitosa** (`null` si nunca hubo).
+- `configured`: si `IW4MADMIN_DB_PATH` está seteada.
+- `intervalMinutes` / `windowMinutes`: config activa (sync automático y ventana de vinculación).
+
+Útil para avisar al usuario "datos actualizados hace X minutos" o "sin datos aún — corre el sync". Este endpoint NO dispara sincronizaciones (para eso, `POST /api/sync`).
 
 ---
 
@@ -357,7 +370,7 @@ Response **200**:
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
 | POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula |
 | GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable |
-| GET    | `/api/players/:guid`      | —    | Perfil + eventos recientes + por servidor |
+| GET    | `/api/players/:guid`      | —    | Perfil + `rank` global + eventos recientes + por servidor |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | POST   | `/api/sync`               | ✅   | Dispara sincronización |
-| GET    | `/api/sync/status`        | ✅   | Estado/últimas corridas de sync |
+| GET    | `/api/sync/status`        | —    | `{lastSyncAt, configured, intervalMinutes, windowMinutes}` (público) |

@@ -14,22 +14,12 @@ export interface SyncResult {
   warnings: string[];
 }
 
-export interface SyncRunDto {
-  id: number;
-  startedAt: string;
-  finishedAt: string | null;
-  ok: boolean;
-  playersSynced: number;
-  killEventsSynced: number;
-  warnings: string[];
-}
-
-export interface SyncStatusDto {
+export interface PublicSyncStatusDto {
+  /** Timestamp (ISO) de la última sincronización EXITOSA; null si nunca hubo. */
+  lastSyncAt: string | null;
   configured: boolean;
   intervalMinutes: number;
   windowMinutes: number;
-  lastRun: SyncRunDto | null;
-  runs: SyncRunDto[];
 }
 
 const EVENT_BATCH = 2_000;
@@ -56,26 +46,6 @@ function toSlices<T>(rows: T[], size: number): T[][] {
     slices.push(rows.slice(i, i + size));
   }
   return slices;
-}
-
-function toRunDto(run: {
-  id: number;
-  startedAt: Date;
-  finishedAt: Date | null;
-  ok: boolean;
-  playersSynced: number;
-  killEventsSynced: number;
-  warnings: string | null;
-}): SyncRunDto {
-  return {
-    id: run.id,
-    startedAt: run.startedAt.toISOString(),
-    finishedAt: run.finishedAt?.toISOString() ?? null,
-    ok: run.ok,
-    playersSynced: run.playersSynced,
-    killEventsSynced: run.killEventsSynced,
-    warnings: run.warnings ? run.warnings.split('\n').filter((line) => line.trim() !== '') : [],
-  };
 }
 
 /**
@@ -121,13 +91,25 @@ export async function runSync(): Promise<SyncResult> {
         warnings.push(`[EFClientKill] agregaciones: ${errMessage(err)}`);
       }
 
+      // Etiquetas de servidor + última conexión por cliente (defensivo).
+      const serverLabels = reader.readServerLabels();
+      let lastServerByClient = new Map<number, number>();
+      try {
+        lastServerByClient = reader.readLastServerByClient();
+      } catch (err) {
+        warnings.push(`[EFClientConnectionHistory] error: ${errMessage(err)}`);
+      }
+
       // ── Fase 3: upsert de jugadores con stats agregadas ───────
       for (const client of clients) {
         try {
           const kills = aggregates.kills.get(client.clientId) ?? 0;
           const deaths = aggregates.deaths.get(client.clientId) ?? 0;
+          const rawServerId = lastServerByClient.get(client.clientId);
+          const serverLabel = rawServerId !== undefined ? serverLabels.get(rawServerId) : undefined;
           const stats = {
             name: client.name ?? 'unknown',
+            lastServer: serverLabel ?? (rawServerId !== undefined ? `server-${rawServerId}` : null),
             kills,
             deaths,
             kd: round2(computeKd(kills, deaths)),
@@ -151,7 +133,6 @@ export async function runSync(): Promise<SyncResult> {
       // ── Fase 4: kill events incrementales ─────────────────────
       try {
         const clientGuidById = new Map<number, string>(clients.map((client) => [client.clientId, client.guid] as const));
-        const serverLabels = reader.readServerLabels();
         const sourceKey = sourcePath;
         const state = await prisma.syncState.findUnique({ where: { source: sourceKey } });
         let afterEpoch = state?.lastKillEpoch ?? 0;
@@ -232,14 +213,17 @@ export async function runSync(): Promise<SyncResult> {
   };
 }
 
-export async function getSyncStatus(): Promise<SyncStatusDto> {
-  const runs = await prisma.syncRun.findMany({ orderBy: [{ startedAt: 'desc' }], take: 10 });
-  const dtos = runs.map(toRunDto);
+/** Estado público (sin auth) para el frontend: cuándo se sincronizó por última vez con éxito. */
+export async function getPublicSyncStatus(): Promise<PublicSyncStatusDto> {
+  const lastOk = await prisma.syncRun.findFirst({
+    where: { ok: true, finishedAt: { not: null } },
+    orderBy: [{ finishedAt: 'desc' }],
+    select: { finishedAt: true },
+  });
   return {
+    lastSyncAt: lastOk?.finishedAt?.toISOString() ?? null,
     configured: Boolean(env.iw4madminDbPath),
     intervalMinutes: env.syncIntervalMinutes,
     windowMinutes: env.linkWindowMinutes,
-    lastRun: dtos[0] ?? null,
-    runs: dtos,
   };
 }
