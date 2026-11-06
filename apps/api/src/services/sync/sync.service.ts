@@ -1,8 +1,9 @@
 import { env } from '../../config/env.js';
 import { prisma } from '../../lib/prisma.js';
-import { errMessage } from '../../lib/errors.js';
+import { Errors, errMessage } from '../../lib/errors.js';
 import { IW4MAdminReader } from './iw4madmin.reader.js';
 import type { KillAggregates, SourceClient } from './iw4madmin.reader.js';
+import { ingestGameLog } from './gamelog.reader.js';
 
 export interface SyncResult {
   ok: boolean;
@@ -25,6 +26,20 @@ export interface PublicSyncStatusDto {
 const EVENT_BATCH = 2_000;
 const INSERT_CHUNK = 500;
 const MAX_CHUNK_LOOPS = 50_000;
+
+/** true si hay ALGUNA fuente de stats configurada (IW4MAdmin o games_mp.log). */
+export function hasSyncSource(): boolean {
+  return Boolean(env.iw4madminDbPath) || Boolean(env.gameLogPath);
+}
+
+/**
+ * Intervalo efectivo de sync en MINUTOS (soporta fracciones: 30s → 0.5).
+ * SYNC_INTERVAL_SECONDS tiene prioridad sobre SYNC_INTERVAL_MINUTES.
+ */
+export function getEffectiveSyncIntervalMinutes(): number {
+  if (env.syncIntervalSeconds > 0) return env.syncIntervalSeconds / 60;
+  return env.syncIntervalMinutes;
+}
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
@@ -67,9 +82,18 @@ export async function runSync(): Promise<SyncResult> {
 
   const run = await prisma.syncRun.create({ data: { startedAt } });
 
+  // Fuentes combinables: se ingesta cada una si está configurada.
+  const hasIw4madmin = Boolean(env.iw4madminDbPath);
+  const hasGameLog = Boolean(env.gameLogPath);
+  if (!hasIw4madmin && !hasGameLog) {
+    await prisma.syncRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), ok: false, warnings: 'Sin fuente configurada' } }).catch(() => undefined);
+    throw Errors.syncNotConfigured();
+  }
+
   try {
+    if (hasIw4madmin) {
     const sourcePath = env.iw4madminDbPath;
-    if (!sourcePath) throw new Error('IW4MADMIN_DB_PATH no está configurado.');
+    if (!sourcePath) throw Errors.syncNotConfigured(); // narrows: hasIw4madmin ya lo garantiza
 
     const reader = new IW4MAdminReader(sourcePath);
     reader.open();
@@ -180,6 +204,29 @@ export async function runSync(): Promise<SyncResult> {
     } finally {
       reader.close();
     }
+    } // fin if (hasIw4madmin)
+
+    // ── Fuente 2: games_mp.log del servidor dedicado IW4x ────────
+    // Ingesta incremental por offset de bytes (LogIngestState). Cada línea se
+    // aplica exactamente una vez; tolera escrituras a medias y truncados.
+    if (hasGameLog) {
+      try {
+        const logResult = await ingestGameLog(env.gameLogPath!, env.gameServerAddress ?? null);
+        playersSynced += logResult.playersSynced;
+        killEventsSynced += logResult.killEventsSynced;
+        if (!logResult.ok) ok = false;
+        if (logResult.linesIgnored > 0) {
+          warnings.push(`[GameLog] ${logResult.linesIgnored} líneas no reconocidas (ignoradas).`);
+        }
+        if (logResult.eventsSkipped > 0) {
+          warnings.push(`[GameLog] ${logResult.eventsSkipped} eventos descartados por GUIDs inválidos.`);
+        }
+        warnings.push(...logResult.warnings);
+      } catch (err) {
+        ok = false;
+        warnings.push(`[GameLog] error: ${errMessage(err)}`);
+      }
+    }
   } catch (err) {
     ok = false;
     syncError = err;
@@ -222,8 +269,8 @@ export async function getPublicSyncStatus(): Promise<PublicSyncStatusDto> {
   });
   return {
     lastSyncAt: lastOk?.finishedAt?.toISOString() ?? null,
-    configured: Boolean(env.iw4madminDbPath),
-    intervalMinutes: env.syncIntervalMinutes,
+    configured: hasSyncSource(),
+    intervalMinutes: getEffectiveSyncIntervalMinutes(),
     windowMinutes: env.linkWindowMinutes,
   };
 }

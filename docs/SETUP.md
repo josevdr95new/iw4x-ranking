@@ -33,8 +33,11 @@ Variables (todas en `apps/api/.env`; la API también lee un `.env` en la raíz d
 | `DATABASE_URL`         | no (`file:./dev.db`) | SQLite propia. Las rutas relativas se resuelven contra `apps/api/prisma/` |
 | `JWT_SECRET`           | **sí en producción** | Secreto de firma JWT (≥16 chars). En dev, si falta, se usa un secreto efímero con warning |
 | `JWT_EXPIRES_IN`       | no (`7d`)   | Expiración del token (formato jsonwebtoken: `12h`, `7d`, …) |
-| `IW4MADMIN_DB_PATH`    | para sync   | Ruta a la SQLite de IW4MAdmin. Se abre **SIEMPRE read-only** |
+| `IW4MADMIN_DB_PATH`    | para sync por DB | Ruta a la SQLite de IW4MAdmin. Se abre **SIEMPRE read-only**. Alternativa: `GAME_LOG_PATH` |
+| `GAME_LOG_PATH`        | para sync por log | Ruta del `games_mp.log` del server dedicado IW4x (ver [Ingesta por log](#ingesta-por-log-del-server-dedicado)). Soporta rutas UNC (`\\servidor\share\games_mp.log`); usa comillas simples en `.env` para UNC |
+| `GAME_SERVER_ADDRESS`  | no          | Dirección guardada como servidor de los eventos (ej. `192.168.3.99:28961`) |
 | `SYNC_INTERVAL_MINUTES`| no (0)      | `> 0` activa sync automática cada N minutos |
+| `SYNC_INTERVAL_SECONDS`| no (0)      | Tiene **prioridad** sobre los minutos (ej. `30` = ingest casi en vivo) |
 | `LINK_WINDOW_MINUTES`  | no (10)     | Ventana para candidatos de vinculación GUID |
 | `CORS_ORIGIN`          | no (`http://localhost:5173`) | Orígenes CORS, separados por coma |
 
@@ -60,6 +63,8 @@ El mock genera **50 jugadores** con nombres realistas estilo MW2, **~9000 kill e
 npm run mock:db -- --out C:/temp/mi-mock.sqlite
 ```
 
+> ℹ️ **Estado actual de `dev.db`**: contiene SOLO datos reales ingestados del games_mp.log local. Para volver a demos: descomenta `IW4MADMIN_DB_PATH` en `apps/api/.env`, corre `npm run mock:db` (regenera `Database/Database.sqlite`), luego `prisma db push --force-reset` + `npm run sync` (el sync combina ambas fuentes si ambas están configuradas).
+
 > ⚠️ Si **regeneras** el mock, borra también `apps/api/prisma/dev.db` y repite `db:push` + `sync`: el cursor incremental de kill events (`SyncState`) asume una fuente que solo crece.
 
 ### Refrescar candidatos de vinculación (demo/E2E)
@@ -79,18 +84,104 @@ Smoke test end-to-end (con el server corriendo y datos sincronizados):
 npm run smoke       # 14 checks: auth, sync, leaderboard, perfil, historial, vinculación
 ```
 
-## 4B. Conectar un IW4MAdmin real
+## 4B. Servidor dedicado local de pruebas (configs oficiales AlterWare)
 
-1. Localiza la base de IW4MAdmin: `<carpeta de IW4MAdmin>/Database/Database.sqlite`.
-2. Ponla en `apps/api/.env`:
+El entorno real de pruebas usa las **configs oficiales** de [IW4ServerConfigs](https://git.alterware.dev/alterware/IW4ServerConfigs) (guía oficial: [IW4x Server Install Guide](https://forum.alterware.dev/t/iw4x-server-install-guide-windows/241)).
 
-```ini
-IW4MADMIN_DB_PATH=C:/IW4MAdmin/Database/Database.sqlite
+Instalación (una sola vez):
+
+1. Descarga el paquete: `https://git.alterware.dev/alterware/IW4ServerConfigs/archive/main.zip`
+2. Descomprime el contenido de la carpeta `iw4serverconfigs` en la raíz del juego (ej. `D:\Call of Duty 6\`): trae los bats `DedicatedServer*.bat`, `partyserver*.cfg`, playlists y `userraw\server.cfg` + `userraw\serverlan.cfg`.
+3. Edita `DedicatedServer.bat` con tus valores:
+   - `set GamePort=28961`
+   - `set LANMode=1` (no aparece en la lista pública; los clientes entran por IP)
+   - `set LogFile=2`
+   - **Importante**: el bat trae `start /W alterware-launcher.exe --update`. Déjalo comentado/elimínalo: actualizar el juego con el server corriendo puede corromper archivos. Corre `alterware-launcher.exe --update` solo cuando **NADA** del juego esté abierto.
+4. Edita `userraw\server.cfg` (estructura oficial) y aplica SIEMPRE estos requisitos del ranking:
+   - `set logfile "2"` + `set g_log "logs/games_mp.log"` (crítico: es el log que parsea la API)
+   - `set g_logSync "1"`
+   - `set sv_hostname "^7[^1RANKING^7] ^7Local Test Server"` (prefijo [RANKING])
+   - `set g_gametype "war"` y rotación con `addGametype war` + `addMap` (5 mapas stock: `mp_rust`, `mp_terminal`, `mp_highrise`, `mp_cross_fire` —ese es el nombre oficial en IW4x—, `mp_strike`)
+   - `set scr_testclients "4"` (el dvar existe en la build r5318; ver nota de bots abajo)
+   - `set rcon_password "<valor aleatorio>"`
+
+Arranque:
+
+```powershell
+& "D:\Call of Duty 6\DedicatedServer.bat"   # desde la raíz del juego
 ```
 
+Verificación: proceso `iw4x` vivo, puerto UDP 28961 escuchando (`Get-NetUDPEndpoint -LocalPort 28961`) y el log creciendo en `D:\Call of Duty 6\userraw\logs\games_mp.log` (ruta oficial de `g_log`; el juego APRENDE líneas entre partidas, no trunca el archivo salvo que se borre manualmente).
+
+**Nota bots**: `scr_testclients` es reconocido por la build (la consola imprime `Getting bots...`) pero en la práctica los bots NO se conectan a la partida (verificado en varias rotaciones). La actividad de stats requiere jugadores humanos reales.
+
+**Conectarse desde el cliente IW4x** (consola con ñ/tecla asignada, o menú):
+
+```
+connect 127.0.0.1:28961        ; desde ESTE mismo PC
+connect 192.168.3.99:28961     ; desde cualquier PC de la LAN (esta máquina es 192.168.3.99)
+```
+
+> El server real de la comunidad está en `192.168.2.251:28960` (otra máquina y otra subred). Ese server NO se administra desde este PC: solo es ingestable vía [modo log remoto](#modo-log-remoto-server-192168225128960).
+
+## 4C. Ingesta por log (del server dedicado)
+
+Alternativa (y hoy fuente principal) al reader de IW4MAdmin: la API lee **directamente el `games_mp.log`** que escribe el server dedicado. Configura en `apps/api/.env`:
+
+```ini
+GAME_LOG_PATH=D:/Call of Duty 6/userraw/logs/games_mp.log
+GAME_SERVER_ADDRESS=192.168.3.99:28961
+SYNC_INTERVAL_SECONDS=30     # ingest casi en vivo
+```
+
+- El sync **combina** las fuentes configuradas: `IW4MADMIN_DB_PATH` (si existe) + `GAME_LOG_PATH` (si existe). Si no hay ninguna → `503 SYNC_NOT_CONFIGURED`.
+- Formato parseado (formato clásico IW, verificado contra la build r5318):
+  - `J;<guid hex>;<clientnum>;<nombre>` → conexión (abre una **Session**; incrementa `connections`)
+  - `Q;<guid hex>;<clientnum>;<nombre>` → desconexión (cierra la Session)
+  - `K;<aguid>;<acid>;<ateam>;<aname>;<vguid>;<vcid>;<vteam>;<vname>;<weapon>;<dmg>;<mod>;<hitloc>` → kill (el `team` va ANTES del `name`; en kills "world" la víctima tiene guid vacío y vteam=`world`)
+  - `D;...` (mismo layout) → daño no letal: NO se almacena como evento (bloat), solo alimenta `damageDealt`/`damageTaken`
+  - `InitGame: \map\mp_rust\g_gametype\war\...` → estado mapa/modo que se etiqueta en cada evento (si la línea va sin infostring —como en la build actual— quedan `null`)
+  - `ShutdownGame:` → cierra todas las sesiones abiertas
+- GUIDs hex de 16 chars se convierten a **decimal BigInt** (`b94be6deca6c750c` → `13371660518428851948`) para coincidir con el esquema `Player` (NetworkId decimal).
+- El lector es **incremental por offset de bytes** (`LogIngestState`): cada línea se aplica exactamente una vez; tolera escrituras a medias (la última línea sin `\n` se procesa en el ciclo siguiente) y detecta truncados/rotaciones (reinicia el offset).
+- Derivados por jugador: `headshots` (hitloc head/helmet), `damageDealt`/`damageTaken`, `bestStreak` (kills consecutivas sin muerte; aproximación), `teamkills`, `matchesPlayed` (mapas distintos), `timePlayed` (suma de sesiones; abiertas = en curso con cap de 4h).
+- **Defensivo**: líneas no reconocidas → skip silencioso + contador (visible en `warnings` del sync); GUIDs corruptos → evento descartado + contador. Nunca rompe el sync.
+
+## 4D. Modo log remoto (server 192.168.2.251:28960)
+
+Para ingestar stats del **server real de la comunidad**, que corre en OTRA máquina (`192.168.2.251:28960`, subred `192.168.2.x` — este PC está en `192.168.3.x`), hay dos opciones:
+
+**(a) Compartir por SMB la carpeta de logs de esa máquina** y leerla por UNC desde aquí:
+
+1. En `192.168.2.251`: comparte la carpeta de logs (ej. `D:\Call of Duty 6\userraw\logs`) como `iw4x-logs` con permiso de **LECTURA** para este PC. El server de esa máquina necesita `logfile 2` en su `server.cfg` (sin eso no hay games_mp.log que parsear).
+2. En este PC, `apps/api/.env`:
+
+```ini
+GAME_LOG_PATH='\\192.168.2.251\iw4x-logs\games_mp.log'
+GAME_SERVER_ADDRESS=192.168.2.251:28960
+```
+
+> ⚠️ En `.env`, para rutas UNC usa **comillas simples** (dotenv no toca los backslashes) y verifica que la ruta no contenga secuencias `\n` si usas comillas dobles. Usa SIEMPRE la misma escritura de la ruta (el offset del cursor se guarda por ruta exacta).
+
+**(b) Correr la API directamente en esa máquina** (clonar el repo ahí, `npm install`, `db:push`, y configurar `GAME_LOG_PATH` con la ruta local del log). Recomendado si la red entre subredes (`192.168.2.x` ↔ `192.168.3.x`) bloquea SMB o da latencia.
+
+## 4E. Server dedicado en otra PC (192.168.2.251)
+
+Si quisieras montar en esa máquina un server **puro** (sin cliente de juego):
+
+1. Copia la instalación del juego a `192.168.2.251` y recórtala con [shrink-iw4x](https://github.com/mxve/shrink-iw4x) (elimina assets que el server dedicado no necesita → ~7GB).
+2. Instala las configs oficiales igual que en [4B](#4b-servidor-dedicado-local-de-pruebas-configs-oficiales-alterware) y **asegura `logfile 2`** + `g_log` en su `server.cfg` (sin log no hay ingesta).
+3. Comparte la carpeta de logs por SMB y apunta la API de este PC por UNC ([4D](#4d-modo-log-remoto-server-192168225128960)), o corre la API en esa máquina.
+
+## 4F. Conectar un IW4MAdmin real (alternativa)
+
+El reader de IW4MAdmin sigue disponible y es **combinable** con el log ([4C](#4c-ingesta-por-log-del-server-dedicado)). Si solo usas IW4MAdmin:
+
+1. Localiza la base: `<carpeta de IW4MAdmin>/Database/Database.sqlite`.
+2. En `apps/api/.env`: `IW4MADMIN_DB_PATH=C:/IW4MAdmin/Database/Database.sqlite`
 3. Corre `npm run sync` (o `POST /api/sync` autenticado) y revisa el campo `warnings` del resultado.
 
-**Seguridad del sync:**
+**Seguridad del sync (reader IW4MAdmin):**
 
 - La fuente se abre con better-sqlite3 en modo `readonly: true` + `fileMustExist: true` → **la API nunca escribe en la DB de IW4MAdmin**.
 - Antes de consultar, lee el esquema real con `PRAGMA table_info` de `EFClient`, `EFClientKill` y `EFServer`; solo usa columnas presentes (`CurrentName ?? Name`, `IsKill`, `Damage`, `Weapon`, `ServerId`, … opcionales).
@@ -98,6 +189,7 @@ IW4MADMIN_DB_PATH=C:/IW4MAdmin/Database/Database.sqlite
 - Formatos tolerados en fechas: TEXT ISO-8601 (`2024-05-01T12:00:00Z`, con espacio, sin zona) y epoch numérico (segundos o ms).
 - `NetworkId` se lee con `safeIntegers: true` (BigInt) y se almacena como string decimal — soporta GUIDs de 64 bits sin pérdida.
 - Agregaciones (kills/deaths/K/D/tiempo/conexiones/skill) se recalculan completas en cada sync con `GROUP BY`; los kill events individuales se importan **incrementalmente** (`Time > último epoch sincronizado`), por lo que re-sincronizar es barato.
+- Si ambas fuentes están activas a la vez: IW4MAdmin recalcula agregados completos (su fuente es autoritativa) y el log añade sus eventos/delta incrementalmente encima.
 
 ## 5. Ejecutar
 
@@ -116,7 +208,7 @@ Sync automático: setea `SYNC_INTERVAL_MINUTES=30` (ej.) en `apps/api/.env`; al 
 npm test
 ```
 
-Vitest (36 tests): auth (registro/login/me/validaciones), sync defensivo con DB mock determinista (agregaciones, incrementalidad), leaderboard (orden/búsqueda/paginación/minMatches), perfil, historial y flujo completo de vinculación GUID. Los tests usan su propia SQLite (`apps/api/prisma/test.db`) y su propio mock (`apps/api/tests/data/`), nunca tu `dev.db`.
+Vitest (64 tests): auth (registro/login/me/validaciones), sync defensivo con DB mock determinista (agregaciones, incrementalidad), ingesta por games_mp.log con logs sintéticos (J/K/D/Q, InitGame con estado, world/suicidio/teamkill/headshot, sesiones, offsets en bytes, truncados), armas/mapas (ranking global, desglose por jugador, favoritos) y flujo completo de vinculación GUID. Los tests usan su propia SQLite (`apps/api/prisma/test.db`) y sus propios fixtures (`apps/api/tests/data/`), nunca tu `dev.db`.
 
 ## 7. Frontend
 
@@ -126,11 +218,14 @@ Vitest (36 tests): auth (registro/login/me/validaciones), sync defensivo con DB 
 
 | Síntoma | Causa / solución |
 | ------- | ---------------- |
-| `503 SYNC_NOT_CONFIGURED` | Falta `IW4MADMIN_DB_PATH` en `apps/api/.env` (o el archivo `.env` no existe) |
+| `503 SYNC_NOT_CONFIGURED` | No hay fuente: configura `IW4MADMIN_DB_PATH` **o** `GAME_LOG_PATH` en `apps/api/.env` |
 | `503 SYNC_SOURCE_UNAVAILABLE` | Ruta incorrecta o archivo bloqueado; usa barras normales en el path |
+| `[GameLog] el archivo no existe` | `GAME_LOG_PATH` mal escrito o el server no ha corrido nunca con `logfile 2` |
+| `[GameLog] 12 líneas no reconocidas` | Normal: separadores `----`, `ExitLevel` y `ShutdownGame` se ignoran a propósito (se reflejan en el contador, no son error) |
 | `sync` con `warnings` de columnas | Versión de IW4MAdmin con esquema distinto: es comportamiento defensivo; revisa qué columnas lista el warning |
-| Leaderboard vacío | No corriste `npm run sync` después de crear/mock la DB |
-| `link/complete` devuelve 0 candidatos | El jugador no se conectó en los últimos `LINK_WINDOW_MINUTES` minutos, o no hubo sync desde entonces → con el mock: `npm run mock:refresh-connections` + `npm run sync` |
+| Leaderboard vacío | Sin jugadores: con fuente log, el leaderboard se llena cuando **jugadores reales** se conecten y maten (los bots de `scr_testclients` no llegaron a aparecer en la build r5318) |
+| El log no aparece en `userraw\logs\` | El `g_log` de la cfg oficial escribe `logs/games_mp.log`; si tu cfg dice `games_mp.log` a secas, cae en `userraw\` raíz. Usa SIEMPRE la ruta real en `GAME_LOG_PATH` |
+| `link/complete` devuelve 0 candidatos | El jugador no se conectó en los últimos `LINK_WINDOW_MINUTES` minutos, o no hubo sync desde entonces → con SYNC_INTERVAL_SECONDS=30 el ingest es casi en vivo; con el mock: `npm run mock:refresh-connections` + `npm run sync` |
 | Tokens se invalidan al reiniciar | `JWT_SECRET` no configurado en dev (se genera efímero); configúralo |
 
 ## CI
@@ -138,7 +233,7 @@ Vitest (36 tests): auth (registro/login/me/validaciones), sync defensivo con DB 
 El workflow [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) corre en cada push a `main` y en cada pull request (runner `ubuntu-latest`, Node 20 con cache de npm). Valida:
 
 1. **Instalación limpia**: `npm ci` en la raíz (instala los workspaces y genera el cliente de Prisma).
-2. **API**: `npm run build -w apps/api` (`prisma generate` + `tsc`) y `npm test -w apps/api` (los 36 tests de vitest). No necesita pasos previos: el global setup de vitest crea su propia `test.db` y su DB mock de IW4MAdmin, sin tocar `dev.db` ni bases reales.
+2. **API**: `npm run build -w apps/api` (`prisma generate` + `tsc`) y `npm test -w apps/api` (los 64 tests de vitest). No necesita pasos previos: el global setup de vitest crea su propia `test.db` y sus fixtures (DB mock de IW4MAdmin y logs sintéticos), sin tocar `dev.db` ni bases reales.
 3. **Web**: el paso de build del frontend está comentado con un TODO hasta que exista `apps/web/package.json` (hoy `apps/web` es un placeholder).
 4. **Smoke**: paso final que confirma que el pipeline completo terminó OK.
 

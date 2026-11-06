@@ -253,6 +253,15 @@ Response **200** (ejemplo real, truncado):
     "timePlayed": 593392,
     "connections": 29,
     "skill": 17.63,
+    "headshots": 61,
+    "headshotPct": 21.11,
+    "damageDealt": 25870,
+    "damageTaken": 18322,
+    "bestStreak": 9,
+    "teamkills": 2,
+    "matchesPlayed": 14,
+    "favoriteWeapon": "ak47",
+    "favoriteMap": "mp_rust",
     "firstConnection": "2026-02-27T21:59:06.318Z",
     "lastConnection": "2026-11-02T21:59:06.318Z",
     "linked": false
@@ -266,15 +275,14 @@ Response **200** (ejemplo real, truncado):
       "direction": "kill",
       "isKill": true,
       "damage": 248,
-      "weapon": "0",
-      "server": "192.0.2.1",
+      "weapon": "ak47",
+      "server": "192.168.3.99:28961",
       "opponentGuid": "977082674952689500",
       "opponentName": "Chopper_Gunner"
     }
   ],
   "byServer": [
-    { "server": "192.0.2.3", "kills": 20, "deaths": 10 },
-    { "server": "192.0.2.9", "kills": 25, "deaths": 4 }
+    { "server": "192.168.3.99:28961", "kills": 20, "deaths": 10 }
   ]
 }
 ```
@@ -283,8 +291,10 @@ Notas para el frontend:
 
 - `rank`: posición global del jugador con el **mismo criterio por defecto del leaderboard** (`sort=kills&order=desc`, empate por `name` asc). Es `null` solo si el jugador no clasifica en ese ranking (con los criterios actuales, todo jugador sincronizado tiene rank). Evita hacer lookup al top-N para calcular la posición.
 - `recentEvents`: últimos 20 eventos del jugador, más reciente primero. `direction` es `kill` (el jugador fue el origen) o `death` (fue el objetivo). `isKill: false` = evento no letal registrado por IW4MAdmin.
-- `weapon` es el **id crudo** (número como string) que guarda IW4MAdmin; el mapping a nombre de arma no está implementado aún.
-- `server` puede ser `null` si la fuente no expone servidor (columna `ServerId` ausente en EFClientKill o tabla EFServer sin datos).
+- `weapon`: con fuente IW4MAdmin es el **id crudo** (número como string); con fuente log (games_mp.log) es el **nombre base del arma** (`ak47`, `m1014`, ...). El mapping a nombre legible no está implementado aún.
+- `server` puede ser `null` si la fuente no expone servidor. Con fuente log es el valor de `GAME_SERVER_ADDRESS`.
+- Campos nuevos (fuente log): `headshots`/`headshotPct` (hitloc `head`/`helmet` sobre kills), `damageDealt`/`damageTaken` (suma de daño de líneas K + D), `bestStreak` (mejor racha de kills sin muerte intercalada; aprox: solo eventos K almacenados), `teamkills` (ateam == vteam), `matchesPlayed` (mapas distintos con actividad), `favoriteWeapon`/`favoriteMap` (arma/mapa con más kills; `null` sin actividad).
+- `timePlayed` (fuente log) = suma de sesiones reales J→Q (las abiertas cuentan como en curso, cap 4h).
 - `linked`: si el GUID tiene cuenta web vinculada.
 
 Errores: `400 VALIDATION_ERROR` (GUID no numérico), `404 PLAYER_NOT_FOUND`.
@@ -309,6 +319,90 @@ Response **200** (ejemplo con `days=3`):
 ```
 
 Errores: `400 VALIDATION_ERROR` (`days` fuera de 1–90), `404 PLAYER_NOT_FOUND`.
+
+### `GET /api/players/:guid/weapons`
+
+Desglose por arma del jugador: kills, daño, headshots y muertes por arma (incluye armas con las que solo recibió muertes). `favoriteWeapon` = arma con más kills (empate: más daño, luego nombre).
+
+Response **200**:
+
+```json
+{
+  "guid": "341831007923465200",
+  "name": "CarePackage_Sniper",
+  "favoriteWeapon": "ak47",
+  "totalKills": 289,
+  "weapons": [
+    { "weapon": "ak47", "kills": 210, "damage": 18350, "headshots": 52, "headshotPct": 24.76, "deaths": 31 },
+    { "weapon": "m1014", "kills": 44, "damage": 3960, "headshots": 0, "headshotPct": 0, "deaths": 12 },
+    { "weapon": "ak74u", "kills": 0, "damage": 0, "headshots": 0, "headshotPct": 0, "deaths": 18 }
+  ]
+}
+```
+
+Errores: `400 VALIDATION_ERROR`, `404 PLAYER_NOT_FOUND`.
+
+### `GET /api/players/:guid/maps`
+
+Desglose kills/deaths/headshots/daño por mapa (con los gametypes registrados vía `InitGame`). `favoriteMap` = mapa con más kills (empate: más daño).
+
+Response **200**:
+
+```json
+{
+  "guid": "341831007923465200",
+  "name": "CarePackage_Sniper",
+  "favoriteMap": "mp_rust",
+  "maps": [
+    { "map": "mp_rust", "kills": 120, "deaths": 45, "headshots": 30, "damageDealt": 9800, "gametypes": ["war"] },
+    { "map": "mp_terminal", "kills": 85, "deaths": 51, "headshots": 12, "damageDealt": 6210, "gametypes": ["war"] }
+  ]
+}
+```
+
+> ⚠️ Con la build actual del server local, las líneas `InitGame` del log van **sin infostring**: `map`/`gametype` quedan `null` en los eventos y el desglose por mapa aparece como `"map": "unknown"` hasta que la build escriba el infostring (el parser soporta ambos formatos).
+
+Errores: `400 VALIDATION_ERROR`, `404 PLAYER_NOT_FOUND`.
+
+### `GET /api/weapons`
+
+Ranking global de armas sobre los kill events (`isKill=true` con arma conocida). Mismo estilo de respuesta que el leaderboard: `rank` es SIEMPRE la posición global por `kills` desc (arma asc), independiente del `sort` pedido.
+
+Query params: `sort=kills|damage|victims|headshots` (default `kills`), `order=asc|desc` (default `desc`), `page` (default 1), `pageSize` (default 20, máx 100).
+
+Response **200**:
+
+```json
+{
+  "page": 1,
+  "pageSize": 20,
+  "total": 2,
+  "totalPages": 1,
+  "sort": "kills",
+  "order": "desc",
+  "totalKills": 5,
+  "weapons": [
+    { "rank": 1, "weapon": "ak47", "kills": 3, "damage": 350, "victims": 2, "killShare": 60, "headshots": 1, "headshotPct": 33.33 },
+    { "rank": 2, "weapon": "m1014", "kills": 2, "damage": 185, "victims": 2, "killShare": 40, "headshots": 1, "headshotPct": 50 }
+  ]
+}
+```
+
+- `killShare`: % de esta arma sobre `totalKills` (kills con arma conocida).
+- `victims`: víctimas distintas que ha tenido el arma.
+
+Errores: `400 VALIDATION_ERROR` (sort inválido, page/pageSize fuera de rango).
+
+### Datos disponibles desde el log (y qué NO está disponible)
+
+| Disponible (fuente games_mp.log) | No disponible desde el log |
+| -------------------------------- | -------------------------- |
+| kills, muertes, daño (K y D) | **accuracy/disparos** (el log no registra disparos, solo impactos) |
+| arma base (`ak47`, `m1014`, ...) | attachments (ACOG, silenciador... el log reporta el arma base) |
+| hitloc/headshot (head, helmet, chest...) | racha "oficial" del juego (la nuestra es una aproximación por eventos K) |
+| teamkill (team atacante == víctima) | XP/score de la partida |
+| mapa/modo (si `InitGame` trae infostring) | tiempo de juego exacto por partida (aproximado con J→Q) |
+| sesiones J→Q (conexión/desconexión) | ping, IP, SteamID de los jugadores |
 
 ---
 
@@ -352,8 +446,8 @@ Response **200**:
 ```
 
 - `lastSyncAt`: timestamp ISO de la última sincronización **exitosa** (`null` si nunca hubo).
-- `configured`: si `IW4MADMIN_DB_PATH` está seteada.
-- `intervalMinutes` / `windowMinutes`: config activa (sync automático y ventana de vinculación).
+- `configured`: si hay alguna fuente de stats configurada (`IW4MADMIN_DB_PATH` **o** `GAME_LOG_PATH`).
+- `intervalMinutes` / `windowMinutes`: config activa (sync automático y ventana de vinculación). Si se usa `SYNC_INTERVAL_SECONDS`, `intervalMinutes` refleja el equivalente en minutos (fraccional, ej. `0.5` para 30s).
 
 Útil para avisar al usuario "datos actualizados hace X minutos" o "sin datos aún — corre el sync". Este endpoint NO dispara sincronizaciones (para eso, `POST /api/sync`).
 
@@ -370,7 +464,10 @@ Response **200**:
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
 | POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula |
 | GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable |
-| GET    | `/api/players/:guid`      | —    | Perfil + `rank` global + eventos recientes + por servidor |
+| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
-| POST   | `/api/sync`               | ✅   | Dispara sincronización |
+| GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |
+| GET    | `/api/players/:guid/maps`    | — | Desglose por mapa del jugador + favorito |
+| GET    | `/api/weapons`            | —    | Ranking global de armas (kills/damage/victims/headshots) |
+| POST   | `/api/sync`               | ✅   | Dispara sincronización (combina IW4MAdmin y/o games_mp.log) |
 | GET    | `/api/sync/status`        | —    | `{lastSyncAt, configured, intervalMinutes, windowMinutes}` (público) |

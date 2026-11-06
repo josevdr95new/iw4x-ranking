@@ -11,11 +11,13 @@ export function req(): request.Test {
 /** Borra todas las filas respetando las FKs. */
 export async function resetDb(): Promise<void> {
   await prisma.killEvent.deleteMany();
+  await prisma.session.deleteMany();
   await prisma.playerLink.deleteMany();
   await prisma.linkAttempt.deleteMany();
   await prisma.player.deleteMany();
   await prisma.syncRun.deleteMany();
   await prisma.syncState.deleteMany();
+  await prisma.logIngestState.deleteMany();
   await prisma.user.deleteMany();
 }
 

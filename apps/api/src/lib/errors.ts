@@ -64,7 +64,7 @@ export const Errors = {
     return new AppError(404, 'PLAYER_NOT_FOUND', guid ? `No se encontró ningún jugador con GUID ${guid}.` : 'Jugador no encontrado.');
   },
   syncNotConfigured(): AppError {
-    return new AppError(503, 'SYNC_NOT_CONFIGURED', 'IW4MADMIN_DB_PATH no está configurado; no se puede sincronizar.');
+    return new AppError(503, 'SYNC_NOT_CONFIGURED', 'No hay fuente de stats configurada: falta IW4MADMIN_DB_PATH o GAME_LOG_PATH.');
   },
   syncSourceUnavailable(reason: string): AppError {
     return new AppError(503, 'SYNC_SOURCE_UNAVAILABLE', `No se pudo abrir la base de datos de IW4MAdmin: ${reason}`);

@@ -19,17 +19,27 @@ async function scheduledRun(): Promise<void> {
   }
 }
 
-/** Activa la sincronización automática si SYNC_INTERVAL_MINUTES > 0. Devuelve el timer (o null). */
+/**
+ * Activa la sincronización automática si hay intervalo configurado (>0).
+ * SYNC_INTERVAL_SECONDS tiene prioridad sobre SYNC_INTERVAL_MINUTES.
+ * Devuelve el timer (o null).
+ */
 export function startSyncScheduler(): NodeJS.Timeout | null {
-  const minutes = env.syncIntervalMinutes;
-  if (!Number.isFinite(minutes) || minutes <= 0) {
-    console.log('[sync] sincronización automática desactivada (SYNC_INTERVAL_MINUTES=0)');
+  let intervalMs = 0;
+  if (env.syncIntervalSeconds > 0) {
+    intervalMs = env.syncIntervalSeconds * 1000;
+    console.log(`[sync] sincronización automática activa cada ${env.syncIntervalSeconds} segundo(s)`);
+  } else if (Number.isFinite(env.syncIntervalMinutes) && env.syncIntervalMinutes > 0) {
+    intervalMs = env.syncIntervalMinutes * 60_000;
+    console.log(`[sync] sincronización automática activa cada ${env.syncIntervalMinutes} minuto(s)`);
+  }
+  if (intervalMs <= 0) {
+    console.log('[sync] sincronización automática desactivada (SYNC_INTERVAL_SECONDS=0 y SYNC_INTERVAL_MINUTES=0)');
     return null;
   }
   const timer = setInterval(() => {
     void scheduledRun();
-  }, minutes * 60_000);
-  console.log(`[sync] sincronización automática activa cada ${minutes} minuto(s)`);
+  }, intervalMs);
   return timer;
 }
 

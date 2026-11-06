@@ -32,22 +32,44 @@ model LinkAttempt {
   @@index([userId, createdAt])
 }
 
-/// Jugador agregado desde IW4MAdmin (1 fila por NetworkId/GUID)
+/// Jugador agregado desde IW4MAdmin o del games_mp.log (1 fila por NetworkId/GUID)
 model Player {
-  id              Int         @id @default(autoincrement())
-  guid            String      @unique // NetworkId como string decimal (puede superar 2^53)
-  name            String      @default("unknown") // último nombre conocido (CurrentName ?? Name)
-  lastServer      String?     // servidor de la última conexión (EFClientConnectionHistory si la fuente lo expone)
-  kills           Int         @default(0)
-  deaths          Int         @default(0)
-  kd              Float       @default(0)
-  timePlayed      Int         @default(0) // segundos (TotalConnectionTime)
-  connections     Int         @default(0) // nº de conexiones/partidas
-  skill           Float       @default(0) // heurística: kd*10 + kills/hora
+  id            Int         @id @default(autoincrement())
+  guid          String      @unique // NetworkId como string decimal (puede superar 2^53)
+  name          String      @default("unknown") // último nombre conocido
+  lastServer    String?     // servidor de la última conexión
+  kills         Int         @default(0)
+  deaths        Int         @default(0)
+  kd            Float       @default(0)
+  timePlayed    Int         @default(0) // segundos; con fuente log: suma de Session (abiertas: en curso, cap 4h)
+  connections   Int         @default(0) // nº de conexiones/partidas (líneas J)
+  skill         Float       @default(0) // heurística: kd*10 + kills/hora
+  headshots     Int         @default(0) // kills con hitloc head/helmet (fuente log)
+  damageDealt   Int         @default(0) // daño total infligido (K + D, fuente log)
+  damageTaken   Int         @default(0) // daño total recibido (K + D + world, fuente log)
+  bestStreak    Int         @default(0) // mejor racha de kills sin morir (aprox: solo eventos K almacenados)
+  teamkills     Int         @default(0) // kills con ateam == vteam (fuente log)
+  matchesPlayed Int         @default(0) // mapas distintos con actividad (eventos + sesiones, aprox)
   firstConnection DateTime?
   lastConnection  DateTime?
-  updatedAt       DateTime    @updatedAt
-  link            PlayerLink?
+  updatedAt       DateTime  @updatedAt
+  link          PlayerLink?
+  sessions      Session[]
+}
+
+/// Sesión de juego real: abre con J, cierra con Q (o ShutdownGame del mapa).
+/// durationMin se fija al cerrar; una sesión abierta cuenta como en curso.
+model Session {
+  id          Int       @id @default(autoincrement())
+  guid        String
+  player      Player    @relation(fields: [guid], references: [guid], onDelete: Cascade)
+  start       DateTime
+  end         DateTime? // null = sesión abierta (en curso)
+  durationMin Int       @default(0)
+  map         String?   // mapa activo al abrirse la sesión
+  gametype    String?
+
+  @@index([guid, start])
 }
 
 /// Vinculación 1 a 1 usuario web ↔ GUID del juego
@@ -60,14 +82,22 @@ model PlayerLink {
   linkedAt DateTime @default(now())
 }
 
-/// Evento individual de kill (para perfil: historial reciente y series temporales)
+/// Evento individual de kill (para perfil: historial reciente y series temporales).
+/// Solo se almacenan K con víctima válida (los world/suicide solo alimentan
+/// agregados del Player: deaths/damageTaken). Los D nunca se almacenan (bloat):
+/// solo alimentan damageDealt/damageTaken.
 model KillEvent {
   id         Int      @id @default(autoincrement())
   originGuid String
   targetGuid String
   isKill     Boolean  @default(true) // false = evento no letal en IW4MAdmin
   damage     Int      @default(0)
-  weapon     String?  // id crudo del arma (INTEGER en IW4MAdmin)
+  weapon     String?  // arma base del log (ej. "mp5k_mp"); sin attachments
+  hitloc     String?  // zona del impacto (head, chest, torso_lower, ...)
+  headshot   Boolean  @default(false) // hitloc en (head, helmet)
+  isTeamkill Boolean  @default(false) // ateam == vteam
+  map        String?  // mapa activo según InitGame del log (null si desconocido)
+  gametype   String?  // modo activo según InitGame (ej. "war")
   server     String?  // etiqueta de servidor si la fuente la expone
   time       DateTime
   timeEpoch  Int // epoch en segundos
@@ -75,6 +105,8 @@ model KillEvent {
   @@index([originGuid, timeEpoch])
   @@index([targetGuid, timeEpoch])
   @@index([timeEpoch])
+  @@index([weapon])
+  @@index([map])
 }
 
 /// Estado incremental por fuente (evita reimportar kill events ya conocidos)
@@ -83,6 +115,20 @@ model SyncState {
   source        String    @unique // ruta de la DB fuente
   lastKillEpoch Int       @default(0)
   lastRunAt     DateTime?
+}
+
+/// Cursor de lectura del games_mp.log del servidor dedicado IW4x.
+/// El offset de bytes avanza solo cuando las líneas están completas (tolera
+/// escrituras a medias y truncados/rotaciones del archivo).
+model LogIngestState {
+  id              Int       @id @default(autoincrement())
+  source          String    @unique // ruta absoluta del games_mp.log
+  byteOffset      BigInt    @default(0) // bytes ya procesados
+  linesParsed     Int       @default(0) // telemetría acumulada
+  linesIgnored    Int       @default(0) // líneas no reconocidas (skip silencioso)
+  currentMap      String?   // estado del parser: mapa activo (última InitGame con infostring)
+  currentGametype String?   // estado del parser: modo activo
+  lastRunAt       DateTime?
 }
 
 /// Auditoría de sincronizaciones

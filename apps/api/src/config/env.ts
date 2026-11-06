@@ -20,7 +20,10 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).optional(),
   JWT_EXPIRES_IN: z.string().min(1).default('7d'),
   IW4MADMIN_DB_PATH: z.string().min(1).optional(),
+  GAME_LOG_PATH: z.string().min(1).optional(),
+  GAME_SERVER_ADDRESS: z.string().min(1).optional(),
   SYNC_INTERVAL_MINUTES: z.coerce.number().default(0),
+  SYNC_INTERVAL_SECONDS: z.coerce.number().default(0),
   LINK_WINDOW_MINUTES: z.coerce.number().int().positive().default(10),
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
 });
@@ -56,7 +59,10 @@ export const env = {
   jwtSecret,
   jwtExpiresIn: raw.JWT_EXPIRES_IN,
   iw4madminDbPath: raw.IW4MADMIN_DB_PATH,
+  gameLogPath: raw.GAME_LOG_PATH,
+  gameServerAddress: raw.GAME_SERVER_ADDRESS,
   syncIntervalMinutes: raw.SYNC_INTERVAL_MINUTES,
+  syncIntervalSeconds: raw.SYNC_INTERVAL_SECONDS,
   linkWindowMinutes: raw.LINK_WINDOW_MINUTES,
   corsOrigins: raw.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())

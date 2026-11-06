@@ -12,10 +12,24 @@ export interface PlayerDto {
   kills: number;
   deaths: number;
   kd: number;
-  /** Segundos de juego. */
+  /** Segundos de juego. Con fuente log: suma de Session (abiertas: en curso, cap 4h). */
   timePlayed: number;
   connections: number;
   skill: number;
+  headshots: number;
+  /** % de kills que fueron headshot (hitloc head/helmet). */
+  headshotPct: number;
+  damageDealt: number;
+  damageTaken: number;
+  /** Mejor racha de kills sin morir (aprox: solo eventos K almacenados). */
+  bestStreak: number;
+  teamkills: number;
+  /** Mapas distintos con actividad (eventos + sesiones). */
+  matchesPlayed: number;
+  /** Arma con más kills del jugador. */
+  favoriteWeapon: string | null;
+  /** Mapa con más kills del jugador. */
+  favoriteMap: string | null;
   firstConnection: string | null;
   lastConnection: string | null;
   linked: boolean;
@@ -54,7 +68,7 @@ export interface PlayerHistoryDto {
   series: Array<{ date: string; kills: number; deaths: number }>;
 }
 
-function toPlayerDto(player: PlayerWithLink): PlayerDto {
+function toPlayerDto(player: PlayerWithLink, favoriteWeapon: string | null, favoriteMap: string | null): PlayerDto {
   return {
     guid: player.guid,
     name: player.name,
@@ -64,6 +78,15 @@ function toPlayerDto(player: PlayerWithLink): PlayerDto {
     timePlayed: player.timePlayed,
     connections: player.connections,
     skill: player.skill,
+    headshots: player.headshots,
+    headshotPct: pct(player.headshots, player.kills),
+    damageDealt: player.damageDealt,
+    damageTaken: player.damageTaken,
+    bestStreak: player.bestStreak,
+    teamkills: player.teamkills,
+    matchesPlayed: player.matchesPlayed,
+    favoriteWeapon,
+    favoriteMap,
     firstConnection: player.firstConnection?.toISOString() ?? null,
     lastConnection: player.lastConnection?.toISOString() ?? null,
     linked: player.link !== null,
@@ -77,6 +100,10 @@ async function getPlayerOrThrow(guid: string): Promise<PlayerWithLink> {
   });
   if (!player) throw Errors.playerNotFound(guid);
   return player;
+}
+
+function pct(part: number, total: number): number {
+  return total > 0 ? Math.round((part / total) * 10_000) / 100 : 0;
 }
 
 function assertValidGuid(guidRaw: string): string {
@@ -97,6 +124,30 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     orderBy: [{ timeEpoch: 'desc' }],
     take: 300,
   });
+
+  // Favoritos del resumen (arma/mapa con más kills, empate por daño).
+  const [weaponRows, mapRows] = await Promise.all([
+    prisma.killEvent.groupBy({
+      by: ['weapon'],
+      where: { originGuid: guid, isKill: true, weapon: { not: null } },
+      _count: { _all: true },
+      _sum: { damage: true },
+    }),
+    prisma.killEvent.groupBy({
+      by: ['map'],
+      where: { originGuid: guid, isKill: true, map: { not: null } },
+      _count: { _all: true },
+      _sum: { damage: true },
+    }),
+  ]);
+  const favoriteWeapon =
+    weaponRows
+      .map((row) => ({ weapon: row.weapon ?? '', kills: row._count._all, damage: Number(row._sum.damage ?? 0) }))
+      .sort((a, b) => b.kills - a.kills || b.damage - a.damage || a.weapon.localeCompare(b.weapon))[0]?.weapon ?? null;
+  const favoriteMap =
+    mapRows
+      .map((row) => ({ map: row.map ?? '', kills: row._count._all, damage: Number(row._sum.damage ?? 0) }))
+      .sort((a, b) => b.kills - a.kills || b.damage - a.damage || a.map.localeCompare(b.map))[0]?.map ?? null;
 
   const recent = events.slice(0, 20);
   const opponentGuids = [
@@ -138,7 +189,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   }
 
   return {
-    player: toPlayerDto(player),
+    player: toPlayerDto(player, favoriteWeapon, favoriteMap),
     rank,
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),
