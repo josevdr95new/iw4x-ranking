@@ -11,6 +11,7 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "sync": "tsx src/scripts/run-sync.ts",
+    "promote:admin": "tsx src/scripts/promote-admin.ts",
     "test": "vitest run",
     "postinstall": "prisma generate"
   },

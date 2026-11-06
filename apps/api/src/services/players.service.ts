@@ -1,10 +1,10 @@
-import { Prisma } from '@prisma/client';
+﻿import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { clampInt, GUID_PATTERN } from '../lib/validation.js';
 import { computeDefaultRank } from './ranking.service.js';
 
-type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { link: { select: { guid: true } } } }>;
+type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true } } } }>;
 
 export interface PlayerDto {
   guid: string;
@@ -89,14 +89,14 @@ function toPlayerDto(player: PlayerWithLink, favoriteWeapon: string | null, favo
     favoriteMap,
     firstConnection: player.firstConnection?.toISOString() ?? null,
     lastConnection: player.lastConnection?.toISOString() ?? null,
-    linked: player.link !== null,
+    linked: player.accountLinks.length > 0,
   };
 }
 
 async function getPlayerOrThrow(guid: string): Promise<PlayerWithLink> {
   const player = await prisma.player.findUnique({
     where: { guid },
-    include: { link: { select: { guid: true } } },
+    include: { accountLinks: { select: { guid: true } } },
   });
   if (!player) throw Errors.playerNotFound(guid);
   return player;

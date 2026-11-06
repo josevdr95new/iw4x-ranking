@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { validate } from '../middleware/validate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { parseWith } from '../middleware/validate.js';
-import { loginSchema, registerSchema } from '../dto/auth.dto.js';
-import { getUserPublic, loginUser, registerUser } from '../services/auth.service.js';
+import { loginSchema, registerSchema, updateProfileSchema } from '../dto/auth.dto.js';
+import { getUserMe, loginUser, registerUser, updateProfile } from '../services/auth.service.js';
 import { asyncHandler } from '../lib/http.js';
 import { Errors } from '../lib/errors.js';
 
@@ -33,6 +33,17 @@ authRouter.get(
   asyncHandler(async (req, res) => {
     const auth = req.user;
     if (!auth) throw Errors.unauthorized();
-    res.json({ user: await getUserPublic(auth.id) });
+    res.json({ user: await getUserMe(auth.id) });
+  }),
+);
+
+authRouter.patch(
+  '/me',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const auth = req.user;
+    if (!auth) throw Errors.unauthorized();
+    const body = parseWith(updateProfileSchema, req.body ?? {});
+    res.json({ user: await updateProfile(auth.id, body) });
   }),
 );

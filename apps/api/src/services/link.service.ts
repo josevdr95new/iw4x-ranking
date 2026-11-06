@@ -26,11 +26,17 @@ export interface LinkedResult {
   linkedAt: string;
 }
 
-export interface StartAttemptResult {
-  attemptId: number;
-  status: 'pending';
-  windowMinutes: number;
-  createdAt: string;
+export interface UnlinkResult {
+  status: 'unlinked';
+  guid: string;
+  /** GUIDs que siguen vinculados a la cuenta tras el unlink. */
+  linkedGuids: string[];
+}
+
+export interface LinkedGuidInfo {
+  guid: string;
+  lastConnection: string | null;
+  lastServer: string | null;
 }
 
 export async function startLinkAttempt(userId: number): Promise<StartAttemptResult> {
@@ -43,11 +49,17 @@ export async function startLinkAttempt(userId: number): Promise<StartAttemptResu
   };
 }
 
+interface StartAttemptResult {
+  attemptId: number;
+  status: 'pending';
+  windowMinutes: number;
+  createdAt: string;
+}
+
 /**
  * Servidor conocido de un jugador:
  * 1. `Player.lastServer` (conexión real si IW4MAdmin expone EFClientConnectionHistory).
- * 2. Fallback: server del último KillEvent registrado que involucra al jugador
- *    (es lo único disponible con el mock actual).
+ * 2. Fallback: server del último KillEvent registrado que involucra al jugador.
  * 3. null si no hay ningún dato.
  */
 async function resolveLastServer(guid: string, lastServer: string | null): Promise<string | null> {
@@ -61,13 +73,13 @@ async function resolveLastServer(guid: string, lastServer: string | null): Promi
 }
 
 /**
- * Candidatos para vincular: GUIDs SIN cuenta vinculada cuya última conexión al
- * juego es reciente (últimos LINK_WINDOW_MINUTES minutos, reflejada por el sync).
+ * Candidatos para vincular: GUIDs SIN ninguna cuenta vinculada (AccountLink)
+ * cuya última conexión al juego es reciente (últimos LINK_WINDOW_MINUTES minutos).
  */
 export async function findLinkCandidates(): Promise<CandidatesResult> {
   const cutoff = new Date(Date.now() - env.linkWindowMinutes * 60_000);
   const players = await prisma.player.findMany({
-    where: { link: null, lastConnection: { gte: cutoff } },
+    where: { accountLinks: { none: {} }, lastConnection: { gte: cutoff } },
     orderBy: [{ lastConnection: 'desc' }, { name: 'asc' }],
     take: 25,
     select: { guid: true, name: true, lastConnection: true, lastServer: true },
@@ -88,42 +100,98 @@ export async function findLinkCandidates(): Promise<CandidatesResult> {
 }
 
 /**
- * Completa la vinculación:
+ * Completa la vinculación MULTI-GUID:
  * - Sin `guid`: devuelve la lista de candidatos para que el usuario elija.
- * - Con `guid`: vincula esa cuenta al GUID (1 a 1, validando que no exista otra vinculación).
+ * - Con `guid`: vincula ese GUID a la cuenta (una cuenta puede tener N GUIDs,
+ *   pensado para PCs compartidas). El mismo usuario re-vinculando un GUID que
+ *   ya posee → éxito idempotente. Si el GUID pertenece a OTRA cuenta → 409
+ *   GUID_ALREADY_LINKED (el 409 USER_ALREADY_LINKED ya no existe para GUIDs nuevos).
  */
 export async function completeLink(userId: number, guid: string | undefined): Promise<CandidatesResult | LinkedResult> {
   if (guid === undefined || guid === '') {
     return findLinkCandidates();
   }
 
-  const player = await prisma.player.findUnique({ where: { guid }, include: { link: { select: { guid: true } } } });
+  const player = await prisma.player.findUnique({
+    where: { guid },
+    include: { accountLinks: { select: { guid: true, userId: true, createdAt: true } } },
+  });
   if (!player) throw Errors.playerNotFound(guid);
-  if (player.link) throw Errors.alreadyLinkedGuid();
 
-  const user = await prisma.user.findUnique({ where: { id: userId }, include: { link: { select: { guid: true } } } });
+  const existingLink = player.accountLinks[0];
+  if (existingLink && existingLink.userId !== userId) {
+    throw Errors.alreadyLinkedGuid();
+  }
+  if (existingLink && existingLink.userId === userId) {
+    // Idempotente: la cuenta ya tiene este GUID (p. ej. el launcher reintenta).
+    return {
+      status: 'linked',
+      guid,
+      name: player.name,
+      server: await resolveLastServer(player.guid, player.lastServer),
+      linkedAt: existingLink.createdAt.toISOString(),
+    };
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw Errors.userNotFound();
-  if (user.link) throw Errors.alreadyLinkedUser();
 
   try {
     const [, link] = await prisma.$transaction([
       prisma.linkAttempt.updateMany({ where: { userId, status: 'pending' }, data: { status: 'completed' } }),
-      prisma.playerLink.create({ data: { userId, guid } }),
+      prisma.accountLink.create({ data: { userId, guid } }),
     ]);
     return {
       status: 'linked',
       guid: link.guid,
       name: player.name,
       server: await resolveLastServer(player.guid, player.lastServer),
-      linkedAt: link.linkedAt.toISOString(),
+      linkedAt: link.createdAt.toISOString(),
     };
   } catch (err) {
     // Carrera: otra cuenta vinculó el GUID mientras tanto (unique en guid).
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-      const fresh = await prisma.user.findUnique({ where: { id: userId }, include: { link: { select: { guid: true } } } });
-      if (fresh?.link) throw Errors.alreadyLinkedUser();
       throw Errors.alreadyLinkedGuid();
     }
     throw err;
   }
+}
+
+/**
+ * Desvincula un GUID de la cuenta autenticada (PCs compartidas: cambiar de
+ * cuenta o liberar el GUID para otra persona). Solo actúa sobre vínculos
+ * PROPIOS; 404 si la cuenta no tiene ese GUID.
+ */
+export async function unlinkGuid(userId: number, guid: string): Promise<UnlinkResult> {
+  const link = await prisma.accountLink.findUnique({ where: { guid } });
+  if (!link || link.userId !== userId) {
+    throw Errors.notFound(`Tu cuenta no tiene vinculado el GUID ${guid}.`);
+  }
+  await prisma.accountLink.delete({ where: { guid } });
+  const remaining = await prisma.accountLink.findMany({
+    where: { userId },
+    select: { guid: true },
+    orderBy: [{ id: 'asc' }],
+  });
+  return { status: 'unlinked', guid, linkedGuids: remaining.map((row) => row.guid) };
+}
+
+/** Lista completa de GUIDs vinculados de una cuenta (para /api/auth/me). */
+export async function listLinkedGuids(userId: number): Promise<LinkedGuidInfo[]> {
+  const links = await prisma.accountLink.findMany({
+    where: { userId },
+    select: { guid: true },
+    orderBy: [{ id: 'asc' }],
+  });
+  if (links.length === 0) return [];
+  const players = await prisma.player.findMany({
+    where: { guid: { in: links.map((link) => link.guid) } },
+    select: { guid: true, lastConnection: true, lastServer: true },
+  });
+  const byGuid = new Map(players.map((player) => [player.guid, player] as const));
+  return links.map((link) => ({
+    guid: link.guid,
+    lastConnection: byGuid.get(link.guid)?.lastConnection?.toISOString() ?? null,
+    lastServer: byGuid.get(link.guid)?.lastServer ?? null,
+  }));
 }

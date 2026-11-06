@@ -12,7 +12,7 @@ export function req(): request.Test {
 export async function resetDb(): Promise<void> {
   await prisma.killEvent.deleteMany();
   await prisma.session.deleteMany();
-  await prisma.playerLink.deleteMany();
+  await prisma.accountLink.deleteMany();
   await prisma.linkAttempt.deleteMany();
   await prisma.player.deleteMany();
   await prisma.syncRun.deleteMany();

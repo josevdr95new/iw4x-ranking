@@ -1,4 +1,5 @@
 import { LoaderCircle } from "lucide-react";
+import { forwardRef } from "react";
 import type { ButtonHTMLAttributes } from "react";
 
 type Variant = "primary" | "ghost" | "danger";
@@ -22,19 +23,23 @@ const sizeClasses: Record<Size, string> = {
   md: "h-10 px-4",
 };
 
-export function Button({
-  variant = "primary",
-  size = "md",
-  loading = false,
-  fullWidth = false,
-  className = "",
-  disabled,
-  children,
-  type = "button",
-  ...rest
-}: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
+    variant = "primary",
+    size = "md",
+    loading = false,
+    fullWidth = false,
+    className = "",
+    disabled,
+    children,
+    type = "button",
+    ...rest
+  },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       type={type}
       disabled={disabled || loading}
       className={`type-button inline-flex items-center justify-center gap-2 rounded-sm transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? "w-full" : ""} ${className}`}
@@ -46,4 +51,4 @@ export function Button({
       {children}
     </button>
   );
-}
+});

@@ -50,7 +50,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       orderBy,
       skip: (q.page - 1) * q.pageSize,
       take: q.pageSize,
-      include: { link: { select: { guid: true } } },
+      include: { accountLinks: { select: { guid: true } } },
     }),
   ]);
 
@@ -77,7 +77,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       connections: player.connections,
       skill: player.skill,
       lastConnection: player.lastConnection?.toISOString() ?? null,
-      linked: player.link !== null,
+      linked: player.accountLinks.length > 0,
     })),
   };
 }

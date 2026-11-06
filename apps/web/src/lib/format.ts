@@ -110,3 +110,8 @@ export function initialsOf(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ]/g, "");
   return cleaned.slice(0, 2).toUpperCase() || "??";
 }
+
+/** GUID numérico agrupado en bloques de 4 para lectura; el dato crudo queda en title. */
+export function formatGuid(guid: string): string {
+  return guid.replace(/(\d{4})(?=\d)/g, "$1 ");
+}

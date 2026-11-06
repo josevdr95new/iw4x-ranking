@@ -15,9 +15,10 @@ model User {
   email        String        @unique
   passwordHash String
   displayName  String
+  role         String        @default("USER") // USER | ADMIN (auto-grant vía ADMIN_EMAILS o script promote:admin)
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
-  link         PlayerLink?
+  accountLinks AccountLink[]
   linkAttempts LinkAttempt[]
 }
 
@@ -53,7 +54,7 @@ model Player {
   firstConnection DateTime?
   lastConnection  DateTime?
   updatedAt       DateTime  @updatedAt
-  link          PlayerLink?
+  accountLinks AccountLink[]
   sessions      Session[]
 }
 
@@ -72,14 +73,19 @@ model Session {
   @@index([guid, start])
 }
 
-/// Vinculación 1 a 1 usuario web ↔ GUID del juego
-model PlayerLink {
-  id       Int      @id @default(autoincrement())
-  userId   Int      @unique
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  guid     String   @unique
-  player   Player   @relation(fields: [guid], references: [guid], onDelete: Cascade)
-  linkedAt DateTime @default(now())
+/// Vinculación cuenta↔GUID MULTI (N GUIDs por cuenta, para PCs compartidas).
+/// guid @unique → un GUID solo puede pertenecer a UNA cuenta (409 GUID_ALREADY_LINKED).
+/// @@unique([userId, guid]) → sin filas duplicadas por par.
+model AccountLink {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guid      String   @unique
+  player    Player   @relation(fields: [guid], references: [guid], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, guid])
+  @@index([userId])
 }
 
 /// Evento individual de kill (para perfil: historial reciente y series temporales).

@@ -42,14 +42,17 @@ export const Errors = {
   unauthorized(message = 'Autenticación requerida.'): AppError {
     return new AppError(401, 'UNAUTHORIZED', message);
   },
-  invalidCredentials(): AppError {
-    return new AppError(401, 'INVALID_CREDENTIALS', 'Email o contraseña incorrectos.');
+  invalidCredentials(message = 'Email o contraseña incorrectos.'): AppError {
+    return new AppError(401, 'INVALID_CREDENTIALS', message);
   },
   emailTaken(): AppError {
     return new AppError(409, 'EMAIL_TAKEN', 'Ya existe una cuenta con ese email.');
   },
   userNotFound(): AppError {
     return new AppError(401, 'UNAUTHORIZED', 'La cuenta asociada al token ya no existe.');
+  },
+  forbidden(message = 'No tienes permisos para esta operación.'): AppError {
+    return new AppError(403, 'FORBIDDEN', message);
   },
   alreadyLinkedUser(): AppError {
     return new AppError(409, 'USER_ALREADY_LINKED', 'Tu cuenta ya está vinculada a un GUID.');

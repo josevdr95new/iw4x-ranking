@@ -14,8 +14,11 @@ type DetectState = "scanning" | "empty" | "error";
 
 const STEP_LABELS = ["Instrucciones", "Detección", "Tu GUID", "Listo"] as const;
 
-/** IP placeholder del wireframe (§3.5): la lista de servidores aún no existe en la API. */
-const COMMUNITY_SERVER = "cl.example.net:28960";
+/**
+ * Fallback si /servers no expone nada (env sin SERVERS): placeholder del wireframe (§3.5).
+ * La fuente real es GET /api/servers (entrada con isDefault).
+ */
+const FALLBACK_SERVER = { name: "", address: "cl.example.net:28960" };
 
 function Stepper({ step }: { step: Step }) {
   return (
@@ -97,7 +100,26 @@ export function LinkPage() {
   const [linkedName, setLinkedName] = useState<string | null>(null);
   const [linkedGuid, setLinkedGuid] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [defaultServer, setDefaultServer] = useState(FALLBACK_SERVER);
   const copyTimer = useRef<number | null>(null);
+
+  // Servidores conocidos (API v0.3): la IP del chip sale de GET /servers (isDefault).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .servers()
+      .then((response) => {
+        if (cancelled) return;
+        const server = response.servers.find((entry) => entry.isDefault) ?? response.servers[0];
+        if (server) setDefaultServer({ name: server.name, address: server.address });
+      })
+      .catch(() => {
+        // Sin lista se usa el fallback; fallo silencioso.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -149,7 +171,7 @@ export function LinkPage() {
 
   const copyServer = async () => {
     try {
-      await navigator.clipboard.writeText(COMMUNITY_SERVER);
+      await navigator.clipboard.writeText(defaultServer.address);
     } catch {
       // Portapapeles no disponible: sin feedback de copia.
       return;
@@ -250,7 +272,7 @@ export function LinkPage() {
               Abre IW4x y entra a cualquier servidor de la comunidad:
               <span className="mt-2 flex flex-wrap items-center gap-3">
                 <span className="type-mono inline-flex h-10 items-center rounded-sm border border-border bg-surface-2 px-3 text-text">
-                  {COMMUNITY_SERVER}
+                  {defaultServer.address}
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => void copyServer()}>
                   {copied ? (
@@ -265,6 +287,9 @@ export function LinkPage() {
                     </>
                   )}
                 </Button>
+                {defaultServer.name && (
+                  <span className="type-caption text-text-2">{defaultServer.name}</span>
+                )}
               </span>
             </li>
             <li>Juega al menos una ronda (30 segundos bastan).</li>

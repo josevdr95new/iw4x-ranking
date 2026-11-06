@@ -1,4 +1,4 @@
-import { ChevronDown, LogOut, Menu, User, Link2, X } from "lucide-react";
+import { ChevronDown, Link2, LogOut, Menu, Settings, User, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
@@ -82,6 +82,11 @@ export function Navbar() {
           <NavLink to="/link" className={({ isActive }) => navLinkClass(isActive)}>
             Vincular cuenta
           </NavLink>
+          {user?.role === "ADMIN" && (
+            <NavLink to="/admin" className={({ isActive }) => navLinkClass(isActive)}>
+              Admin
+            </NavLink>
+          )}
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
@@ -124,6 +129,15 @@ export function Navbar() {
                   >
                     <User size={16} strokeWidth={1.75} aria-hidden="true" />
                     Mi perfil
+                  </Link>
+                  <Link
+                    role="menuitem"
+                    to="/account"
+                    onClick={() => setDropdownOpen(false)}
+                    className="flex h-9 items-center gap-2 rounded-sm px-3 text-sm text-text transition-colors duration-150 ease-out hover:bg-surface"
+                  >
+                    <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
+                    Mi cuenta
                   </Link>
                   <Link
                     role="menuitem"
@@ -213,6 +227,19 @@ export function Navbar() {
           >
             Vincular cuenta
           </NavLink>
+          {user?.role === "ADMIN" && (
+            <NavLink
+              to="/admin"
+              onClick={() => setMenuOpen(false)}
+              className={({ isActive }) =>
+                `type-button flex h-12 items-center border-b border-border px-4 transition-colors duration-150 ease-out ${
+                  isActive ? "text-text" : "text-text-2"
+                }`
+              }
+            >
+              Admin
+            </NavLink>
+          )}
           {!user && (
             <Link
               to="/login"

@@ -1,11 +1,29 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Navbar } from "./components/Navbar";
+import { useAuth } from "./lib/auth";
 import { AuthProvider } from "./lib/auth";
+import { AdminPage } from "./pages/AdminPage";
+import { AccountPage } from "./pages/AccountPage";
 import { AuthPage } from "./pages/AuthPage";
 import { LeaderboardPage } from "./pages/LeaderboardPage";
 import { LinkPage } from "./pages/LinkPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { PlayerPage } from "./pages/PlayerPage";
+import { Spinner } from "./components/ui/Spinner";
+
+/** Guard: /admin solo para role ADMIN; el resto → home (inaccesible, sin vista de error). */
+function AdminRoute() {
+  const { user, initializing } = useAuth();
+  if (initializing) {
+    return (
+      <div className="flex justify-center py-16">
+        <Spinner size={20} />
+      </div>
+    );
+  }
+  if (!user || user.role !== "ADMIN") return <Navigate to="/" replace />;
+  return <AdminPage />;
+}
 
 export default function App() {
   return (
@@ -26,6 +44,8 @@ export default function App() {
               <Route path="/login" element={<AuthPage mode="login" />} />
               <Route path="/register" element={<AuthPage mode="register" />} />
               <Route path="/link" element={<LinkPage />} />
+              <Route path="/account" element={<AccountPage />} />
+              <Route path="/admin" element={<AdminRoute />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </main>

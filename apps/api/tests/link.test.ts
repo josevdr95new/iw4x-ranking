@@ -41,7 +41,7 @@ describe('Vinculación cuenta ↔ GUID', () => {
     // El mock genera 3 jugadores con conexión reciente; ninguno debe estar vinculado.
     expect(body.candidates.length).toBeGreaterThanOrEqual(2);
     for (const candidate of body.candidates) {
-      const link = await prisma.playerLink.findUnique({ where: { guid: candidate.guid } });
+      const link = await prisma.accountLink.findUnique({ where: { guid: candidate.guid } });
       expect(link).toBeNull();
       expect(Number.isNaN(Date.parse(candidate.lastConnection))).toBe(false);
       // Campo nuevo: server (etiqueta o null si no hay datos).
@@ -67,13 +67,17 @@ describe('Vinculación cuenta ↔ GUID', () => {
 
     const me = await req().get('/api/auth/me').set('Authorization', `Bearer ${tokenA}`);
     expect((me.body as { user: { linkedGuid: string | null } }).user.linkedGuid).toBe(guid);
+    // /me también expone la lista multi-GUID con metadatos.
+    const meUser = (me.body as { user: { linkedGuids: Array<{ guid: string; lastConnection: string | null; lastServer: string | null }> } }).user;
+    expect(meUser.linkedGuids).toHaveLength(1);
+    expect(meUser.linkedGuids[0]?.guid).toBe(guid);
 
-    const link = await prisma.playerLink.findUnique({ where: { guid } });
+    const link = await prisma.accountLink.findUnique({ where: { guid } });
     expect(link).not.toBeNull();
   });
 
   it('GUID ya vinculado por otra cuenta → 409 GUID_ALREADY_LINKED', async () => {
-    const linked = await prisma.playerLink.findFirst();
+    const linked = await prisma.accountLink.findFirst();
     expect(linked).not.toBeNull();
 
     const res = await req()
@@ -84,14 +88,56 @@ describe('Vinculación cuenta ↔ GUID', () => {
     expect((res.body as { error: { code: string } }).error.code).toBe('GUID_ALREADY_LINKED');
   });
 
-  it('usuario ya vinculado que intenta otro GUID → 409 USER_ALREADY_LINKED', async () => {
+  it('MULTI-GUID: una cuenta puede vincular más GUIDs (PCs compartidas)', async () => {
+    // A ya tiene un GUID; vincula un segundo (antes: 409 USER_ALREADY_LINKED).
     const candidates = await req().post('/api/link/complete').set('Authorization', `Bearer ${tokenB}`).send({});
-    const otherGuid = (candidates.body as { candidates: Array<{ guid: string }> }).candidates[0]?.guid;
-    expect(otherGuid).toBeDefined();
+    const list = (candidates.body as { candidates: Array<{ guid: string }> }).candidates;
+    expect(list.length).toBeGreaterThanOrEqual(1);
+    const secondGuid = list[0]!.guid;
 
-    const res = await req().post('/api/link/complete').set('Authorization', `Bearer ${tokenA}`).send({ guid: otherGuid });
-    expect(res.status).toBe(409);
-    expect((res.body as { error: { code: string } }).error.code).toBe('USER_ALREADY_LINKED');
+    const res = await req().post('/api/link/complete').set('Authorization', `Bearer ${tokenA}`).send({ guid: secondGuid });
+    expect(res.status).toBe(200);
+    expect((res.body as { status: string; guid: string }).status).toBe('linked');
+
+    const links = await prisma.accountLink.findMany({ where: { user: { email: 'user-a@test.local' } } });
+    expect(links).toHaveLength(2);
+
+    const me = await req().get('/api/auth/me').set('Authorization', `Bearer ${tokenA}`);
+    const meUser = (me.body as { user: { linkedGuids: Array<{ guid: string }>; linkedGuid: string | null } }).user;
+    expect(meUser.linkedGuids).toHaveLength(2);
+    // Legacy: linkedGuid sigue siendo el primero (compatibilidad launcher).
+    expect(meUser.linkedGuid).not.toBeNull();
+
+    // Re-vincular un GUID propio → idempotente (200, no 409).
+    const again = await req().post('/api/link/complete').set('Authorization', `Bearer ${tokenA}`).send({ guid: secondGuid });
+    expect(again.status).toBe(200);
+    expect(await prisma.accountLink.count({ where: { user: { email: 'user-a@test.local' } } })).toBe(2);
+  });
+
+  it('DELETE /api/link/:guid desvincula un GUID propio', async () => {
+    const linksBefore = await prisma.accountLink.findMany({ where: { user: { email: 'user-a@test.local' } } });
+    expect(linksBefore.length).toBeGreaterThanOrEqual(2);
+    const target = linksBefore[0]!.guid;
+
+    const res = await req().delete(`/api/link/${target}`).set('Authorization', `Bearer ${tokenA}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { status: string; guid: string; linkedGuids: string[] };
+    expect(body.status).toBe('unlinked');
+    expect(body.guid).toBe(target);
+    expect(body.linkedGuids).toHaveLength(linksBefore.length - 1);
+    expect(await prisma.accountLink.count({ where: { guid: target } })).toBe(0);
+  });
+
+  it('DELETE /api/link/:guid con GUID ajeno o desconocido → 404', async () => {
+    const own = await prisma.accountLink.findFirst({ where: { user: { email: 'user-a@test.local' } } });
+    expect(own).not.toBeNull();
+
+    // El GUID de A no pertenece a B → 404 (no revela existencia).
+    const res = await req().delete(`/api/link/${own?.guid}`).set('Authorization', `Bearer ${tokenB}`);
+    expect(res.status).toBe(404);
+
+    const res2 = await req().delete('/api/link/999999999999999999').set('Authorization', `Bearer ${tokenA}`);
+    expect(res2.status).toBe(404);
   });
 
   it('GUID numérico desconocido → 404 PLAYER_NOT_FOUND', async () => {

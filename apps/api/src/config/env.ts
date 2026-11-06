@@ -20,10 +20,14 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).optional(),
   JWT_EXPIRES_IN: z.string().min(1).default('7d'),
   IW4MADMIN_DB_PATH: z.string().min(1).optional(),
-  GAME_LOG_PATH: z.string().min(1).optional(),
+  GAME_LOG_PATH: z
+    .string()
+    .optional()
+    .transform((value) => (value !== undefined && value.trim().length > 0 ? value : undefined)),
   GAME_SERVER_ADDRESS: z.string().min(1).optional(),
   SYNC_INTERVAL_MINUTES: z.coerce.number().default(0),
   SYNC_INTERVAL_SECONDS: z.coerce.number().default(0),
+  ADMIN_EMAILS: z.string().default(''),
   LINK_WINDOW_MINUTES: z.coerce.number().int().positive().default(10),
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
 });
@@ -63,6 +67,9 @@ export const env = {
   gameServerAddress: raw.GAME_SERVER_ADDRESS,
   syncIntervalMinutes: raw.SYNC_INTERVAL_MINUTES,
   syncIntervalSeconds: raw.SYNC_INTERVAL_SECONDS,
+  adminEmails: raw.ADMIN_EMAILS.split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter((email) => email.length > 0),
   linkWindowMinutes: raw.LINK_WINDOW_MINUTES,
   corsOrigins: raw.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())

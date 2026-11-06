@@ -5,6 +5,8 @@ import { leaderboardRouter } from './leaderboard.routes.js';
 import { playersRouter } from './players.routes.js';
 import { syncRouter } from './sync.routes.js';
 import { weaponsRouter } from './weapons.routes.js';
+import { serversRouter } from './servers.routes.js';
+import { adminRouter } from './admin.routes.js';
 
 export const apiRouter: Router = Router();
 
@@ -18,3 +20,5 @@ apiRouter.use('/leaderboard', leaderboardRouter);
 apiRouter.use('/players', playersRouter);
 apiRouter.use('/sync', syncRouter);
 apiRouter.use('/weapons', weaponsRouter);
+apiRouter.use('/servers', serversRouter);
+apiRouter.use('/admin', adminRouter);

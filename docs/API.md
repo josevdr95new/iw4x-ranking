@@ -1,4 +1,4 @@
-# API — IW4x Ranking (contrato para el frontend)
+﻿# API — IW4x Ranking (contrato para el frontend)
 
 - **Base URL**: `http://localhost:3000`
 - Todas las rutas viven bajo el prefijo **`/api`**.
@@ -51,6 +51,8 @@ Todo error (4xx/5xx) responde:
 
 ## Auth
 
+> **Roles**: todo `user` ahora incluye `role: "USER" | "ADMIN"`. Los emails en `ADMIN_EMAILS` (env, separados por coma) reciben ADMIN automáticamente al **registrarse o loguear**; también existe `npm run promote:admin -- <email>` (`--demote` para revertir). Los endpoints `/api/admin/*` exigen `role=ADMIN` (403 `FORBIDDEN` en caso contrario; el rol se lee fresco de la DB en cada request).
+
 ### `POST /api/auth/register`
 
 Request:
@@ -96,16 +98,37 @@ Response **200**:
     "id": 2,
     "email": "docs-capture@test.local",
     "displayName": "Docs Capture",
+    "role": "USER",
     "createdAt": "2026-11-05T22:03:18.518Z",
-    "linkedGuid": "263534314041025950"
+    "linkedGuid": "263534314041025950",
+    "linkedGuids": [
+      {
+        "guid": "263534314041025950",
+        "lastConnection": "2026-11-05T22:05:41.102Z",
+        "lastServer": "192.168.3.99:28961"
+      }
+    ]
   }
 }
 ```
 
-`linkedGuid` es `null` hasta completar la vinculación (ver abajo). Errores: `401 UNAUTHORIZED`.
+`linkedGuid` es `null` hasta completar la vinculación (ver abajo). `role` es `USER` o `ADMIN`. `linkedGuids` incluye todos los GUIDs vinculados con los metadatos de su Player (`lastConnection`/`lastServer` en `null` si aún no jugó). Errores: `401 UNAUTHORIZED`.
 
 ---
 
+### `PATCH /api/auth/me` ✅ (perfil de usuario)
+
+Cambia `displayName` y/o `password` (al cambiar password hay que validar la actual).
+
+Request (uno o ambos campos):
+
+```json
+{ "displayName": "Nuevo Nombre", "currentPassword": "actual1234", "password": "nuevapassword1" }
+```
+
+Response **200**: `{ "user": { ...PublicUser } }` (misma forma que GET /me).
+
+Errores: `400 VALIDATION_ERROR` (displayName <3 chars, password <8, password sin `currentPassword`, body vacío), `401 INVALID_CREDENTIALS` si `currentPassword` no coincide.
 ## Vinculación cuenta ↔ GUID (login juego→web)
 
 Flujo sin plugins: el usuario debe **jugar unos minutos** y luego, desde la web, buscar candidatos y confirmar cuál es su GUID.
@@ -164,9 +187,127 @@ Response **200**:
 
 `server` es el último servidor conocido del jugador (misma resolución que en los candidatos: conexión si la fuente la expone, si no último evento registrado; `null` si no hay dato).
 
-Errores: `400 VALIDATION_ERROR` (formato no numérico), `404 PLAYER_NOT_FOUND`, `409 USER_ALREADY_LINKED`, `409 GUID_ALREADY_LINKED`.
+Errores: `400 VALIDATION_ERROR` (formato no numérico), `404 PLAYER_NOT_FOUND`, `409 GUID_ALREADY_LINKED`.
 
-> Nota: la confirmación con `guid` exige que el GUID exista y esté libre; los candidatos ya vienen filtrados por la ventana de tiempo.
+> **MULTI-GUID (PCs compartidas)**: una cuenta puede tener **N GUIDs** vinculados. El `409 USER_ALREADY_LINKED` **ya no existe** para GUIDs nuevos (se vinculan sin error). Se mantiene `409 GUID_ALREADY_LINKED` si el GUID pertenece a **otra** cuenta. Re-vincular un GUID propio → **200 idempotente**. Respuesta idéntica a la que ya consume el launcher.
+
+### `DELETE /api/link/:guid` 🔒 (desvincular GUID propio)
+
+Libera un GUID de la cuenta autenticada (para cambiar de cuenta en PCs compartidas). Solo actúa sobre vínculos PROPIOS.
+
+Response **200**:
+
+```json
+{ "status": "unlinked", "guid": "263534314041025950", "linkedGuids": ["263534314041025951"] }
+```
+
+Errores: `400 VALIDATION_ERROR` (GUID no numérico), `404 NOT_FOUND` si la cuenta no tiene ese GUID (también si pertenece a otro usuario — no revela existencia).
+
+### `GET /api/servers` (público)
+
+Lista de servers conocidos para launcher/web sin hardcodear. Fuente: env `SERVERS` (JSON array `[{name, address, isDefault?}]`); si falta, se deriva de `GAME_SERVER_ADDRESS`; sin ninguna fuente, lista vacía.
+
+Response **200**:
+
+```json
+{
+  "source": "env",
+  "servers": [
+    { "name": "LAN Server", "address": "192.168.2.251:28960", "isDefault": false },
+    { "name": "Test Local", "address": "192.168.3.99:28961", "isDefault": true }
+  ]
+}
+```
+
+Si ninguna entrada marca `isDefault`, la primera lo recibe. `source` ∈ `env | derived | none` (informativo).
+
+---
+
+## Admin (requiere rol ADMIN)
+
+> Todas las rutas bajo `/api/admin/*` exigen JWT + `role=ADMIN` (`401` sin token, `403 FORBIDDEN` con USER). El rol se lee fresco de la DB en cada request.
+
+### `GET /api/admin/server-config` 🔒
+
+Parsea el `server.cfg` REAL (`SERVER_CFG_PATH`) del server dedicado y lo devuelve como estructura tipada. Las líneas que el panel no gestiona se devuelven **intactas** en `unknownLines` (incluyen dvars no editables y `map_rotate`).
+
+Response **200** (ejemplo con el cfg oficial AlterWare):
+
+```json
+{
+  "config": {
+    "hostname": "^7[^1RANKING^7] ^7Local Test Server",
+    "motd": "Bienvenidos al ranking",
+    "gametype": "war",
+    "maxclients": 12,
+    "logfile": 2,
+    "g_log": "logs/games_mp.log",
+    "rcon": "09••••14",
+    "rconSet": true,
+    "bots": 4,
+    "password": null,
+    "passwordSet": false,
+    "rotation": [
+      { "map": "mp_rust", "gametype": "war" },
+      { "map": "mp_terminal", "gametype": "war" },
+      { "map": "mp_highrise", "gametype": "war" },
+      { "map": "mp_cross_fire", "gametype": "war" },
+      { "map": "mp_strike", "gametype": "war" }
+    ],
+    "unknownLines": [
+      "set sv_securityLevel \"23\"",
+      "set g_inactivity \"300\"",
+      "map_rotate"
+    ],
+    "metadata": { "path": "D:\\Call of Duty 6\\userraw\\server.cfg", "lastModified": "2026-11-06T20:30:00.000Z", "sizeBytes": 9831 }
+  }
+}
+```
+
+- `rcon`/`password` salen **ENMASCARADOS** (`ab••••yz`); `rconSet`/`passwordSet` indican si tienen valor real.
+- Errores: `503 SERVER_CFG_NOT_CONFIGURED` (env sin setear), `503 SERVER_CFG_NOT_FOUND` (archivo inexistente).
+
+### `PUT /api/admin/server-config` 🔒
+
+Actualiza SOLO los campos que llegan (parcial) y **regenera** el cfg preservando `set/seta`, comentarios trailing y las `unknownLines` tomadas del DISCO (el cliente no puede inyectar líneas crudas — el schema rechaza claves desconocidas). Backup automático `server.cfg.bak-<timestamp>` + escritura **atómica** (tmp + rename). Con `ALLOW_SERVER_CONTROL=1` además reinicia el server tras guardar (necesita `SERVER_RESTART_COMMAND`; si falta, guarda igual y añade `warnings`).
+
+Request (todos los campos opcionales; `null` en rcon/password = vaciar):
+
+```json
+{
+  "hostname": "^7[^1RANKING^7] ^7Servidor de la Comunidad",
+  "motd": "Ranking activo: juega y sube",
+  "gametype": "war",
+  "maxclients": 24,
+  "logfile": 2,
+  "g_log": "logs/games_mp.log",
+  "rcon": "nuevo-rcon-seguro-1",
+  "bots": 4,
+  "password": null,
+  "rotation": [
+    { "map": "mp_rust", "gametype": "war" },
+    { "map": "mp_terminal", "gametype": "war" },
+    { "map": "mp_shipment", "gametype": "dm" }
+  ]
+}
+```
+
+- El **eco enmascarado** de `rcon`/`password` (contiene `•`) se interpreta como "sin cambio".
+- Validaciones: `maxclients` 1–64, `logfile` 0–2, `bots` 0–24 y **≤ maxclients**, `hostname` ≤64 sin comillas/saltos, `gametype` ∈ war|dm|dom|koth|sab|sd|ctf|oneflag|gtnw|arena|dd|vip, `rotation` 1–32 mapas `^[a-z0-9_]{2,32}$`.
+
+Response **200**:
+
+```json
+{ "saved": true, "restarted": false, "backupPath": "D:/Call of Duty 6/userraw/server.cfg.bak-2026-11-06T20-40-00-000Z", "warnings": [] }
+```
+
+Errores: `400 VALIDATION_ERROR` (con detalles por campo; el cfg NO se toca), `503 SERVER_CFG_*`, `500 SERVER_CFG_WRITE_FAILED` (con rollback al contenido previo).
+
+### `POST /api/admin/server/restart` 🔒
+
+Reinicia el proceso del server dedicado ejecutando `SERVER_RESTART_COMMAND` (child_process, timeout 20s). **Triple guard**: rol ADMIN **+** `ALLOW_SERVER_CONTROL=1` **+** `SERVER_RESTART_COMMAND` configurado — sin nada de eso responde **403 FORBIDDEN** y NO ejecuta nada.
+
+Response **200**: `{ "restarted": true, "command": "taskkill /F /IM iw4x.exe & ..." }`
 
 ---
 
@@ -458,16 +599,22 @@ Response **200**:
 | Método | Ruta                      | Auth | Descripción |
 | ------ | ------------------------- | ---- | ----------- |
 | GET    | `/api/health`             | —    | Estado del servicio |
-| POST   | `/api/auth/register`      | —    | Registro (devuelve JWT) |
-| POST   | `/api/auth/login`         | —    | Login (devuelve JWT) |
-| GET    | `/api/auth/me`            | ✅   | Usuario actual + `linkedGuid` |
+| POST   | `/api/auth/register`      | —    | Registro (devuelve JWT; role USER/ADMIN según ADMIN_EMAILS) |
+| POST   | `/api/auth/login`         | —    | Login (devuelve JWT; auto-grant ADMIN si email ∈ ADMIN_EMAILS) |
+| GET    | `/api/auth/me`            | ✅   | Usuario + `role` + `linkedGuid` (legacy) + `linkedGuids[]` con metadatos |
+| PATCH  | `/api/auth/me`            | ✅   | Cambiar `displayName` y/o `password` (valida la actual) |
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
-| POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula |
+| POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula (MULTI-GUID) |
+| DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
 | GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable |
 | GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |
 | GET    | `/api/players/:guid/maps`    | — | Desglose por mapa del jugador + favorito |
 | GET    | `/api/weapons`            | —    | Ranking global de armas (kills/damage/victims/headshots) |
+| GET    | `/api/servers`            | —    | Lista de servers conocidos (env `SERVERS` o derivada) |
 | POST   | `/api/sync`               | ✅   | Dispara sincronización (combina IW4MAdmin y/o games_mp.log) |
 | GET    | `/api/sync/status`        | —    | `{lastSyncAt, configured, intervalMinutes, windowMinutes}` (público) |
+| GET    | `/api/admin/server-config` | ADMIN | Parsea el server.cfg real a estructura JSON |
+| PUT    | `/api/admin/server-config` | ADMIN | Regenera el cfg (backup + escritura atómica; restart opcional) |
+| POST   | `/api/admin/server/restart` | ADMIN | Reinicia el server (requiere ALLOW_SERVER_CONTROL=1) |

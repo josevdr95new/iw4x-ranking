@@ -34,7 +34,7 @@ export interface ApiErrorBody {
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
-  readonly details?: ApiErrorBody["details"];
+  readonly details?: { issues?: Array<{ path: string | Array<string | number>; message: string }> };
 
   constructor(status: number, body: ApiErrorBody) {
     super(body.message);
@@ -48,7 +48,8 @@ export class ApiError extends Error {
   fieldErrors(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const issue of this.details?.issues ?? []) {
-      const field = issue.path.split(".")[0] ?? "";
+      const rawPath = Array.isArray(issue.path) ? issue.path.join(".") : String(issue.path ?? "");
+      const field = rawPath.split(".")[0] ?? "";
       if (field && !(field in out)) out[field] = issue.message;
     }
     return out;
@@ -59,8 +60,29 @@ export interface User {
   id: number;
   email: string;
   displayName: string;
+  role: "USER" | "ADMIN";
   createdAt: string;
   linkedGuid: string | null;
+  /** GUIDs vinculados con metadatos (multi-GUID, API v0.3). */
+  linkedGuids: LinkedGuidInfo[];
+}
+
+export interface LinkedGuidInfo {
+  guid: string;
+  name?: string | null;
+  lastConnection?: string | null;
+  lastServer?: string | null;
+}
+
+export interface ServerInfo {
+  name: string;
+  address: string;
+  isDefault: boolean;
+}
+
+export interface ServersResponse {
+  source: "env" | "derived" | "none";
+  servers: ServerInfo[];
 }
 
 export type LeaderboardSort =
@@ -170,7 +192,14 @@ export interface LinkConfirmResponse {
   status: "linked";
   guid: string;
   name: string;
+  server: string | null;
   linkedAt: string;
+}
+
+export interface UnlinkResponse {
+  status: "unlinked";
+  guid: string;
+  linkedGuids: string[];
 }
 
 /** GET /api/sync/status — público desde API v0.2. */
@@ -181,8 +210,77 @@ export interface SyncStatusResponse {
   windowMinutes: number;
 }
 
+export type GameGametype =
+  | "war"
+  | "dm"
+  | "dom"
+  | "koth"
+  | "sab"
+  | "sd"
+  | "ctf"
+  | "oneflag"
+  | "gtnw"
+  | "arena"
+  | "dd"
+  | "vip";
+
+export interface RotationEntry {
+  map: string;
+  gametype: GameGametype | string;
+}
+
+export interface ServerConfig {
+  hostname: string;
+  motd: string;
+  gametype: string;
+  maxclients: number;
+  logfile: number;
+  g_log: string;
+  /** Valor ENMASCARADO (contiene •); el eco enmascarado = "sin cambio". */
+  rcon: string | null;
+  rconSet: boolean;
+  bots: number;
+  /** Valor ENMASCARADO o null si está vacío. */
+  password: string | null;
+  passwordSet: boolean;
+  rotation: RotationEntry[];
+  unknownLines: string[];
+  metadata: { path: string; lastModified: string; sizeBytes: number };
+}
+
+export interface ServerConfigResponse {
+  config: ServerConfig;
+}
+
+export interface ServerConfigSaveRequest {
+  hostname?: string;
+  motd?: string;
+  gametype?: string;
+  maxclients?: number;
+  logfile?: number;
+  g_log?: string;
+  /** Texto nuevo para reemplazar; el eco enmascarado se interpreta como sin cambio. */
+  rcon?: string;
+  bots?: number;
+  password?: string | null;
+  /** Siempre completa. */
+  rotation?: RotationEntry[];
+}
+
+export interface ServerConfigSaveResponse {
+  saved: boolean;
+  restarted: boolean;
+  backupPath: string;
+  warnings: string[];
+}
+
+export interface RestartServerResponse {
+  restarted: boolean;
+  command: string;
+}
+
 interface RequestOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
   auth?: boolean;
 }
@@ -240,6 +338,11 @@ export const api = {
     return request<{ user: User }>("/auth/me", { auth: true });
   },
 
+  /** PATCH /auth/me: displayName y/o password (con currentPassword). */
+  updateMe(input: { displayName?: string; currentPassword?: string; password?: string }) {
+    return request<{ user: User }>("/auth/me", { method: "PATCH", body: input, auth: true });
+  },
+
   leaderboard(params: LeaderboardParams) {
     const qs = new URLSearchParams();
     if (params.sort) qs.set("sort", params.sort);
@@ -264,9 +367,31 @@ export const api = {
     return request<LinkCandidatesResponse>("/link/complete", { method: "POST", body: {}, auth: true });
   },
 
-  /** POST /link/complete con guid → vincula. */
+  /** POST /link/complete con guid → vincula (multi-GUID; re-vincular propio = idempotente). */
   linkConfirm(guid: string) {
     return request<LinkConfirmResponse>("/link/complete", { method: "POST", body: { guid }, auth: true });
+  },
+
+  /** DELETE /link/:guid → desvincula un GUID propio. */
+  unlinkGuid(guid: string) {
+    return request<UnlinkResponse>(`/link/${encodeURIComponent(guid)}`, { method: "DELETE", auth: true });
+  },
+
+  /** GET /servers — lista pública de servers conocidos. */
+  servers() {
+    return request<ServersResponse>("/servers");
+  },
+
+  getServerConfig() {
+    return request<ServerConfigResponse>("/admin/server-config", { auth: true });
+  },
+
+  putServerConfig(patch: ServerConfigSaveRequest) {
+    return request<ServerConfigSaveResponse>("/admin/server-config", { method: "PUT", body: patch, auth: true });
+  },
+
+  restartServer() {
+    return request<RestartServerResponse>("/admin/server/restart", { method: "POST", body: {}, auth: true });
   },
 
   syncStatus() {

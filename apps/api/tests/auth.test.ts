@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+﻿import { beforeAll, describe, expect, it } from 'vitest';
 import { registerUser, req, resetDb } from './helpers.js';
 
 beforeAll(async () => {
@@ -106,5 +106,52 @@ describe('GET /api/auth/me', () => {
   it('responde 401 con token malformado', async () => {
     const res = await req().get('/api/auth/me').set('Authorization', 'Bearer no-es-un-jwt');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('PATCH /api/auth/me (perfil de usuario)', () => {
+  it('cambia displayName', async () => {
+    const { token } = await registerUser('profile@test.local', 'supersecret123', 'Original Name');
+    const res = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ displayName: 'Nuevo Nombre' });
+    expect(res.status).toBe(200);
+    const body = res.body as { user: { displayName: string; email: string } };
+    expect(body.user.displayName).toBe('Nuevo Nombre');
+    expect(body.user.email).toBe('profile@test.local');
+
+    const me = await req().get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+    expect((me.body as { user: { displayName: string } }).user.displayName).toBe('Nuevo Nombre');
+  });
+
+  it('cambia password validando la actual (y la nueva funciona al loguear)', async () => {
+    const { token } = await registerUser('pwchange@test.local', 'supersecret123', 'PW Change');
+
+    const bad = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ currentPassword: 'incorrecta', password: 'nuevapassword1' });
+    expect(bad.status).toBe(401);
+    expect((bad.body as { error: { code: string } }).error.code).toBe('INVALID_CREDENTIALS');
+
+    const ok = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ currentPassword: 'supersecret123', password: 'nuevapassword1' });
+    expect(ok.status).toBe(200);
+
+    // La vieja ya no sirve; la nueva sí.
+    const oldLogin = await req().post('/api/auth/login').send({ email: 'pwchange@test.local', password: 'supersecret123' });
+    expect(oldLogin.status).toBe(401);
+    const newLogin = await req().post('/api/auth/login').send({ email: 'pwchange@test.local', password: 'nuevapassword1' });
+    expect(newLogin.status).toBe(200);
+  });
+
+  it('validaciones: displayName corto, password sin currentPassword, body vacío', async () => {
+    const { token } = await registerUser('profileval@test.local', 'supersecret123', 'Valid Name');
+
+    const shortName = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ displayName: 'ab' });
+    expect(shortName.status).toBe(400);
+
+    const noCurrent = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ password: 'nuevapassword1' });
+    expect(noCurrent.status).toBe(400);
+
+    const empty = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({});
+    expect(empty.status).toBe(400);
+
+    const noAuth = await req().patch('/api/auth/me').send({ displayName: 'Sin Token' });
+    expect(noAuth.status).toBe(401);
   });
 });

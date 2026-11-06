@@ -21,9 +21,15 @@ export default defineConfig({
       DATABASE_URL: TEST_DATABASE_URL,
       JWT_SECRET: 'test-secret-test-secret-test-secret',
       IW4MADMIN_DB_PATH: resolve(here, 'tests', 'data', 'mock-iw4madmin.sqlite'),
+      // El .env real apunta al games_mp.log local: en tests SE DESACTIVA la fuente log
+      // (cadena vacía → undefined tras el transform del schema) para que el sync de
+      // sync.test.ts use solo el mock determinista.
+      GAME_LOG_PATH: '',
       SYNC_INTERVAL_MINUTES: '0',
+      SYNC_INTERVAL_SECONDS: '0',
       LINK_WINDOW_MINUTES: '10',
       CORS_ORIGIN: 'http://localhost:5173',
+      ADMIN_EMAILS: 'admin-roles@test.local',
     },
   },
 });
