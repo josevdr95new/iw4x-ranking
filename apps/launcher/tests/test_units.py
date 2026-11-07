@@ -12,6 +12,8 @@ Qué verifica (mismo estilo [OK]/[FALLO] que test_smoke.py):
   3. game_flow: build_game_args (nick SIEMPRE forzado con +set name).
   4. app_config: DEFAULT_CONFIG y el merge de claves (propiedades con
      defaults, acotes y limpieza de servers inválidos).
+  5. app_config: normalize_api_url (esquema http:// faltante, barra final,
+     espacios, vacío → default; JAMÁS inventa/corrige puertos).
 
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
 Las suites E2E/GUI (API real, CustomTkinter) viven en tests/test_smoke.py
@@ -27,7 +29,7 @@ from pathlib import Path
 # Importa los módulos del launcher (directorio padre, sin depender del cwd).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
+from app_config import AppConfig, DEFAULT_CONFIG, normalize_api_url  # noqa: E402
 from game_flow import build_game_args, candidate_matches, pick_candidate  # noqa: E402
 import save_sync as ss  # noqa: E402
 from save_sync import (  # noqa: E402
@@ -268,6 +270,67 @@ def phase_app_config() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 5. normalize_api_url: defensa contra configs escritos a mano (pura).
+def phase_normalize_api_url() -> None:
+    print("\n=== Units: normalize_api_url (esquema/barra; JAMÁS inventa puertos) ===")
+
+    # Caso REAL del dueño: escribió "127.0.0.1:5173" (¡puerto de la WEB!) sin
+    # esquema. La normalización solo añade http:// — el puerto se queda tal
+    # cual está (el puerto es el que es; no se corrige ni se adivina).
+    check("caso del dueño: '127.0.0.1:5173' → esquema añadido, puerto intacto",
+          normalize_api_url("127.0.0.1:5173") == "http://127.0.0.1:5173",
+          normalize_api_url("127.0.0.1:5173"))
+    check("host:puerto sin esquema antepone http://",
+          normalize_api_url("192.168.3.99:3000") == "http://192.168.3.99:3000",
+          normalize_api_url("192.168.3.99:3000"))
+    check("localhost:puerto sin esquema antepone http://",
+          normalize_api_url("localhost:3000") == "http://localhost:3000",
+          normalize_api_url("localhost:3000"))
+
+    # Barra final: trim.
+    check("barra final se recorta",
+          normalize_api_url("http://127.0.0.1:3000/") == "http://127.0.0.1:3000",
+          normalize_api_url("http://127.0.0.1:3000/"))
+    check("múltiples barras finales se recortan",
+          normalize_api_url("http://localhost:3000///") == "http://localhost:3000",
+          normalize_api_url("http://localhost:3000///"))
+
+    # Espacios y https explícito se respeta.
+    check("espacios en extremos se recortan",
+          normalize_api_url("  http://localhost:3000  ") == "http://localhost:3000",
+          normalize_api_url("  http://localhost:3000  "))
+    check("https:// explícito se respeta",
+          normalize_api_url("https://api.midominio.com/")
+          == "https://api.midominio.com",
+          normalize_api_url("https://api.midominio.com/"))
+    check("esquema en mayúsculas no se duplica",
+          normalize_api_url("HTTP://localhost:3000") == "HTTP://localhost:3000",
+          normalize_api_url("HTTP://localhost:3000"))
+
+    # Vacío (o solo esquema) → default del contrato.
+    default = DEFAULT_CONFIG["api_url"]
+    check("vacío → default del contrato", normalize_api_url("") == default,
+          normalize_api_url(""))
+    check("solo espacios → default", normalize_api_url("   ") == default,
+          normalize_api_url("   "))
+    check("None → default", normalize_api_url(None) == default,
+          normalize_api_url(None))
+    check("esquema sin host ('http://') → default",
+          normalize_api_url("http://") == default, normalize_api_url("http://"))
+
+    # A través de AppConfig (lo que lee el launcher al arrancar).
+    cfg = AppConfig({"api_url": "127.0.0.1:5173"})
+    check("AppConfig: api_url sin esquema se normaliza al leer",
+          cfg.api_url == "http://127.0.0.1:5173", cfg.api_url)
+    cfg = AppConfig({"api_url": "http://localhost:3000/"})
+    check("AppConfig: barra final se recorta al leer",
+          not cfg.api_url.endswith("/"), cfg.api_url)
+    cfg = AppConfig({"api_url": None})
+    check("AppConfig: api_url None → default",
+          cfg.api_url == default, cfg.api_url)
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -281,6 +344,7 @@ def main() -> int:
     phase_save_sync_pure()
     phase_command_args()
     phase_app_config()
+    phase_normalize_api_url()
 
     fails = sum(1 for r in RESULTS if r.startswith("[FALLO"))
     print("\n================ RESUMEN ================")

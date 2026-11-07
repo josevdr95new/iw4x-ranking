@@ -17,10 +17,23 @@ py apps\launcher\main.py
 apps\launcher\build.bat      →  apps\launcher\dist\IW4xLauncher.exe
 ```
 
-## Configuración — `launcher.config.json`
+## Configuración externa (`launcher.config.json`)
 
-Se crea automáticamente junto al script (o junto al .exe compilado) con estos
-defaults si no existe:
+El launcher NO tiene ajustes bloqueados tras el login: este archivo se lee al
+arrancar y **se puede editar ANTES de iniciar sesión**. Además, la pantalla de
+LOGIN tiene una franja `// CONEXIÓN //` (arriba del formulario) donde se ve la
+API actual, se pulsa **PROBAR** (`GET /api/health`, timeout 3s) y se pulsa
+**GUARDAR** — sin necesidad de editar el archivo a mano. Debajo de la franja
+se muestra la ruta exacta del archivo de config.
+
+### ¿Dónde está el archivo?
+
+| Modo            | Ruta                                                        |
+| --------------- | ----------------------------------------------------------- |
+| Desarrollo      | `apps\launcher\launcher.config.json` (junto a `main.py`)     |
+| .exe congelado  | **Junto al ejecutable**: `apps\launcher\dist\launcher.config.json` (al lado de `IW4xLauncher.exe`) |
+
+### Ejemplo (valores por defecto si no existe)
 
 ```json
 {
@@ -37,9 +50,16 @@ defaults si no existe:
 }
 ```
 
+> **OJO con `api_url`:** apunta a la **API** (puerto **3000**), no a la web
+> (puerto 5173). Un valor como `"127.0.0.1:5173"` deja el launcher sin poder
+> entrar. Si escribes la IP sin esquema (`"127.0.0.1:3000"`), el launcher la
+> normaliza solo a `http://127.0.0.1:3000` (nunca inventa ni cambia puertos).
+> Con la API mal configurada, la franja CONEXIÓN del login queda en rojo
+> (`● SIN CONEXIÓN — revisa la IP`) para que lo veas antes de intentar entrar.
+
 | Clave                   | Significado                                                  |
 | ----------------------- | ------------------------------------------------------------ |
-| `api_url`               | Base de la API (el launcher añade el prefijo `/api/...`). Editable en Ajustes. |
+| `api_url`               | Base de la API (el launcher añade el prefijo `/api/...`). Editable **desde el login** (franja CONEXIÓN) y en Ajustes. |
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
@@ -86,8 +106,8 @@ py apps\launcher\tests\test_smoke.py   # solo E2E/GUI (requiere API :3000)
 | Archivo              | Qué cubre |
 | -------------------- | --------- |
 | `tests/run_all.py`   | Runner: ejecuta **units primero** y **smoke después**; resumen por archivo (checks OK/fallidos, tiempo, exit del proceso) y exit != 0 si algo falla. |
-| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: `candidate_matches` / `pick_candidate` (nicks ^X, recencia), puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), `build_game_args` (+set name SIEMPRE) y defaults/merge de `app_config`. |
-| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR + `+set name`, guard de nick, verificación de identidad automática, stats en vivo, cloud-sync (pipeline stub + E2E contra la API), 409s (`GUID_ALREADY_LINKED` / `USER_ALREADY_LINKED`) y regresión visual del formulario. |
+| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: `candidate_matches` / `pick_candidate` (nicks ^X, recencia), puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config` y `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`). |
+| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR + `+set name`, guard de nick, verificación de identidad automática, stats en vivo, cloud-sync (pipeline stub + E2E contra la API), 409s (`GUID_ALREADY_LINKED` / `USER_ALREADY_LINKED`), regresión visual del formulario y de la **franja CONEXIÓN del login** (URL visible + botón PROBAR antes del login). |
 
 Cuenta de prueba: `launcher-test@test.local` / `LauncherTest2026` (la crea el
 propio smoke si la DB está limpia). NO es pytest: scripts secuenciales que

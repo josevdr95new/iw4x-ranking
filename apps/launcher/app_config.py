@@ -44,6 +44,37 @@ def config_path() -> Path:
     return base / "launcher.config.json"
 
 
+def normalize_api_url(url: str, default: str = DEFAULT_CONFIG["api_url"]) -> str:
+    """Normaliza la dirección de la API (pura, defensiva).
+
+    Reglas:
+    - Trim de espacios en los extremos y de la(s) barra(s) final(es).
+    - Sin esquema (``http://``/``https://``) → se antepone ``http://``. Esto
+      cubre el error real del dueño (``"127.0.0.1:5173"`` en el config):
+      el puerto NO se toca jamás — solo se añade esquema, nunca se inventa.
+    - ``https://`` explícito se respeta tal cual (mayúsculas incluidas).
+    - Vacío o sin host tras normalizar (p.ej. ``"http://"``) → default.
+
+    Devuelve SIEMPRE una URL con esquema y sin barra final.
+    """
+    cleaned = str(url or "").strip()
+    if not cleaned:
+        return default
+    # Separar esquema (si lo hay) del host+puerto antes de recortar barras:
+    # así "http://" (solo esquema) no se convierte en "http:" por el rstrip.
+    lower = cleaned.lower()
+    if lower.startswith("http://"):
+        scheme, rest = cleaned[:7], cleaned[7:]
+    elif lower.startswith("https://"):
+        scheme, rest = cleaned[:8], cleaned[8:]
+    else:
+        scheme, rest = "", cleaned
+    rest = rest.rstrip("/")
+    if not rest:
+        return default
+    return (scheme or "http://") + rest
+
+
 class AppConfig:
     """Envoltura tipada y ligera sobre el diccionario de configuración."""
 
@@ -53,7 +84,11 @@ class AppConfig:
     # --- Propiedades de lectura -------------------------------------------
     @property
     def api_url(self) -> str:
-        return str(self.data.get("api_url", DEFAULT_CONFIG["api_url"])).rstrip("/")
+        # normalize_api_url añade esquema si falta y recorta la barra final:
+        # un config escrito a mano ("127.0.0.1:3000") nunca rompe el cliente.
+        return normalize_api_url(
+            str(self.data.get("api_url") or ""), DEFAULT_CONFIG["api_url"]
+        )
 
     @property
     def game_path(self) -> str:
@@ -138,8 +173,11 @@ def load_config() -> AppConfig:
     # Merge: defaults para claves ausentes (el archivo puede ser viejo).
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
+    # api_url normalizado también en carga (esquema garantizado, sin barra):
+    # la propiedad ya normaliza al leer, aquí lo dejamos consistente en el dict.
+    merged["api_url"] = normalize_api_url(merged.get("api_url"))
     # 'force_nick' quedó obsoleto (el nick SIEMPRE se fuerza): se purga
     # silenciosamente para que no vuelva al archivo al guardar.
     merged.pop("force_nick", None)
-    log.info("Config cargada desde %s", path)
+    log.info("Config cargada desde %s (api_url=%s)", path, merged["api_url"])
     return AppConfig(merged)

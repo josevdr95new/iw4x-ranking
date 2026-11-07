@@ -347,6 +347,14 @@ def phase_register_or_login() -> None:
             # En modo login el email NO debe estar visible.
             check("login sin email a la vista (solo registro)",
                   not app.login_frame.email_box.winfo_ismapped())
+            # Franja CONEXIÓN: URL de la API y PROBAR visibles ANTES del login
+            # (con la API mal apuntada no se puede ni entrar: callejón sin salida).
+            check("login: franja CONEXIÓN con URL y botón PROBAR",
+                  bool(app.login_frame.conn_strip.winfo_ismapped())
+                  and "localhost:3000" in app.login_frame.conn_url_text()
+                  and bool(app.login_frame.conn_test_btn.winfo_ismapped()),
+                  f"url={app.login_frame.conn_url_text()!r} "
+                  f"strip_mgr={app.login_frame.conn_strip.winfo_manager()!r}")
             done()
         wait_in_app(app, lambda: app.current_frame is app.login_frame, ok, timeout=10)
 
