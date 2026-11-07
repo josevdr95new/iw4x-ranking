@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from api_client import ApiClient, ApiError, NetworkError  # noqa: E402
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
-from game_flow import GameFlow  # noqa: E402
+from game_flow import GameFlow, build_game_args  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
 from ui.dialogs import CandidateDialog  # noqa: E402
 from ui.main_window import App  # noqa: E402
@@ -477,6 +477,17 @@ def phase_play_linked() -> None:
                   "solo abrimos el juego" in console)
             check("estado de éxito tras abrir (simulado)", "Juego abierto" in status,
                   status)
+            check(
+                "JUGAR pasa el nick del ranking al comando (+set name)",
+                '+set name "Launcher Test"' in console and "+connect" in console,
+                console[-300:],
+            )
+            check(
+                "home muestra 'Jugando como: <displayName>'",
+                str(app.home_frame.play_as.cget("text"))
+                == "Jugando como: Launcher Test",
+                str(app.home_frame.play_as.cget("text")),
+            )
             done()
 
         wait_in_app(
@@ -601,15 +612,63 @@ def phase_flow_logic() -> None:
           and "No se pudo conectar" in failed.get("msg", ""),
           str(failed))
 
-    # Ya vinculado → sin link/start y éxito inmediato.
+    # Ya vinculado → sin link/start y éxito inmediato (+ nick forzado).
     stub = StubApi()
-    flow = GameFlow(stub, "tok", "x", "127.0.0.1:28961", lambda e: None,
-                    already_linked=True, simulate=True)
-    evs = []
-    flow.emit = evs.append  # type: ignore[assignment]
+    evs: List[Dict[str, Any]] = []
+    flow = GameFlow(stub, "tok", r"D:\Games\iw4x.exe", "127.0.0.1:28961",
+                    evs.append, already_linked=True, simulate=True,
+                    force_nick=True, display_name="El Tester")
     flow.run()
     check("cuenta ya vinculada → no llama a link/start",
           stub.link_start_calls == 0 and any(e["t"] == "success" for e in evs))
+    check("flujo simulado registra comando con +set name y +connect",
+          any(e.get("t") == "log"
+              and '+set name "El Tester"' in e.get("msg", "")
+              and "+connect" in e.get("msg", "") for e in evs),
+          str(evs)[:300])
+
+    # force_nick sin displayName → arranca sin forzar, con motivo en el log.
+    stub = StubApi()
+    evs = []
+    flow = GameFlow(stub, "tok", r"D:\Games\iw4x.exe", "127.0.0.1:28961",
+                    evs.append, already_linked=True, simulate=True,
+                    force_nick=True, display_name="")
+    flow.run()
+    check("sin displayName → avisa y no fuerza nick",
+          any("no se fuerza el nick" in e.get("msg", "")
+              for e in evs if e.get("t") == "log")
+          and not any("+set" in e.get("msg", "")
+                      for e in evs if e.get("t") == "log"),
+          str(evs)[:300])
+
+
+def phase_command_args() -> None:
+    """Fase lógica: armado del comando de arranque (función pura, sin juego)."""
+    print("\n=== Fase lógica: comando de arranque (+set name) ===")
+
+    args = build_game_args(r"D:\Games\Call of Duty 6\iw4x.exe",
+                           "192.168.2.251:28960", "Mandango ProMax", force_nick=True)
+    check("comando: exe primero, +connect último",
+          args[0] == r"D:\Games\Call of Duty 6\iw4x.exe"
+          and args[-1] == "192.168.2.251:28960", str(args))
+    check("comando: +set name <nick> (con espacios) ANTES de +connect",
+          args[1:5] == ["+set", "name", "Mandango ProMax", "+connect"], str(args))
+    check("comando: lista plana de 6 argumentos (sin shell)",
+          len(args) == 6 and all(isinstance(a, str) for a in args), str(args))
+
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "", force_nick=True)
+    check("sin displayName → no fuerza nick",
+          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
+
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "Tag", force_nick=False)
+    check("force_nick desactivado → no fuerza nick",
+          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
+
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "  Spam Bot  ",
+                           force_nick=True)
+    check("nick con espacios en extremos se recorta",
+          args == ["iw4x.exe", "+set", "name", "Spam Bot", "+connect",
+                   "1.2.3.4:28960"], str(args))
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +735,7 @@ def main() -> int:
     phase_link_real()
     phase_play_linked()
     phase_flow_logic()
+    phase_command_args()
     phase_dialog()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.

@@ -30,6 +30,31 @@ log = logging.getLogger("game_flow")
 EventCallback = Callable[[Dict[str, Any]], None]
 
 
+def build_game_args(
+    game_path: str,
+    server_address: str,
+    display_name: str = "",
+    force_nick: bool = False,
+) -> List[str]:
+    """Construye el comando de arranque del juego (función pura, testeable).
+
+    Devuelve una LISTA de argumentos (nunca string para shell): así los
+    espacios en el nick no rompen nada. Formato:
+
+        [iw4x.exe, +set, name, <nick>, +connect, <ip:puerto>]
+
+    Los engines Q3 procesan ``+set`` después de cargar las configs, por lo
+    que el nick queda vigente para la sesión aunque el config del juego
+    tenga guardado otro nombre.
+    """
+    args = [game_path]
+    nick = (display_name or "").strip()
+    if force_nick and nick:
+        args += ["+set", "name", nick]
+    args += ["+connect", server_address]
+    return args
+
+
 class GameFlow:
     """Un intento de 'jugar' (con o sin vinculación pendiente)."""
 
@@ -45,6 +70,8 @@ class GameFlow:
         simulate: bool = False,
         poll_interval: int = 10,
         poll_max_seconds: int = 180,
+        force_nick: bool = False,
+        display_name: str = "",
     ) -> None:
         self.api = api
         self.token = token
@@ -55,6 +82,8 @@ class GameFlow:
         self.simulate = simulate
         self.poll_interval = poll_interval
         self.poll_max_seconds = poll_max_seconds
+        self.force_nick = force_nick
+        self.display_name = display_name
 
         # Sincronización con el diálogo de candidatos (multi-GUID detectado).
         self._choice = threading.Event()
@@ -115,8 +144,21 @@ class GameFlow:
 
     def _launch_game(self) -> bool:
         """Abre iw4x.exe conectando al server elegido. False si no se pudo."""
+        # Aviso si el usuario quiere forzar nick pero la cuenta no tiene uno
+        # utilizable: el juego arrancará con su nick guardado.
+        if self.force_nick and not (self.display_name or "").strip():
+            self._log(
+                "Tu cuenta no tiene nombre visible: el juego usará su nick "
+                "guardado (no se fuerza el nick del ranking)."
+            )
+
+        cmd = build_game_args(
+            self.game_path, self.server_address, self.display_name, self.force_nick
+        )
+
         if self.simulate:
             self._log("SIMULACIÓN: se omite la apertura del juego (modo prueba).")
+            self._log("SIMULACIÓN: comando: " + subprocess.list2cmdline(cmd))
             return True
 
         exe = Path(self.game_path)
@@ -128,12 +170,9 @@ class GameFlow:
             )
             return False
 
-        self._log(f"Abriendo juego… +connect {self.server_address}")
+        self._log(f"Abriendo juego… {subprocess.list2cmdline(cmd[1:])}")
         try:
-            subprocess.Popen(
-                [str(exe), "+connect", self.server_address],
-                cwd=str(exe.parent),
-            )
+            subprocess.Popen(cmd, cwd=str(exe.parent))
             return True
         except OSError as exc:
             self._failed(f"No se pudo abrir el juego: {exc}", retry=True)

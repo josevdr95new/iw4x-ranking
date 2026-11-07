@@ -43,6 +43,7 @@ defaults si no existe:
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
+| `force_nick`            | **true** por defecto: fuerza el nick del ranking en el juego (`+set name <displayName>` antes de `+connect`). Editable en Ajustes ("Forzar mi nick del ranking en el juego"). Si la cuenta no tiene displayName, el juego abre con su nick guardado (se avisa en la consola). |
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el polling de vinculación contra la API). |
 | `link_poll_interval`    | Segundos entre consultas de candidatos (default 10).          |
 | `link_poll_max_seconds` | Tiempo máximo de espera de conexión (default 180 = 3 min).    |
@@ -55,7 +56,11 @@ defaults si no existe:
 ## Flujo JUGAR
 
 1. Si `/auth/me` indica cuenta sin `linkedGuid` → `POST /api/link/start`.
-2. Lanza `iw4x.exe +connect <server>` (subprocess, cwd = carpeta del juego).
+2. Lanza `iw4x.exe +set name <displayName> +connect <server>` (subprocess con
+   lista de args, cwd = carpeta del juego). El `+set name` solo se añade si
+   `force_nick` está activo y la cuenta tiene displayName: los engines Q3
+   procesan `+set` tras cargar configs, así el nick del ranking gana al nick
+   guardado en el config del juego, sin tocar archivos.
 3. `POST /api/link/complete` (poll): 1 candidato → confirmación automática;
    varios → diálogo para elegir el tuyo; ninguno → espera y reintento hasta
    3 min. Un `409 USER_ALREADY_LINKED` se trata como éxito.

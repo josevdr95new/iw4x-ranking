@@ -65,6 +65,14 @@ class SettingsFrame(ctk.CTkFrame):
         )
         self.server_menu.pack(anchor="w", padx=22, pady=(0, 14))
 
+        # --- Forzar nick del ranking ------------------------------------------
+        self.force_nick_check = ctk.CTkCheckBox(
+            card, text="Forzar mi nick del ranking en el juego", font=font(12),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            checkmark_color="#ffffff", text_color=COLORS["text"],
+        )
+        self.force_nick_check.pack(anchor="w", padx=22, pady=(2, 14))
+
         # --- Acciones -------------------------------------------------------
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.pack(fill="x", padx=22, pady=(4, 10))
@@ -106,6 +114,10 @@ class SettingsFrame(ctk.CTkFrame):
         idx = min(max(cfg.default_server, 0), len(labels) - 1) if labels else 0
         if labels:
             self.server_menu.set(labels[idx])
+        if cfg.force_nick:
+            self.force_nick_check.select()
+        else:
+            self.force_nick_check.deselect()
         self.feedback.configure(text="", text_color=COLORS["text_dim"])
 
     # --- Acciones ------------------------------------------------------------
@@ -171,6 +183,7 @@ class SettingsFrame(ctk.CTkFrame):
         cfg.set("api_url", base)
         cfg.set("game_path", self.game_path.get().strip())
         cfg.set("default_server", idx)
+        cfg.set("force_nick", bool(self.force_nick_check.get()))
         cfg.save()
 
         # Aplicar en caliente: nuevo cliente con la URL actualizada.

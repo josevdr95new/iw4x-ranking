@@ -83,6 +83,13 @@ class HomeFrame(ctk.CTkFrame):
         )
         self.status.pack(side="left", padx=14)
 
+        # Identidad con la que se jugará (nick del ranking forzado en el juego).
+        self.play_as = ctk.CTkLabel(
+            body, text="", font=font(11), text_color=COLORS["text_dim"],
+            anchor="w",
+        )
+        self.play_as.pack(fill="x", pady=(6, 0))
+
         # Botón grande JUGAR.
         self.play_btn = ctk.CTkButton(
             body, text="JUGAR", height=64, font=font(22, "bold"),
@@ -144,6 +151,13 @@ class HomeFrame(ctk.CTkFrame):
 
     def _on_server_change(self, _label: str) -> None:
         self.log_line(f"Server seleccionado: {self.selected_server()}")
+
+    def set_play_as(self, display_name: str, force_nick: bool) -> None:
+        """Línea discreta 'Jugando como: <nick>' (solo si se fuerza el nick)."""
+        if force_nick and (display_name or "").strip():
+            self.play_as.configure(text=f"Jugando como: {display_name.strip()}")
+        else:
+            self.play_as.configure(text="")
 
     def set_status(self, text: str, kind: str = "dim") -> None:
         """Texto de estado junto al selector (dim/ok/warn/error)."""

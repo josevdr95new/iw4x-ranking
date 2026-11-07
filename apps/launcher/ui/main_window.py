@@ -228,7 +228,13 @@ class App(ctk.CTk):
         if self.user is None:
             return
         self.home_frame.set_user(self.user)
+        self._update_play_as()
         self.show_home()
+
+    def _update_play_as(self) -> None:
+        """Refresca 'Jugando como: <nick>' según usuario y config."""
+        name = str((self.user or {}).get("displayName") or "")
+        self.home_frame.set_play_as(name, self.cfg.force_nick)
 
     def refresh_me(self) -> None:
         """GET /auth/me para refrescar el badge tras vincular (o al volver)."""
@@ -258,6 +264,7 @@ class App(ctk.CTk):
     def refresh_home_servers(self) -> None:
         """Recarga el dropdown de servers de la home desde la config."""
         self.home_frame.set_servers(self.cfg.servers, self.cfg.default_server)
+        self._update_play_as()  # force_nick puede haber cambiado en Ajustes
 
     def apply_api_url(self, base_url: str) -> None:
         """Cambia el cliente de API (tras editar ajustes)."""
@@ -287,6 +294,7 @@ class App(ctk.CTk):
             return
 
         linked = user_is_linked(self.user)
+        display_name = str((self.user or {}).get("displayName") or "")
         home = self.home_frame
         home.set_playing(True)
         home.set_status("Conectando…", "warn")
@@ -302,6 +310,8 @@ class App(ctk.CTk):
             simulate=self.cfg.simulate_game,
             poll_interval=self.cfg.link_poll_interval,
             poll_max_seconds=self.cfg.link_poll_max_seconds,
+            force_nick=self.cfg.force_nick,
+            display_name=display_name,
         )
         threading.Thread(target=self.flow.run, daemon=True, name="game-flow").start()
 
