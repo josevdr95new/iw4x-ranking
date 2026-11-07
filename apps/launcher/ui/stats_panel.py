@@ -1,7 +1,8 @@
 """Panel "// TUS STATS //" en vivo de la pantalla principal.
 
-Muestra rank/kills/deaths/k/d + tiempo jugado, último server y nombre actual
-del jugador. Los datos los trae App (GET /api/players/:guid cada 30s o con
+Muestra rank/kills/deaths/headshots/k/d + tiempo jugado, último server y
+nombre actual del jugador (con el ratio de headshots en la línea de
+detalle). Los datos los trae App (GET /api/players/:guid cada 30s o con
 el botón ↻); este panel solo pinta y lleva el contador de edad ("hace 12s").
 
 El color del K/D sigue los umbrales del diseño (docs/DESIGN.md §1.1):
@@ -112,6 +113,7 @@ class StatsPanel(ctk.CTkFrame):
             ("rank", "RANK", 24, COLORS["ok"]),
             ("kills", "KILLS", 18, COLORS["text"]),
             ("deaths", "DEATHS", 18, COLORS["text"]),
+            ("hs", "HEADSHOTS", 18, COLORS["text"]),
             ("kd", "K/D", 18, COLORS["text"]),
         ]
         for col, (key, caption, size, color) in enumerate(specs):
@@ -181,6 +183,7 @@ class StatsPanel(ctk.CTkFrame):
         )
         self._blocks["kills"].configure(text=_fmt_int(player.get("kills")))
         self._blocks["deaths"].configure(text=_fmt_int(player.get("deaths")))
+        self._blocks["hs"].configure(text=_fmt_int(player.get("headshots")))
         kd_text = _fmt_kd(player.get("kd"))
         self._blocks["kd"].configure(
             text=kd_text, text_color=_kd_color(player.get("kd"))
@@ -188,10 +191,18 @@ class StatsPanel(ctk.CTkFrame):
 
         server = str(last_server) if last_server else "—"
         name = str(player.get("name") or "—")
+        # Ratio de headshots (hint equivalente al K/D, sin engordar el grid):
+        # 'HS 15% de bajas' en la línea de detalle; '—' si el perfil no trae
+        # hsRatio (0 kills o perfil viejo). Se ignora el legacy headshotPct.
+        try:
+            hs_ratio = f"{float(player.get('hsRatio')) * 100:.0f}%"
+        except (TypeError, ValueError):
+            hs_ratio = "—"
         self.sub_label.configure(
             text=f"TIEMPO {_fmt_time(player.get('timePlayed'))}"
                  f"   //   SERVER {server}"
                  f"   //   JUGADOR {name}"
+                 f"   //   HS {hs_ratio} de bajas"
         )
         # Reinicia el contador de edad y arranca el ticker de 1s.
         self._last_ok = time.monotonic()
@@ -228,7 +239,8 @@ class StatsPanel(ctk.CTkFrame):
         """Todos los valores a '—' (antes de la primera respuesta)."""
         default_colors = {
             "rank": COLORS["ok"], "kills": COLORS["text"],
-            "deaths": COLORS["text"], "kd": COLORS["text"],
+            "deaths": COLORS["text"], "hs": COLORS["text"],
+            "kd": COLORS["text"],
         }
         for key, block in self._blocks.items():
             block.configure(text="—", text_color=default_colors[key])

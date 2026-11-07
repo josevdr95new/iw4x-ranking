@@ -494,17 +494,57 @@ def phase_stats() -> None:
             rank = str(panel._blocks["rank"].cget("text"))
             kills = str(panel._blocks["kills"].cget("text"))
             deaths = str(panel._blocks["deaths"].cget("text"))
+            hs = str(panel._blocks["hs"].cget("text"))
             kd = str(panel._blocks["kd"].cget("text"))
             sub = str(panel.sub_label.cget("text"))
             check("panel de stats carga con valores reales (no '—')",
                   "—" not in (kills + kd), f"rank={rank} kills={kills} kd={kd}")
             check("fila secundaria con tiempo jugado, server y jugador",
                   "TIEMPO" in sub and "SERVER" in sub and "JUGADOR" in sub, sub)
+            check("bloque HEADSHOTS con el valor real del perfil",
+                  hs != "—" and hs.replace(".", "").isdigit(),
+                  f"hs={hs} (esperado entero formateado)")
+            # Segmento HS de la línea de detalle: "N%" normal, "—" solo válido
+            # con 0 kills (hsRatio null). Autoconsistente con el propio panel.
+            after_hs = sub.split("HS ", 1)[1] if "HS " in sub else ""
+            hs_seg = after_hs.split(" de bajas", 1)[0].strip() if " de bajas" in after_hs else ""
+            check("línea de detalle con el ratio de headshots (N% o '—')",
+                  bool(hs_seg) and (hs_seg.endswith("%") or hs_seg == "—")
+                  and (hs_seg != "—" or kills.replace(".", "") == "0"),
+                  f"hs_seg={hs_seg!r} kills={kills}")
             check("edad del dato visible ('hace Ns')",
                   "hace " in str(panel.age_label.cget("text")),
                   str(panel.age_label.cget("text")))
-            print(f"    panel: RANK={rank} KILLS={kills} DEATHS={deaths} K/D={kd}")
+            print(f"    panel: RANK={rank} KILLS={kills} DEATHS={deaths} "
+                  f"HS={hs} K/D={kd}")
             print(f"    sub: {sub}")
+            # Inyección sintética dentro del panel real: primero un perfil
+            # actual (headshots + hsRatio → '2' y 'HS 6% de bajas') y luego
+            # uno "viejo" sin esos campos → bloque '—' y 'HS —', sin crash.
+            try:
+                panel.set_values(
+                    {"name": "Con HS", "kills": 31, "deaths": 20,
+                     "kd": 1.55, "headshots": 2, "hsRatio": 0.06,
+                     "timePlayed": 3600},
+                    1, "SRV",
+                )
+                con_hs = (str(panel._blocks["hs"].cget("text")) == "2"
+                          and "HS 6% de bajas" in str(panel.sub_label.cget("text")))
+                panel.set_values(
+                    {"name": "Legacy", "kills": 31, "deaths": 20,
+                     "kd": 1.55, "timePlayed": 3600},
+                    1, "SRV",
+                )
+                sin_hs = (str(panel._blocks["hs"].cget("text")) == "—"
+                          and "HS —" in str(panel.sub_label.cget("text")))
+                check("perfil con y sin headshots: '2'/'HS 6% de bajas' y luego '—'/'HS —' sin crash",
+                      con_hs and sin_hs,
+                      f"con_hs={con_hs} sin_hs={sin_hs} "
+                      f"hs={panel._blocks['hs'].cget('text')} "
+                      f"sub={panel.sub_label.cget('text')}")
+            except Exception as exc:  # noqa: BLE001
+                check("perfil con y sin headshots: '2'/'HS 6% de bajas' y luego '—'/'HS —' sin crash",
+                      False, repr(exc))
             done()
 
         # 20s: la primera carga se programa a ~600ms y la API es local.
