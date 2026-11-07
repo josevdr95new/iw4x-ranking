@@ -94,6 +94,7 @@ export interface ServersResponse {
 export type LeaderboardSort =
   | "kills"
   | "deaths"
+  | "headshots"
   | "kd"
   | "timePlayed"
   | "skill";
@@ -125,6 +126,8 @@ export interface LeaderboardPlayer {
   linked: boolean;
   /** true si el GUID es un bot del server. Opcional: si la API aún no lo envía, el UI usa la heurística del rango 0xB07. */
   isBot?: boolean;
+  /** Tiros a la cabeza acumulados. Opcional: API anterior puede no enviarlo. */
+  headshots?: number;
 }
 
 export interface LeaderboardResponse {
@@ -159,6 +162,12 @@ export interface PlayerProfile {
   timePlayed: number;
   connections: number;
   skill: number | null;
+  /** Tiros a la cabeza acumulados. Opcional: API anterior puede no enviarlo. */
+  headshots?: number;
+  /** Headshots como % de kills (ej. 6.45). Tolerado: usar `hsRatio` (más nuevo). */
+  headshotPct?: number | null;
+  /** headshots / kills, 2 decimales (0.06); null si 0 kills. Preferido sobre headshotPct. */
+  hsRatio?: number | null;
   firstConnection: string;
   lastConnection: string;
   linked: boolean;
@@ -299,6 +308,8 @@ export type IamPenaltyRecordType = IamPenaltyType | "unban";
 export interface IamPenaltyParty {
   clientId: number;
   name: string;
+  /** GUID del ranking (decimal). NUEVO aditivo: base para POST /unban. */
+  guid?: string | null;
 }
 
 /** Shape único usado por /clients (openPenalties) y /penalties. Campos tolerantes: la DB upstream puede traer null. */
@@ -309,6 +320,10 @@ export interface IamPenalty {
   automated?: boolean;
   when: string;
   expires?: string | null;
+  /** NUEVO aditivo: true si la penalidad sigue vigente (ban/tempban no revocados ni expirados). */
+  active?: boolean;
+  /** NUEVO aditivo: origen del registro ("panel" | "enforcer" | "juego"…). */
+  source?: string | null;
   offender?: IamPenaltyParty | null;
   punisher?: IamPenaltyParty | null;
 }
@@ -338,9 +353,16 @@ export interface IamPenaltiesResponse {
 
 export interface IamLivePlayer {
   name: string;
-  /** null si no se pudo resolver (player con otro nombre, bots…). */
+  /** Player.id del ranking si el guid está en nuestra base; null si aún no (tolerar). */
   clientId: number | null;
+  /** Slot/cid del server. SIEMPRE presente para conectados (acciones directas, bots incluidos). */
   clientNumber: number | null;
+  /** GUID decimal del ranking, o "botN" para bots. Opcional: tolera APIs previas. */
+  guid?: string | null;
+  /** true si es un bot del server (sin Player en la base → clientId null, se actúa por cid). */
+  isBot?: boolean;
+  /** true mientras el jugador está aún conectándose. */
+  connecting?: boolean;
   level: string | null;
   ping: number | null;
   score: number | null;
@@ -351,6 +373,10 @@ export interface IamLiveServer {
   id: number;
   name: string;
   online: boolean;
+  /** NUEVO aditivo: mapa actual (ej. "mp_terminal"). */
+  map?: string | null;
+  /** NUEVO aditivo: modo de juego actual (ej. "war"). */
+  gametype?: string | null;
   players: IamLivePlayer[];
 }
 
@@ -362,9 +388,39 @@ export interface IamPenaltyRequest {
   type: IamPenaltyType;
   /** Obligatorio: 3–200 chars. */
   reason: string;
-  clientId: number;
+  /** Player.id del ranking (preferente: permite ban offline). Enviar clientId O cid O clientName. */
+  clientId?: number;
+  /** Slot directo del server (status): imprescindible para bots (sin Player en la base). */
+  cid?: number;
+  /** Match EXACTO limpio contra los conectados; ambiguo → 400 pidiendo clientId/cid. */
+  clientName?: string;
   /** Solo tempban: 1..43200 minutos. */
   durationMinutes?: number;
+}
+
+/** POST /iam/unban: exactamente una clave (clientId | guid | cid). */
+export interface IamUnbanRequest {
+  clientId?: number;
+  /** HEX (formato status/bans.json) o decimal del ranking. */
+  guid?: string;
+  /** Slot conectado. */
+  cid?: number;
+}
+
+/** Entrada de bans.json del server (GET /iam/bans, solo lectura). */
+export interface IamBanEntry {
+  kind: "ip" | "guid";
+  value: string;
+  /** Solo kind "guid": el mismo ban en decimal del ranking. */
+  guidDecimal: string | null;
+}
+
+/** GET /iam/bans — bans.json del server. Sin env → configured:false y lista vacía; sin archivo → exists:false. */
+export interface IamBansResponse {
+  configured: boolean;
+  exists: boolean;
+  file: string | null;
+  bans: IamBanEntry[];
 }
 
 export interface IamPenaltyResponse {
@@ -604,6 +660,20 @@ export const api = {
       body: input,
       auth: true,
     });
+  },
+
+  /** POST /iam/unban: revoca el ban permanente del server (bans.json) y marca nuestras penalidades como revocadas. */
+  iamUnban(input: IamUnbanRequest) {
+    return request<IamPenaltyResponse>("/admin/iam/unban", {
+      method: "POST",
+      body: input,
+      auth: true,
+    });
+  },
+
+  /** GET /iam/bans: lectura de bans.json del server (los bans permanentes viven allí y sobreviven reinicios). */
+  iamBans() {
+    return request<IamBansResponse>("/admin/iam/bans", { auth: true });
   },
 
   /* Identidad — ADMIN (docs/API.md §Admin). */

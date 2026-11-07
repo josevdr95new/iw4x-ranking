@@ -28,8 +28,8 @@ function PlayerSkeleton() {
           <Skeleton className="h-3 w-72" />
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-6">
-        {Array.from({ length: 6 }, (_, index) => (
+      <div className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-7">
+        {Array.from({ length: 7 }, (_, index) => (
           <div key={index} className="bg-surface p-4">
             <Skeleton className="h-2.5 w-16" />
             <Skeleton className="mt-3 h-6 w-20" />
@@ -209,6 +209,10 @@ export function PlayerPage() {
   const online = isOnline(player.lastConnection);
   const initials = initialsOf(player.name);
 
+  // Headshots: hsRatio (headshots/kills, 2 dec) es el campo nuevo; fallback a headshotPct (API previa).
+  const hsRatio = player.hsRatio ?? (player.headshotPct !== null && player.headshotPct !== undefined ? player.headshotPct / 100 : null);
+  const hsPercent = hsRatio !== null && hsRatio !== undefined ? Math.round(hsRatio * 100) : null;
+
   return (
     <div>
       <Link
@@ -272,7 +276,7 @@ export function PlayerPage() {
         </div>
 
         {/* Stat strip: celdas con hairlines, NO cards (§3.3) */}
-        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-6">
+        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-7">
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">Kills</dt>
             <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.kills)}</dd>
@@ -280,6 +284,13 @@ export function PlayerPage() {
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">Muertes</dt>
             <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.deaths)}</dd>
+          </div>
+          <div className="bg-surface p-4">
+            <dt className="type-label text-text-2">Tiros a la cabeza</dt>
+            <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.headshots ?? 0)}</dd>
+            <dd className="type-caption mt-1 text-text-2">
+              {hsPercent !== null ? `${formatInt(hsPercent)}% de tus bajas` : "sin bajas aún"}
+            </dd>
           </div>
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">K/D</dt>

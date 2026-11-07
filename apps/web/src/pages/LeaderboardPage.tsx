@@ -371,6 +371,9 @@ export function LeaderboardPage() {
                   <th scope="col" className="w-[10%] px-3 py-2.5 text-right" aria-sort={sort === "deaths" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="Muertes" field="deaths" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
+                  <th scope="col" className="w-[9%] px-3 py-2.5 text-right" aria-sort={sort === "headshots" ? (order === "desc" ? "descending" : "ascending") : undefined}>
+                    <SortableHeader label="HS" field="headshots" ariaLabel="headshots" activeField={sort} activeOrder={order} onSort={handleSort} />
+                  </th>
                   <th scope="col" className="w-[8%] px-3 py-2.5 text-right" aria-sort={sort === "kd" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="K/D" field="kd" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
@@ -405,6 +408,9 @@ export function LeaderboardPage() {
                     </td>
                     <td data-numeric className="px-3 py-2.5 text-right">
                       <span className="type-number-m text-text">{formatInt(player.deaths)}</span>
+                    </td>
+                    <td data-numeric className="px-3 py-2.5 text-right">
+                      <span className="type-number-m text-text">{formatInt(player.headshots ?? 0)}</span>
                     </td>
                     <td data-numeric className="px-3 py-2.5 text-right">
                       <KdBadge value={player.kd} />
@@ -451,7 +457,7 @@ export function LeaderboardPage() {
                       </p>
                       <p className="type-caption mt-0.5 tabular text-text-2">
                         {formatInt(player.kills)} K · {formatInt(player.deaths)} M ·{" "}
-                        {formatDuration(player.timePlayed)}
+                        {formatInt(player.headshots ?? 0)} HS · {formatDuration(player.timePlayed)}
                         {player.skill !== null && player.skill !== undefined && (
                           <>
                             {" "}· Skill {formatSkill(player.skill)}

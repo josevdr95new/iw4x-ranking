@@ -1,12 +1,16 @@
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  ChevronUp,
   CircleAlert,
   Gavel,
   Inbox,
   RefreshCcw,
   Search,
   SearchX,
+  ShieldAlert,
+  ShieldOff,
   Users,
   WifiOff,
   X,
@@ -14,6 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, api } from "../../lib/api";
 import type {
+  IamBansResponse,
   IamLiveResponse,
   IamPenalty,
   IamPenaltyRecordType,
@@ -33,13 +38,11 @@ import { formatInt, formatRelative } from "../../lib/format";
 
 const LIVE_POLL_MS = 15000;
 const CLIENT_SEARCH_DEBOUNCE_MS = 400;
+const KICK_DEFAULT_REASON = "Expulsado por un administrador";
 
-const PENALTY_LABEL_TO_TYPE: Array<{ type: IamPenaltyType; label: string }> = [
-  { type: "warn", label: "WARN" },
-  { type: "kick", label: "KICK" },
-  { type: "tempban", label: "TEMPBAN" },
-  { type: "ban", label: "BAN" },
-];
+/** El server no respondió por rcon (502 MODERATION_UNREACHABLE): mensaje claro de server caído. */
+const SERVER_DOWN_TEXT =
+  "El server no respondió por RCON — puede estar caído o reiniciando. Vuelve a intentarlo en unos segundos.";
 
 /** Badge de color por tipo de penalidad: warn avisa, kick neutral, bans peligro, unban éxito. */
 function PenaltyTypeBadge({ type }: { type: IamPenaltyRecordType }) {
@@ -54,6 +57,27 @@ function PenaltyTypeBadge({ type }: { type: IamPenaltyRecordType }) {
   return <Badge variant={variant}>{PENALTY_TYPE_LABEL[type]}</Badge>;
 }
 
+/** Badge de bot: idéntico al del leaderboard (hairline + mono, no altera las filas humanas). */
+function BotTag() {
+  return (
+    <span
+      title="Bot del server"
+      className="type-mono inline-flex h-[18px] items-center rounded-none border border-border px-1.5 text-[10px] leading-none text-text-2"
+    >
+      BOT
+    </span>
+  );
+}
+
+/** Slot del server (cid): mono, la clave para actuar contra bots. */
+function SlotTag({ slot }: { slot: number | null }) {
+  return (
+    <span title="Slot del server (cid)" className="type-mono text-text-2">
+      {slot === null ? "—" : `#${slot}`}
+    </span>
+  );
+}
+
 /* --- Panel principal --- */
 
 type StatusState =
@@ -61,12 +85,20 @@ type StatusState =
   | { phase: "unreachable"; error: string | null }
   | { phase: "ready"; status: IamStatusResponse; checkedAt: number };
 
+interface KickConfirmState {
+  key: string;
+  name: string;
+  clientId: number | null;
+  cid: number | null;
+}
+
 export function ModerationPanel() {
   const [statusState, setStatusState] = useState<StatusState>({ phase: "loading" });
   const [statusReloadKey, setStatusReloadKey] = useState(0);
 
   const [live, setLive] = useState<IamLiveResponse | null>(null);
   const [liveState, setLiveState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [liveError, setLiveError] = useState<string | null>(null);
 
   const [clientQueryInput, setClientQueryInput] = useState("");
   const [clientResults, setClientResults] = useState<Awaited<ReturnType<typeof api.iamClients>> | null>(null);
@@ -79,8 +111,24 @@ export function ModerationPanel() {
   const [penaltiesLimit, setPenaltiesLimit] = useState(30);
   const [penaltiesReloadKey, setPenaltiesReloadKey] = useState(0);
 
+  const [bansData, setBansData] = useState<IamBansResponse | null>(null);
+  const [bansState, setBansState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [bansError, setBansError] = useState<string | null>(null);
+  const [bansOpen, setBansOpen] = useState(false);
+  const [bansReloadKey, setBansReloadKey] = useState(0);
+
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(null);
-  const [penaltyModal, setPenaltyModal] = useState<{ target: PenaltyTarget; type: IamPenaltyType } | null>(null);
+  const [penaltyModal, setPenaltyModal] = useState<
+    { target: PenaltyTarget; type: IamPenaltyType; allowTypeChoice?: boolean } | null
+  >(null);
+
+  const [kickConfirm, setKickConfirm] = useState<KickConfirmState | null>(null);
+  const [kickReason, setKickReason] = useState(KICK_DEFAULT_REASON);
+  const [kickBusy, setKickBusy] = useState(false);
+  const [kickError, setKickError] = useState<{ key: string; code: string; text: string } | null>(null);
+
+  const [unbanBusyId, setUnbanBusyId] = useState<number | null>(null);
+  const [unbanError, setUnbanError] = useState<{ id: number; text: string } | null>(null);
 
   const ready = statusState.phase === "ready";
   const penaltiesDbConfigured = ready && statusState.status.penaltiesDb.configured;
@@ -122,8 +170,10 @@ export function ModerationPanel() {
           setLive(response);
           setLiveState("ready");
         })
-        .catch(() => {
-          if (!cancelled) setLiveState("error");
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setLiveState("error");
+          setLiveError(error instanceof ApiError && error.status === 502 ? SERVER_DOWN_TEXT : null);
         });
     };
     load();
@@ -138,6 +188,21 @@ export function ModerationPanel() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [ready]);
+
+  const refreshLive = useCallback(() => {
+    setLiveState("loading");
+    api
+      .iamLive()
+      .then((response) => {
+        setLive(response);
+        setLiveState("ready");
+        setLiveError(null);
+      })
+      .catch((error: unknown) => {
+        setLiveState("error");
+        setLiveError(error instanceof ApiError && error.status === 502 ? SERVER_DOWN_TEXT : null);
+      });
+  }, []);
 
   /* Búsqueda de clientes: debounce, mínimo 3 chars. */
   useEffect(() => {
@@ -197,17 +262,35 @@ export function ModerationPanel() {
     };
   }, [ready, penaltiesDbConfigured, penaltiesLimit, penaltiesReloadKey]);
 
-  const refreshAfterPenalty = useCallback(() => {
-    setLiveState("loading");
+  /* Bans del server (bans.json, solo lectura): se carga en segundo plano para el contador del panel. */
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    setBansState((state) => (state === "ready" ? "ready" : "loading"));
+    setBansError(null);
     api
-      .iamLive()
+      .iamBans()
       .then((response) => {
-        setLive(response);
-        setLiveState("ready");
+        if (cancelled) return;
+        setBansData(response);
+        setBansState("ready");
       })
-      .catch(() => setLiveState("error"));
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setBansState("error");
+        setBansError(error instanceof ApiError ? error.message : "No se pudieron leer los bans del server.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, bansReloadKey]);
+
+  const refreshAfterPenalty = useCallback(() => {
+    refreshLive();
     setPenaltiesReloadKey((key) => key + 1);
-  }, []);
+    // Un ban/tempban escribe bans.json del server: refresca también esa lista.
+    setBansReloadKey((key) => key + 1);
+  }, [refreshLive]);
 
   const handlePenaltyDone = useCallback(
     (response: IamPenaltyResponse) => {
@@ -223,12 +306,91 @@ export function ModerationPanel() {
     [refreshAfterPenalty],
   );
 
+  /* KICK inline: confirmación en la propia fila (sin confirm() nativo), motivo editable. */
+  const beginKick = useCallback((state: KickConfirmState) => {
+    setKickConfirm(state);
+    setKickReason(KICK_DEFAULT_REASON);
+    setKickError(null);
+  }, []);
+
+  const executeKick = useCallback(async () => {
+    if (!kickConfirm) return;
+    const reason = kickReason.trim();
+    if (reason.length < 3) return;
+    setKickBusy(true);
+    setKickError(null);
+    try {
+      const target =
+        kickConfirm.clientId !== null && kickConfirm.clientId !== undefined
+          ? { clientId: kickConfirm.clientId }
+          : { cid: kickConfirm.cid as number };
+      const response = await api.iamPenalty({ type: "kick", reason, ...target });
+      setKickConfirm(null);
+      setNotice({
+        ok: true,
+        text: `KICK ${stripColorCodes(kickConfirm.name)}: ${response.output.join(" · ") || "ejecutado"}`,
+      });
+      refreshAfterPenalty();
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : "UNKNOWN";
+      const text =
+        code === "CID_MISMATCH"
+          ? "El slot cambió de jugador — reintenta."
+          : error instanceof ApiError
+            ? error.message
+            : "No se pudo expulsar. Inténtalo de nuevo.";
+      setKickError({ key: kickConfirm.key, code, text });
+    } finally {
+      setKickBusy(false);
+    }
+  }, [kickConfirm, kickReason, refreshAfterPenalty]);
+
+  /* Levantar ban desde el historial: POST /unban con el guid del ofensor. */
+  const handleUnban = useCallback(
+    async (penalty: IamPenalty) => {
+      const guid = penalty.offender?.guid;
+      if (!guid) return;
+      setUnbanBusyId(penalty.id);
+      setUnbanError(null);
+      try {
+        const response = await api.iamUnban({ guid });
+        setNotice({
+          ok: true,
+          text: `Ban levantado para ${stripColorCodes(penalty.offender?.name ?? null)}: ${
+            response.output.join(" · ") || "ejecutado"
+          }`,
+        });
+        setPenaltiesReloadKey((key) => key + 1);
+        setBansReloadKey((key) => key + 1);
+      } catch (error) {
+        setUnbanError({
+          id: penalty.id,
+          text:
+            error instanceof ApiError
+              ? error.code === "CID_MISMATCH"
+                ? "El slot cambió de jugador — reintenta."
+                : error.message
+              : "No se pudo levantar el ban. Inténtalo de nuevo.",
+        });
+      } finally {
+        setUnbanBusyId(null);
+      }
+    },
+    [],
+  );
+
   const liveTotals = useMemo(() => {
     if (!live) return null;
     const online = live.servers.filter((server) => server.online).length;
     const players = live.servers.reduce((count, server) => count + server.players.length, 0);
     return { servers: live.servers.length, online, players };
   }, [live]);
+
+  const canUnban = (penalty: IamPenalty): boolean =>
+    (penalty.type === "ban" || penalty.type === "tempban") &&
+    penalty.active === true &&
+    typeof penalty.offender?.guid === "string" &&
+    penalty.offender.guid.length > 0;
 
   if (statusState.phase === "loading") {
     return (
@@ -261,12 +423,10 @@ export function ModerationPanel() {
           className="mt-0.5 shrink-0 text-warning"
         />
         <div className="min-w-0 flex-1">
-          <h2 className="type-display-m text-warning">
-            IW4MAdmin sin conexión — moderación deshabilitada
-          </h2>
+          <h2 className="type-display-m text-warning">Server sin conexión — moderación deshabilitada</h2>
           <p className="type-body mt-1 max-w-[68ch] text-text-2">
             {statusState.error ??
-              "No se pudo contactar el webfront de IW4MAdmin. Revisa que esté corriendo y vuelve a intentarlo."}
+              "No se pudo contactar el server por RCON. Revisa que esté corriendo y vuelve a intentarlo."}
           </p>
           <Button
             variant="ghost"
@@ -283,6 +443,8 @@ export function ModerationPanel() {
 
   const status = statusState.status;
   const livePlayers = live?.servers.flatMap((server) => server.players) ?? [];
+  const kickReasonValid = kickReason.trim().length >= 3;
+  const bansCount = bansData?.bans.length ?? 0;
 
   return (
     <div>
@@ -293,7 +455,7 @@ export function ModerationPanel() {
       >
         <span className="type-label inline-flex items-center gap-2 text-accent">
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-accent" />
-          Puente IW4MAdmin conectado
+          Moderación por RCON conectada
         </span>
         <span className="type-caption text-text-2">
           {formatInt(status.servers.length)} {status.servers.length === 1 ? "server" : "servers"} ·
@@ -350,16 +512,7 @@ export function ModerationPanel() {
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => {
-                setLiveState("loading");
-                api
-                  .iamLive()
-                  .then((response) => {
-                    setLive(response);
-                    setLiveState("ready");
-                  })
-                  .catch(() => setLiveState("error"));
-              }}
+              onClick={refreshLive}
               disabled={liveState === "loading" || !ready}
               aria-label="Actualizar jugadores ahora"
             >
@@ -372,7 +525,8 @@ export function ModerationPanel() {
             <EmptyState
               icon={WifiOff}
               title="No pudimos leer el estado en vivo."
-              description="El webfront de IW4MAdmin no respondió. Vuelve a intentarlo en unos segundos."
+              description={liveError ?? "Comprueba tu conexión e inténtalo de nuevo."}
+              action={<Button size="sm" variant="ghost" onClick={refreshLive}>Reintentar</Button>}
             />
           ) : liveState === "idle" || liveState === "loading" ? (
             <div aria-hidden="true" className="space-y-3">
@@ -386,19 +540,22 @@ export function ModerationPanel() {
           ) : livePlayers.length === 0 ? (
             <EmptyState
               icon={Users}
-              title="No hay jugadores conectados ahora."
+              title="Nadie conectado ahora."
               description="Cuando alguien entre al server aparecerá aquí, con sus datos en vivo."
             />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <caption className="sr-only">
-                  Jugadores conectados ahora en los servers monitorizados por IW4MAdmin.
+                  Jugadores conectados ahora en los servers de la comunidad, con slot, ping y acciones.
                 </caption>
                 <thead>
                   <tr className="bg-surface">
                     <th scope="col" className="px-3 py-2.5 text-left">
                       <span className="type-label text-text-2">Jugador</span>
+                    </th>
+                    <th scope="col" className="px-3 py-2.5 text-left">
+                      <span className="type-label text-text-2">Slot</span>
                     </th>
                     <th scope="col" className="px-3 py-2.5 text-right">
                       <span className="type-label text-text-2">Score</span>
@@ -417,22 +574,39 @@ export function ModerationPanel() {
                 <tbody>
                   {live?.servers.map((server) =>
                     server.players.map((player, index) => {
-                      const actionable = player.clientId !== null;
-                      const key = `${server.id}-${index}-${stripColorCodes(player.name)}`;
+                      const key = player.guid ?? `${server.id}-${index}-${stripColorCodes(player.name)}`;
+                      const cleanName = stripColorCodes(player.name);
+                      const kickTarget: KickConfirmState = {
+                        key,
+                        name: player.name,
+                        clientId: player.clientId ?? null,
+                        cid: player.clientNumber ?? null,
+                      };
+                      const hasSlot = player.clientNumber !== null && player.clientNumber !== undefined;
+                      const kickRow = kickConfirm?.key === key;
                       return (
                         <tr
                           key={key}
-                          className="h-[44px] border-b border-border transition-colors duration-150 ease-out last:border-b-0 hover:bg-surface-2"
+                          className="border-b border-border transition-colors duration-150 ease-out last:border-b-0 hover:bg-surface-2"
                         >
                           <td className="max-w-[220px] px-3 py-2.5">
-                                        <span className="block truncate text-sm font-semibold text-text" title={player.name}>
-                              {stripColorCodes(player.name)}
+                            <span className="flex items-center gap-1.5">
+                              <span
+                                className="block truncate text-sm font-semibold text-text"
+                                title={player.name}
+                              >
+                                {cleanName}
+                              </span>
+                              {player.isBot && <BotTag />}
                             </span>
-                            {!actionable && (
+                            {player.clientId === null && !player.isBot && (
                               <span className="type-caption block text-text-2">
-                                sin clientId resuelto
+                                sin cuenta en el ranking — se actúa por slot
                               </span>
                             )}
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <SlotTag slot={player.clientNumber ?? null} />
                           </td>
                           <td data-numeric className="px-3 py-2.5 text-right">
                             <span className="type-number-m text-text">
@@ -445,36 +619,97 @@ export function ModerationPanel() {
                             </span>
                           </td>
                           <td className="px-3 py-2.5">
-                            <span className="type-caption text-text-2">{player.state}</span>
+                            {player.connecting ? (
+                              <span className="type-caption text-warning">conectando…</span>
+                            ) : (
+                              <span className="type-caption text-text-2">{player.state}</span>
+                            )}
                           </td>
                           <td className="px-3 py-2.5 text-right">
-                            {actionable ? (
-                              <div className="inline-flex items-center gap-1">
-                                {PENALTY_LABEL_TO_TYPE.map((entry) => (
-                                  <button
-                                    key={entry.type}
-                                    type="button"
-                                    onClick={() =>
-                                      setPenaltyModal({
-                                        target: { clientId: player.clientId as number, name: player.name },
-                                        type: entry.type,
-                                      })
-                                    }
-                                    title={`${entry.label} para ${stripColorCodes(player.name)}`}
-                                    className={`type-button h-8 rounded-sm px-2 text-[12px] transition-colors duration-150 ease-out ${
-                                      entry.type === "warn"
-                                        ? "text-warning hover:bg-warning/10"
-                                        : entry.type === "kick"
-                                          ? "text-text-2 hover:bg-surface-2 hover:text-text"
-                                          : "text-danger-hover hover:bg-danger/10"
-                                    }`}
+                            {kickRow ? (
+                              <div className="ml-auto flex w-[240px] flex-col items-stretch gap-1.5 text-left">
+                                <p className="type-caption text-text">
+                                  Kickear a{" "}
+                                  <span className="font-semibold text-text">{cleanName}</span> del
+                                  server
+                                </p>
+                                <input
+                                  type="text"
+                                  value={kickReason}
+                                  maxLength={200}
+                                  onChange={(event) => setKickReason(event.target.value)}
+                                  placeholder="Motivo (mín. 3 caracteres)"
+                                  aria-label={`Motivo del kick para ${cleanName}`}
+                                  autoFocus
+                                  className="h-8 rounded-sm border border-border bg-surface-2 px-2 text-sm text-text transition-colors duration-150 ease-out focus:border-accent focus:shadow-[0_0_0_1px_#8FD429] focus:outline-none"
+                                />
+                                {kickError?.key === key && (
+                                  <p role="alert" className="type-caption text-danger-hover">
+                                    {kickError.text}{" "}
+                                    {kickError.code === "CID_MISMATCH" && (
+                                      <button
+                                        type="button"
+                                        onClick={() => void executeKick()}
+                                        disabled={kickBusy}
+                                        className="font-semibold underline decoration-danger/40 transition-colors duration-150 ease-out hover:decoration-danger"
+                                      >
+                                        Reintentar
+                                      </button>
+                                    )}
+                                  </p>
+                                )}
+                                <div className="mt-0.5 flex justify-end gap-1.5">
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => setKickConfirm(null)}
+                                    disabled={kickBusy}
                                   >
-                                    {entry.label}
-                                  </button>
-                                ))}
+                                    Volver
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="danger"
+                                    onClick={() => void executeKick()}
+                                    disabled={!kickReasonValid || kickBusy}
+                                    loading={kickBusy}
+                                  >
+                                    Kickear
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : hasSlot ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => beginKick(kickTarget)}
+                                  title={`Kick para ${cleanName}${player.isBot ? " (bot: solo kick)" : ""}`}
+                                  className="type-button h-8 rounded-sm px-2 text-[12px] text-text-2 transition-colors duration-150 ease-out hover:bg-surface-2 hover:text-text"
+                                >
+                                  Kick
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPenaltyModal({
+                                      target: {
+                                        name: player.name,
+                                        clientId: player.clientId,
+                                        cid: player.clientNumber ?? null,
+                                        isBot: player.isBot,
+                                      },
+                                      type: "warn",
+                                      allowTypeChoice: true,
+                                    })
+                                  }
+                                  title={`Castigar a ${cleanName}: warn, kick, tempban o ban`}
+                                  className="type-button h-8 rounded-sm px-2 text-[12px] text-warning transition-colors duration-150 ease-out hover:bg-warning/10"
+                                >
+                                  Castigar…
+                                </button>
                               </div>
                             ) : (
-                              <span className="type-caption text-text-2" title="El nombre no se pudo resolver contra la base de clientes">
+                              <span className="type-caption text-text-2" title="Sin slot ni clientId: no se puede actuar">
                                 —
                               </span>
                             )}
@@ -489,6 +724,10 @@ export function ModerationPanel() {
                 server.players.length === 0 ? null : (
                   <p key={server.id} className="type-caption mt-2 px-1 text-text-2">
                     Server: {stripColorCodes(server.name)}
+                    {server.map || server.gametype ? " · " : ""}
+                    {server.gametype && <span className="type-mono">{server.gametype}</span>}
+                    {server.map && server.gametype ? " · " : ""}
+                    {server.map && <span className="type-mono">{server.map}</span>}
                   </p>
                 ),
               )}
@@ -558,7 +797,7 @@ export function ModerationPanel() {
                       <div className="mt-1.5">
                         {client.openPenalties === null ? (
                           <p className="type-caption text-text-2">
-                            Penalidades abiertas no disponibles (falta la DB de iw4madmin).
+                            Penalidades abiertas no disponibles en el backend.
                           </p>
                         ) : client.openPenalties.length === 0 ? (
                           <p className="type-caption text-text-2">Sin penalidades abiertas.</p>
@@ -590,7 +829,7 @@ export function ModerationPanel() {
           caption={
             penaltiesDbConfigured
               ? "Últimos warns, kicks y bans emitidos por la moderación."
-              : "El historial no está disponible: falta configurar la DB de penalidades (IW4MADMIN_PENALTIES_DB_PATH)."
+              : "El historial no está disponible: falta configurar el historial de penalidades en el backend."
           }
           action={
             penaltiesDbConfigured ? (
@@ -616,7 +855,7 @@ export function ModerationPanel() {
             <EmptyState
               icon={Gavel}
               title="Historial no disponible."
-              description="El puente funciona, pero la DB de penalidades de IW4MAdmin no está configurada en el backend."
+              description="La moderación funciona, pero el historial de penalidades no está configurado en el backend."
             />
           ) : penaltiesState === "error" ? (
             <EmptyState
@@ -665,6 +904,9 @@ export function ModerationPanel() {
                     <th scope="col" className="px-3 py-2.5 text-right">
                       <span className="type-label text-text-2">Vence</span>
                     </th>
+                    <th scope="col" className="px-3 py-2.5 text-right">
+                      <span className="type-label text-text-2">Acciones</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -686,7 +928,7 @@ export function ModerationPanel() {
                       </td>
                       <td className="max-w-[160px] truncate px-3 py-2.5">
                         <span className="block truncate text-sm font-semibold text-text" title={penalty.punisher?.name ?? ""}>
-                          {penalty.punisher ? stripColorCodes(penalty.punisher.name) : "Automática"}
+                          {penalty.punisher ? stripColorCodes(penalty.punisher.name) : penalty.automated ? "Automática" : "—"}
                         </span>
                       </td>
                       <td className="max-w-[280px] px-3 py-2.5">
@@ -702,11 +944,112 @@ export function ModerationPanel() {
                           {penalty.expires ? formatRelative(penalty.expires) : "—"}
                         </span>
                       </td>
+                      <td className="px-3 py-2.5 text-right">
+                        {canUnban(penalty) ? (
+                          <div className="flex flex-col items-end gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => void handleUnban(penalty)}
+                              disabled={unbanBusyId !== null}
+                              loading={unbanBusyId === penalty.id}
+                              aria-label={`Levantar ban de ${stripColorCodes(penalty.offender?.name ?? null)}`}
+                            >
+                              <ShieldOff size={14} strokeWidth={1.75} aria-hidden="true" />
+                              Levantar ban
+                            </Button>
+                            {unbanError?.id === penalty.id && (
+                              <p role="alert" className="type-caption max-w-[220px] text-danger-hover">
+                                {unbanError.text}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="type-caption text-text-2">—</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+          )}
+        </Panel>
+
+        {/* Bans del server (bans.json, solo lectura) */}
+        <Panel
+          title="Bans del server"
+          caption={
+            bansState === "ready" && bansData
+              ? `${formatInt(bansCount)} ${bansCount === 1 ? "ban permanente" : "bans permanentes"} en bans.json — los aplica el propio server y sobreviven reinicios.`
+              : "Los bans permanentes los aplica el propio server (bans.json) y sobreviven reinicios."
+          }
+          action={
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setBansOpen((open) => !open)}
+              aria-expanded={bansOpen}
+            >
+              {bansOpen ? (
+                <ChevronUp size={16} strokeWidth={1.75} aria-hidden="true" />
+              ) : (
+                <ChevronDown size={16} strokeWidth={1.75} aria-hidden="true" />
+              )}
+              {bansOpen ? "Ocultar" : "Ver lista"}
+            </Button>
+          }
+        >
+          {bansOpen && (
+            bansState === "error" ? (
+              <EmptyState
+                icon={WifiOff}
+                title="No pudimos leer los bans del server."
+                description={bansError ?? "Comprueba tu conexión e inténtalo de nuevo."}
+                action={
+                  <Button size="sm" variant="ghost" onClick={() => setBansReloadKey((key) => key + 1)}>
+                    Reintentar
+                  </Button>
+                }
+              />
+            ) : bansState === "loading" ? (
+              <div className="flex items-center gap-2">
+                <Spinner size={16} />
+                <span className="type-caption text-text-2">Leyendo bans.json del server…</span>
+              </div>
+            ) : bansData && !bansData.configured ? (
+              <EmptyState
+                icon={ShieldAlert}
+                title="Bans del server no disponibles."
+                description="El backend no tiene configurada la ruta del archivo bans.json (RCON_BANS_FILE)."
+              />
+            ) : bansData && bansCount === 0 ? (
+              <EmptyState
+                icon={Inbox}
+                title="El server no tiene bans permanentes ahora."
+                description="Cuando apliques un ban permanente desde este panel o desde la consola del juego, quedará en bans.json y sobrevivirá a los reinicios."
+              />
+            ) : bansData && bansData.exists === false ? (
+              <EmptyState
+                icon={Inbox}
+                title="El server todavía no tiene archivo de bans."
+                description="bans.json se crea con el primer ban permanente. Los bans que apliques desde el panel quedarán registrados allí."
+              />
+            ) : bansData && bansData.bans.length > 0 ? (
+              <ul className="divide-y divide-border">
+                {bansData.bans.map((ban, index) => (
+                  <li key={`${ban.kind}-${ban.value}-${index}`} className="flex flex-wrap items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+                    <Badge variant={ban.kind === "guid" ? "neutral" : "warning"}>
+                      {ban.kind === "guid" ? "GUID" : "IP"}
+                    </Badge>
+                    <span className="type-mono text-text">{ban.value}</span>
+                    {ban.kind === "guid" && ban.guidDecimal && (
+                      <span className="type-caption text-text-2">decimal: {ban.guidDecimal}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null
           )}
         </Panel>
       </div>
@@ -715,6 +1058,7 @@ export function ModerationPanel() {
         <PenaltyModal
           target={penaltyModal.target}
           type={penaltyModal.type}
+          allowTypeChoice={penaltyModal.allowTypeChoice}
           onClose={() => setPenaltyModal(null)}
           onDone={handlePenaltyDone}
         />
@@ -722,4 +1066,3 @@ export function ModerationPanel() {
     </div>
   );
 }
-

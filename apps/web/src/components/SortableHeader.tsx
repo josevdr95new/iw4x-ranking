@@ -7,6 +7,8 @@ export interface SortableHeaderProps {
   activeField: LeaderboardSort;
   activeOrder: LeaderboardOrder;
   onSort: (field: LeaderboardSort) => void;
+  /** aria-label alternativo cuando la etiqueta visible es una abreviatura (ej. "HS" → "headshots"). */
+  ariaLabel?: string;
 }
 
 /** Header de columna ordenable: <th><button> con icono de dirección. DESIGN.md §3.2. */
@@ -16,16 +18,18 @@ export function SortableHeader({
   activeField,
   activeOrder,
   onSort,
+  ariaLabel,
 }: SortableHeaderProps) {
   const active = activeField === field;
   const Icon = !active ? ArrowUpDown : activeOrder === "asc" ? ArrowUp : ArrowDown;
   const nextOrder: LeaderboardOrder = active && activeOrder === "desc" ? "asc" : "desc";
+  const sortName = ariaLabel ?? label;
 
   return (
     <button
       type="button"
       onClick={() => onSort(field)}
-      aria-label={`Ordenar por ${label.toLowerCase()}, ${nextOrder === "asc" ? "ascendente" : "descendente"}`}
+      aria-label={`Ordenar por ${sortName.toLowerCase()}, ${nextOrder === "asc" ? "ascendente" : "descendente"}`}
       className={`type-label inline-flex items-center justify-end gap-1 transition-colors duration-150 ease-out hover:text-text ${
         active ? "text-accent" : "text-text-2"
       }`}
