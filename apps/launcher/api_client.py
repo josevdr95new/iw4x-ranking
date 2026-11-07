@@ -19,10 +19,11 @@ DEFAULT_TIMEOUT = 8  # segundos
 def user_is_linked(user: dict) -> bool:
     """¿El usuario tiene GUID vinculado?
 
-    Hoy el contrato expone ``linkedGuid`` (null si no). Cuando el backend
-    pase a multi-GUID por cuenta podría informar ``guid`` o ``linked``:
-    las tres formas se aceptan aquí, en un único punto.
+    Formas aceptadas a lo largo del contrato: ``linkedGuid`` (legacy),
+    ``guid``, ``linked`` y la actual ``linkedGuids`` (lista con metadatos).
     """
+    if isinstance(user.get("linkedGuids"), list):
+        return len(user["linkedGuids"]) > 0
     return bool(
         user.get("linkedGuid") or user.get("guid") or user.get("linked")
     )
@@ -131,9 +132,17 @@ class ApiClient:
         )
 
     def me(self, token: str) -> Dict[str, Any]:
-        """GET /api/auth/me → {user:{..., linkedGuid}}."""
+        """GET /api/auth/me → {user:{..., linkedGuid, linkedGuids[], role}}."""
         data = self._request("GET", "/auth/me", token=token)
         return data.get("user") or {}
+
+    def player(self, guid: str) -> Dict[str, Any]:
+        """GET /api/players/:guid → {player:{kills,...}, rank, recentEvents,...}.
+
+        Público (no requiere token). Da rank global + stats del jugador en
+        una sola llamada: es lo que alimenta el panel de stats en vivo.
+        """
+        return self._request("GET", f"/players/{guid}")
 
     # --- Vinculación cuenta ↔ GUID -----------------------------------------
     def link_start(self, token: str) -> Dict[str, Any]:

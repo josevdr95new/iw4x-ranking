@@ -296,18 +296,7 @@ export function AccountPage() {
           </form>
         </Panel>
 
-        <Panel
-          title="GUIDs vinculados"
-          action={
-            <Link
-              to="/link"
-              className="type-button inline-flex items-center gap-1 text-accent transition-colors duration-150 ease-out hover:text-accent-hover"
-            >
-              <Link2 size={14} strokeWidth={1.75} aria-hidden="true" />
-              Vincular otro
-            </Link>
-          }
-        >
+        <Panel title="GUIDs vinculados">
           {unlinkError && (
             <p role="alert" className="mb-3 text-[13px] text-danger-hover">
               {unlinkError}
@@ -318,12 +307,7 @@ export function AccountPage() {
             <EmptyState
               icon={Link2}
               title="Sin GUIDs vinculados."
-              description="Vincula tu jugador para que tus partidas suban a tu cuenta. También puedes hacerlo desde el launcher de la comunidad."
-              action={
-                <Link to="/link">
-                  <Button variant="ghost">Vincular mi cuenta</Button>
-                </Link>
-              }
+              description="La vinculación se hace desde el launcher de escritorio: abre el launcher, inicia sesión y dale JUGAR. La vinculación con tu GUID es automática al entrar al server, y tus partidas subirán a esta cuenta."
             />
           ) : (
             <div className="overflow-x-auto">
@@ -414,8 +398,8 @@ export function AccountPage() {
           {pendingUnlink ? formatGuid(pendingUnlink) : ""}
         </span>{" "}
         {pendingInfo?.name ? `(${pendingInfo.name}) ` : ""}
-        dejará de subir tus stats a tu cuenta. Podrás volver a vincularlo más tarde desde aquí o
-        desde el launcher.
+        dejará de subir tus stats a tu cuenta. Podrás volver a vincularlo más tarde desde el
+        launcher de escritorio.
       </ConfirmModal>
     </div>
   );

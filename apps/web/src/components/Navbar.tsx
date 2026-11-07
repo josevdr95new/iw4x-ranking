@@ -1,4 +1,4 @@
-import { ChevronDown, Link2, LogOut, Menu, Settings, User, X } from "lucide-react";
+import { ChevronDown, LogOut, Menu, Settings, User, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
@@ -60,7 +60,8 @@ export function Navbar() {
     navigate("/");
   };
 
-  const profileHref = user?.linkedGuid ? `/player/${user.linkedGuid}` : "/link";
+  // Sin GUID vinculado, "Mi perfil" lleva a Mi cuenta (ahí se ven los GUIDs vinculados).
+  const profileHref = user?.linkedGuid ? `/player/${user.linkedGuid}` : "/account";
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-surface">
@@ -79,9 +80,6 @@ export function Navbar() {
               Perfil
             </NavLink>
           )}
-          <NavLink to="/link" className={({ isActive }) => navLinkClass(isActive)}>
-            Vincular cuenta
-          </NavLink>
           {user?.role === "ADMIN" && (
             <NavLink to="/admin" className={({ isActive }) => navLinkClass(isActive)}>
               Admin
@@ -138,15 +136,6 @@ export function Navbar() {
                   >
                     <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
                     Mi cuenta
-                  </Link>
-                  <Link
-                    role="menuitem"
-                    to="/link"
-                    onClick={() => setDropdownOpen(false)}
-                    className="flex h-9 items-center gap-2 rounded-sm px-3 text-sm text-text transition-colors duration-150 ease-out hover:bg-surface"
-                  >
-                    <Link2 size={16} strokeWidth={1.75} aria-hidden="true" />
-                    Vincular cuenta
                   </Link>
                   <div className="my-1 border-t border-border" aria-hidden="true" />
                   <button
@@ -216,17 +205,6 @@ export function Navbar() {
               Perfil
             </NavLink>
           )}
-          <NavLink
-            to="/link"
-            onClick={() => setMenuOpen(false)}
-            className={({ isActive }) =>
-              `type-button flex h-12 items-center border-b border-border px-4 transition-colors duration-150 ease-out ${
-                isActive ? "text-text" : "text-text-2"
-              }`
-            }
-          >
-            Vincular cuenta
-          </NavLink>
           {user?.role === "ADMIN" && (
             <NavLink
               to="/admin"

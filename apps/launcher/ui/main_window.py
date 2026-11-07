@@ -44,6 +44,11 @@ class App(ctk.CTk):
         # Flujo JUGAR en curso (o None).
         self.flow: Optional[GameFlow] = None
 
+        # Panel de stats en vivo: id del after() del ciclo de 30s + contadores.
+        self._stats_after_id: Optional[str] = None
+        self._stats_fetching = False
+        self._stats_fetch_count = 0
+
         # Cola de tareas para el hilo de UI.
         self._tasks: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self.after(60, self._drain_tasks)
@@ -218,6 +223,10 @@ class App(ctk.CTk):
         self.store.clear()
         self.token = None
         self.user = None
+        # Detiene el ciclo de stats en vivo.
+        self._cancel_stats_timer()
+        self._stats_fetching = False
+        self.home_frame.stats_panel.stop_timers()
         self.home_frame.set_status("Todo listo.", "dim")
         self.home_frame.play_btn.configure(text="JUGAR")
         self.show_login()
@@ -229,12 +238,121 @@ class App(ctk.CTk):
             return
         self.home_frame.set_user(self.user)
         self._update_play_as()
+        self._update_stats_panel_state()
         self.show_home()
 
     def _update_play_as(self) -> None:
         """Refresca 'Jugando como: <nick>' según usuario y config."""
         name = str((self.user or {}).get("displayName") or "")
         self.home_frame.set_play_as(name, self.cfg.force_nick)
+
+    # ================== Stats en vivo ==================
+    def _update_stats_panel_state(self) -> None:
+        """CTA o panel vivo según el usuario; gestiona el ciclo de 30s."""
+        if self.user is None:
+            return
+        if user_is_linked(self.user):
+            self.home_frame.stats_panel.show_linked()
+            self._schedule_stats_refresh(delay_ms=600)  # primera carga rápida
+        else:
+            self.home_frame.stats_panel.show_cta()
+            self._cancel_stats_timer()
+
+    def _pick_guid_and_server(self):
+        """Elige el GUID para el panel y su último server conocido.
+
+        La API no expone mérito agregado multi-GUID: usamos el del GUID con
+        la última conexión más reciente (empata con lo que ve el jugador).
+        """
+        links = (self.user or {}).get("linkedGuids") or []
+        best = None
+        for link in links:
+            if not isinstance(link, dict) or not link.get("guid"):
+                continue
+            if best is None or \
+                    str(link.get("lastConnection") or "") > str(best.get("lastConnection") or ""):
+                best = link
+        if best is None:
+            legacy = (self.user or {}).get("linkedGuid")
+            if legacy:
+                return str(legacy), None
+            return None, None
+        return str(best["guid"]), best.get("lastServer")
+
+    def _schedule_stats_refresh(self, delay_ms: int = 30_000) -> None:
+        """Reprograma el ciclo (cancelando el pendiente para no duplicar)."""
+        self._cancel_stats_timer()
+        if not self.token:
+            return
+        self._stats_after_id = self.after(delay_ms, self.refresh_stats)
+
+    def _cancel_stats_timer(self) -> None:
+        if self._stats_after_id is not None:
+            try:
+                self.after_cancel(self._stats_after_id)
+            except Exception:
+                pass
+            self._stats_after_id = None
+
+    def refresh_stats_manual(self) -> None:
+        """Botón ↻ del panel."""
+        self.refresh_stats(manual=True)
+
+    def refresh_stats(self, manual: bool = False) -> None:
+        """GET /api/players/:guid y pinta el panel; reprograma el ciclo."""
+        self._cancel_stats_timer()
+        if not self.token or self.user is None:
+            return
+        panel = self.home_frame.stats_panel
+
+        # No competir con el polling de vinculación durante JUGAR.
+        if self.flow is not None:
+            if manual:
+                self.home_frame.log_line("Stats en pausa: hay una conexión en curso.")
+            panel.set_error("— Stats en pausa durante la conexión —")
+            self._schedule_stats_refresh()
+            return
+
+        guid, last_server = self._pick_guid_and_server()
+        if not guid:
+            panel.show_cta()
+            return
+        if manual:
+            panel.set_loading()
+        if self._stats_fetching:
+            self._schedule_stats_refresh()
+            return
+
+        self._stats_fetching = True
+        token = self.token
+
+        def do() -> Dict[str, Any]:
+            return self.api.player(guid)
+
+        def ok(data: Dict[str, Any]) -> None:
+            self._stats_fetching = False
+            self._stats_fetch_count += 1
+            panel.set_values(data.get("player") or {}, data.get("rank"), last_server)
+            self._schedule_stats_refresh()
+
+        def err(exc: Exception) -> None:
+            self._stats_fetching = False
+            if isinstance(exc, ApiError) and exc.status == 401:
+                self.store.clear()
+                self.token = None
+                self.show_login("Tu sesión expiró. Inicia sesión de nuevo.")
+                return
+            if isinstance(exc, ApiError) and exc.code == "PLAYER_NOT_FOUND":
+                panel.set_no_data()
+            elif isinstance(exc, NetworkError):
+                panel.set_error("— API sin conexión, reintentando —")
+            else:
+                panel.set_error(
+                    f"— Error de la API: {getattr(exc, 'message', exc)} — reintentando —"
+                )
+            self._schedule_stats_refresh()
+
+        self.run_bg(do, on_ok=ok, on_err=err)
 
     def refresh_me(self) -> None:
         """GET /auth/me para refrescar el badge tras vincular (o al volver)."""
@@ -357,4 +475,6 @@ class App(ctk.CTk):
         log.info("Cerrando launcher")
         if self.flow is not None:
             self.flow.cancel()
+        self._cancel_stats_timer()
+        self.home_frame.stats_panel.stop_timers()
         self.destroy()

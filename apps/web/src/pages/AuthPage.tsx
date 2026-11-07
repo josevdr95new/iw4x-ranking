@@ -79,13 +79,14 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             <CheckCircle2 size={32} strokeWidth={1.75} aria-hidden="true" className="text-accent" />
             <h1 className="type-display-l mt-2 text-text">Cuenta creada</h1>
             <p className="type-body mt-2 text-text-2">
-              Ya puedes iniciar sesión. Vincula tu jugador del juego para que tu progreso aparezca
-              en el ranking de la comunidad.
+              Ya puedes iniciar sesión. Para que tu progreso suba al ranking, abre el launcher,
+              inicia sesión y dale JUGAR: la vinculación con tu GUID es automática al entrar al
+              server.
             </p>
           </div>
           <div className="mt-6">
-            <Link to="/link" className="block">
-              <Button fullWidth>Vincular mi cuenta</Button>
+            <Link to="/account" className="block">
+              <Button fullWidth>Ir a Mi cuenta</Button>
             </Link>
           </div>
           <div className="mt-2">
@@ -257,13 +258,10 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
 
         <div className="text-center">
           <p className="text-[13px] text-text-2">¿Juegas en nuestros servers?</p>
-          <Link
-            to="/link"
-            className="type-button mt-1 inline-flex items-center gap-1 text-accent transition-colors duration-150 ease-out hover:text-accent-hover"
-          >
-            Vincula tu cuenta de juego
-            <span aria-hidden="true">→</span>
-          </Link>
+          <p className="text-[13px] text-text-2">
+            La vinculación de tu cuenta con tu GUID se hace desde el launcher de escritorio: inicia
+            sesión y dale JUGAR.
+          </p>
         </div>
       </div>
     </div>

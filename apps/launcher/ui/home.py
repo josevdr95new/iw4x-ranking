@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import customtkinter as ctk
 
 from api_client import user_is_linked
+from ui.stats_panel import StatsPanel
 from ui.theme import COLORS, font
 
 if TYPE_CHECKING:
@@ -90,6 +91,10 @@ class HomeFrame(ctk.CTkFrame):
         )
         self.play_as.pack(fill="x", pady=(6, 0))
 
+        # Panel de estadísticas en vivo (rank/kills/etc.), refrescado por App.
+        self.stats_panel = StatsPanel(self, on_manual_refresh=self.app.refresh_stats_manual)
+        self.stats_panel.pack(fill="x", pady=(10, 0))
+
         # Botón grande JUGAR.
         self.play_btn = ctk.CTkButton(
             body, text="JUGAR", height=64, font=font(22, "bold"),
@@ -119,7 +124,14 @@ class HomeFrame(ctk.CTkFrame):
         self.email_label.configure(text=str(user.get("email") or ""))
         linked = user_is_linked(user)
         if linked:
-            guid = str(user.get("linkedGuid") or user.get("guid") or "")
+            # GUID a mostrar: primero de la lista actual (multi-GUID),
+            # con fallback al campo legacy por si el backend cambia.
+            links = user.get("linkedGuids") or []
+            guid = (
+                str(links[0].get("guid"))
+                if links and links[0].get("guid")
+                else str(user.get("linkedGuid") or user.get("guid") or "")
+            )
             self.badge.configure(
                 text=f"  VERIFICADO · {guid}  ",
                 fg_color=COLORS["play"], text_color="#ffffff",

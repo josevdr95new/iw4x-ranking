@@ -6,7 +6,6 @@ import { AdminPage } from "./pages/AdminPage";
 import { AccountPage } from "./pages/AccountPage";
 import { AuthPage } from "./pages/AuthPage";
 import { LeaderboardPage } from "./pages/LeaderboardPage";
-import { LinkPage } from "./pages/LinkPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { PlayerPage } from "./pages/PlayerPage";
 import { Spinner } from "./components/ui/Spinner";
@@ -43,7 +42,6 @@ export default function App() {
               <Route path="/player/:guid" element={<PlayerPage />} />
               <Route path="/login" element={<AuthPage mode="login" />} />
               <Route path="/register" element={<AuthPage mode="register" />} />
-              <Route path="/link" element={<LinkPage />} />
               <Route path="/account" element={<AccountPage />} />
               <Route path="/admin" element={<AdminRoute />} />
               <Route path="*" element={<NotFoundPage />} />

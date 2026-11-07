@@ -167,35 +167,6 @@ export interface AuthResponse {
   token: string;
 }
 
-export interface LinkStartResponse {
-  attemptId: number;
-  status: string;
-  windowMinutes: number;
-  createdAt: string;
-}
-
-export interface LinkCandidate {
-  guid: string;
-  name: string;
-  lastConnection: string;
-  /** Último servidor donde se detectó (IP), o null si la fuente no lo expone (API v0.2). */
-  server: string | null;
-}
-
-export interface LinkCandidatesResponse {
-  status: string;
-  windowMinutes: number;
-  candidates: LinkCandidate[];
-}
-
-export interface LinkConfirmResponse {
-  status: "linked";
-  guid: string;
-  name: string;
-  server: string | null;
-  linkedAt: string;
-}
-
 export interface UnlinkResponse {
   status: "unlinked";
   guid: string;
@@ -358,21 +329,7 @@ export const api = {
     return request<PlayerDetail>(`/players/${encodeURIComponent(guid)}`);
   },
 
-  linkStart() {
-    return request<LinkStartResponse>("/link/start", { method: "POST", body: {}, auth: true });
-  },
-
-  /** POST /link/complete sin guid → candidatos. */
-  linkCandidates() {
-    return request<LinkCandidatesResponse>("/link/complete", { method: "POST", body: {}, auth: true });
-  },
-
-  /** POST /link/complete con guid → vincula (multi-GUID; re-vincular propio = idempotente). */
-  linkConfirm(guid: string) {
-    return request<LinkConfirmResponse>("/link/complete", { method: "POST", body: { guid }, auth: true });
-  },
-
-  /** DELETE /link/:guid → desvincula un GUID propio. */
+  /** DELETE /link/:guid → desvincula un GUID propio (la vinculación se hace desde el launcher). */
   unlinkGuid(guid: string) {
     return request<UnlinkResponse>(`/link/${encodeURIComponent(guid)}`, { method: "DELETE", auth: true });
   },

@@ -37,7 +37,7 @@ import customtkinter as ctk
 # Importa los módulos del launcher (mismo directorio).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from api_client import ApiClient, ApiError, NetworkError  # noqa: E402
+from api_client import ApiClient, ApiError, NetworkError, user_is_linked  # noqa: E402
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
 from game_flow import GameFlow, build_game_args  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
@@ -110,8 +110,7 @@ def phase_api_auth_flow() -> Optional[str]:
     api = ApiClient(API_URL)
     token: Optional[str] = None
     try:
-        data = api.login(EMAIL, PASSWORD)
-        token = data["token"]
+        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
         check("POST /api/auth/login (cuenta creada por el launcher)", True)
     except Exception as exc:
         check("POST /api/auth/login (cuenta creada por el launcher)", False, str(exc))
@@ -121,6 +120,21 @@ def phase_api_auth_flow() -> Optional[str]:
         user = api.me(token)
         check("GET /api/auth/me devuelve usuario", bool(user.get("id")))
         print(f"    user={user.get('displayName')} linkedGuid={user.get('linkedGuid')}")
+        links = user.get("linkedGuids") or []
+        print(f"    linkedGuids={len(links)}")
+
+        # Contrato del perfil (lo que usa el panel de stats en vivo).
+        if links and links[0].get("guid"):
+            prof = api.player(str(links[0]["guid"]))
+            p = prof.get("player") or {}
+            check("GET /api/players/:guid trae perfil con stats reales",
+                  isinstance(p.get("kills"), int) and isinstance(p.get("kd"), (int, float)),
+                  str(p)[:200])
+            check("GET /api/players/:guid trae rank global",
+                  prof.get("rank") is None or isinstance(prof.get("rank"), int),
+                  str(prof.get("rank")))
+            print(f"    jugador={p.get('name')} kills={p.get('kills')} "
+                  f"deaths={p.get('deaths')} kd={p.get('kd')} rank={prof.get('rank')}")
     except Exception as exc:
         check("GET /api/auth/me devuelve usuario", False, str(exc))
         return token
@@ -147,6 +161,44 @@ def phase_api_auth_flow() -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Utilidades para fases GUI: runner de pasos encadenados con after().
 Step = Callable[[App, Callable[[], None]], None]
+
+
+def ensure_login(api: ApiClient, email: str, password: str, display: str) -> str:
+    """Login; si la cuenta no existe (DB reseteada por otro proceso), la recrea.
+
+    Devuelve el token. Lanza si el problema no es de credenciales.
+    """
+    try:
+        return api.login(email, password)["token"]
+    except ApiError as exc:
+        if exc.code != "INVALID_CREDENTIALS":
+            raise
+    try:
+        return api.register(email, password, display)["token"]
+    except ApiError as exc2:
+        if exc2.code != "EMAIL_TAKEN":
+            raise
+    return api.login(email, password)["token"]
+
+
+def link_test_account(api: ApiClient, token: str) -> Optional[str]:
+    """Vincula la cuenta de prueba con el primer GUID disponible.
+
+    Orden: candidatos frescos (ingest del log cada 30s) → GUID libre del
+    leaderboard. Devuelve el guid vinculado o None si no hay nada.
+    """
+    cand = api.link_candidates(token).get("candidates") or []
+    if cand:
+        guid = str(cand[0]["guid"])
+        result = api.link_confirm(token, guid)
+        return guid if result.get("status") == "linked" else None
+    board = api._request("GET", "/leaderboard?pageSize=5")
+    free = [p for p in board.get("players", []) if not p.get("linked")]
+    if not free:
+        return None
+    guid = str(free[0]["guid"])
+    result = api.link_confirm(token, guid)
+    return guid if result.get("status") == "linked" else None
 
 
 def wait_in_app(
@@ -316,6 +368,102 @@ def phase_autologin() -> None:
     )
 
 
+def phase_stats() -> None:
+    """Fase GUI: panel de stats en vivo (carga, refresh manual, logout)."""
+    # Preparación headless: asegura sesión + GUID vinculado para que el
+    # panel tenga valores reales que cargar (la DB puede resetearse entre
+    # corridas por el trabajo paralelo en apps/api).
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
+        user = api.me(token)
+        if not user_is_linked(user):
+            guid = link_test_account(api, token)
+            if guid is None:
+                check("preparación stats: hay GUID disponible", False,
+                      "sin candidatos ni leaderboard libre")
+                return
+            print(f"    cuenta vinculada de nuevo a {guid} para la prueba")
+    except Exception as exc:
+        check("preparación de stats (login + vinculación)", False, str(exc))
+        return
+
+    def step_wait_home(app: App, done: Callable[[], None]) -> None:
+        wait_in_app(
+            app,
+            lambda: app.current_frame is app.home_frame and app.token is not None,
+            done, timeout=15,
+        )
+
+    def step_wait_first_load(app: App, done: Callable[[], None]) -> None:
+        """Espera la primera carga real de stats (valores ≠ '—')."""
+        def ok() -> None:
+            panel = app.home_frame.stats_panel
+            rank = str(panel._blocks["rank"].cget("text"))
+            kills = str(panel._blocks["kills"].cget("text"))
+            deaths = str(panel._blocks["deaths"].cget("text"))
+            kd = str(panel._blocks["kd"].cget("text"))
+            sub = str(panel.sub_label.cget("text"))
+            check("panel de stats carga con valores reales (no '—')",
+                  "—" not in (kills + kd), f"rank={rank} kills={kills} kd={kd}")
+            check("fila secundaria con tiempo jugado y jugador",
+                  "jugados" in sub and "jugador:" in sub, sub)
+            check("edad del dato visible ('hace Ns')",
+                  "hace " in str(panel.age_label.cget("text")),
+                  str(panel.age_label.cget("text")))
+            print(f"    panel: RANK={rank} KILLS={kills} DEATHS={deaths} K/D={kd}")
+            print(f"    sub: {sub}")
+            done()
+
+        # 20s: la primera carga se programa a ~600ms y la API es local.
+        wait_in_app(app, lambda: app._stats_fetch_count >= 1, ok, timeout=20)
+
+    def step_manual_refresh(app: App, done: Callable[[], None]) -> None:
+        """Botón ↻: debe lanzar una carga nueva (contador sube)."""
+        before = app._stats_fetch_count
+        app.home_frame.stats_panel.refresh_btn.invoke()
+
+        def ok() -> None:
+            check("refresh manual ↻ vuelve a consultar la API",
+                  app._stats_fetch_count > before,
+                  f"antes={before} ahora={app._stats_fetch_count}")
+            done()
+
+        wait_in_app(app, lambda: app._stats_fetch_count > before, ok, timeout=15)
+
+    def step_logout_cancels(app: App, done: Callable[[], None]) -> None:
+        """Logout: timers de stats cancelados y sin nuevas peticiones."""
+        before = app._stats_fetch_count
+        app.logout()
+
+        def ok() -> None:
+            check("logout cancela el ciclo de 30s de stats",
+                  app._stats_after_id is None, str(app._stats_after_id))
+            check("logout detiene el ticker de edad",
+                  app.home_frame.stats_panel._age_after is None)
+            done()
+
+        # El logout es síncrono: comprobamos ya y luego que no haya fetches.
+        ok()
+        app.after(2500, lambda: (
+            check("sin refetch de stats tras logout (2.5s)",
+                  app._stats_fetch_count == before,
+                  f"antes={before} ahora={app._stats_fetch_count}"),
+            # CTA de vinculación (cuenta sin GUID) visible en el panel.
+            app.home_frame.stats_panel.show_cta(),
+            check("CTA de vinculación presente",
+                  "Dale JUGAR" in str(app.home_frame.stats_panel.status_label.cget("text")),
+                  str(app.home_frame.stats_panel.status_label.cget("text"))),
+            done(),
+        ))
+
+    run_phase(
+        "panel de stats en vivo",
+        [step_wait_home, step_wait_first_load, step_manual_refresh, step_logout_cancels],
+        lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
+    )
+
+
 def phase_play_unlinked() -> None:
     """Fase 4: JUGAR simulado con cuenta SIN vincular → espera y reintento."""
 
@@ -365,13 +513,19 @@ def phase_play_unlinked() -> None:
                 btn in ("REINTENTAR", "JUGAR"),
                 btn,
             )
-            # Si el flujo auto-confirmó el único candidato real, la cuenta
-            # queda vinculada: el badge debe refrescarse a VERIFICADO.
+            # Si el flujo auto-confirmó un candidato, refresh_me (async)
+            # debe traer el badge VERIFICADO: esperamos con poll, no al tacto.
             if "Cuenta vinculada" in console:
-                badge = str(app.home_frame.badge.cget("text"))
-                check("badge VERIFICADO tras auto-confirmar candidato",
-                      "VERIFICADO" in badge, badge)
-            done()
+                def badge_ok() -> None:
+                    badge = str(app.home_frame.badge.cget("text"))
+                    check("badge VERIFICADO tras auto-confirmar candidato",
+                          "VERIFICADO" in badge, badge)
+                    done()
+                wait_in_app(app,
+                            lambda: "VERIFICADO" in str(app.home_frame.badge.cget("text")),
+                            badge_ok, timeout=12)
+            else:
+                done()
 
         # 40s de margen (poll de prueba dura ~7s).
         wait_in_app(app, finished, ok, timeout=40)
@@ -392,35 +546,27 @@ def phase_link_real() -> None:
     guid: Optional[str] = None
 
     try:
-        token = api.login(EMAIL, PASSWORD)["token"]
+        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
         user = api.me(token)
         guid = str(user.get("linkedGuid") or "") or None
+        if not guid and (user.get("linkedGuids") or []):
+            guid = str(user["linkedGuids"][0].get("guid") or "") or None
 
         if guid:
             print(f"    la cuenta ya está vinculada a {guid}")
             check("cuenta de prueba vinculada (previa)", True)
         else:
-            board = api._request("GET", "/leaderboard?sort=kills&order=desc&pageSize=5")
-            free = [p for p in board.get("players", []) if not p.get("linked")]
-            if not free:
-                check("hay GUIDs sin vincular en el leaderboard", False, str(board)[:200])
+            guid = link_test_account(api, token)
+            if guid is None:
+                check("hay GUIDs disponibles para vincular", False,
+                      "sin candidatos ni GUIDs libres en leaderboard")
                 return
-
-            guid = str(free[0]["guid"])
-            print(f"    confirmando GUID {guid} ({free[0].get('name')})…")
-            result = api.link_confirm(token, guid)
-            check(
-                "POST /api/link/complete {guid} vincula",
-                result.get("status") == "linked",
-                str(result)[:200],
-            )
+            check("POST /api/link/complete {guid} vincula", True, f"guid={guid}")
 
             user2 = api.me(token)
-            check(
-                "GET /auth/me refleja linkedGuid",
-                str(user2.get("linkedGuid")) == guid,
-                str(user2.get("linkedGuid")),
-            )
+            got = str((user2.get("linkedGuids") or [{}])[0].get("guid")
+                      or user2.get("linkedGuid") or "")
+            check("GET /auth/me refleja el GUID vinculado", got == guid, got)
     except ApiError as exc:
         check("vinculación real", False, f"{exc.code}: {exc.message}")
         return
@@ -452,6 +598,15 @@ def phase_link_real() -> None:
 
 def phase_play_linked() -> None:
     """Fase 5: con cuenta vinculada → badge VERIFICADO y JUGAR directo."""
+    # La fase de stats termina con logout (borra el token del store de
+    # prueba): re-logueamos aquí para que el auto-login funcione.
+    try:
+        token = ensure_login(ApiClient(API_URL), EMAIL, PASSWORD, DISPLAY)
+        UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    except Exception as exc:
+        check("preparación de JUGAR vinculado (login)", False, str(exc))
+        return
+
 
     def step_wait(app: App, done: Callable[[], None]) -> None:
         def ok() -> None:
@@ -733,6 +888,9 @@ def main() -> int:
     phase_autologin()
     phase_play_unlinked()
     phase_link_real()
+    # Stats al final del bloque "vinculado": garantiza linkedGuids ≥ 1
+    # (link_real acaba de vincular o verificar la cuenta).
+    phase_stats()
     phase_play_linked()
     phase_flow_logic()
     phase_command_args()
