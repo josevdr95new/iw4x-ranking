@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { env } from '../src/config/env.js';
 import { prisma } from '../src/lib/prisma.js';
 import { runSync } from '../src/services/sync/sync.service.js';
-import { computeSkill } from '../src/services/sync/sync.service.js';
+import { SKILL } from '../src/services/skill/elo.js';
 import { registerUser, req, resetDb } from './helpers.js';
 
 beforeAll(async () => {
@@ -79,11 +79,19 @@ describe('Sync desde IW4MAdmin (defensivo, read-only)', () => {
     await runSync();
   });
 
-  it('computeSkill sigue la fórmula documentada', () => {
-    // kd=2.0 → 20 + kills/hora (60 kills en 3600s = 60 kills/h) → 80
-    expect(computeSkill(60, 30, 3600)).toBe(80);
-    // sin muertes, kd = kills
-    expect(computeSkill(10, 0, 0)).toBeCloseTo(Math.round((10 * 10 + 10) * 100) / 100, 2);
+  it('el sync inicializa el skill ELO de TODOS los players (nuevo modelo, ver docs/API.md "skill ELO")', async () => {
+    // Tras el sync + processSkillUpdates, ningún player queda con skill 0:
+    // los que participan en eventos reciben su ELO real; el resto arranca en START.
+    const players = await prisma.player.findMany({ select: { skill: true, skillElo: true } });
+    expect(players.length).toBeGreaterThan(0);
+    for (const player of players) {
+      expect(player.skillElo).toBeGreaterThanOrEqual(SKILL.FLOOR);
+      expect(player.skillElo).toBeLessThanOrEqual(SKILL.CAP);
+      // skill expuesto = skillElo + bonus de racha (≥ skillElo siempre).
+      expect(player.skill).toBeGreaterThanOrEqual(player.skillElo);
+    }
+    // El mock genera kills → al menos un player superó el START (el ELO se movió).
+    expect(players.some((p) => p.skillElo !== SKILL.START)).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-import { ArrowLeft, Inbox, RefreshCcw, ShieldAlert, UserX, WifiOff } from "lucide-react";
+import { ArrowLeft, Inbox, Info, RefreshCcw, ShieldAlert, UserX, WifiOff } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError, api } from "../lib/api";
@@ -276,8 +276,23 @@ export function PlayerPage() {
             </dd>
           </div>
           <div className="bg-surface p-4">
-            <dt className="type-label text-text-2">Skill</dt>
-            <dd className={`type-number-l stat-value mt-2 ${player.skill === null || player.skill === undefined ? "text-text-2" : "text-text"}`}>
+            <dt className="type-label text-text-2">
+              Skill
+              <Info
+                size={12}
+                strokeWidth={1.75}
+                aria-hidden="true"
+                className="ml-1 inline shrink-0 align-baseline text-text-2"
+              />
+              <span className="sr-only" title="ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por mata-equipo.">
+                ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por
+                mata-equipo.
+              </span>
+            </dt>
+            <dd
+              title="ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por mata-equipo."
+              className={`type-number-l stat-value mt-2 ${player.skill === null || player.skill === undefined ? "text-text-2" : "text-text"}`}
+            >
               {formatSkill(player.skill)}
             </dd>
           </div>
@@ -299,6 +314,12 @@ export function PlayerPage() {
             </dd>
           </div>
         </dl>
+        <p className="border-t border-border bg-surface px-4 pb-3 pt-2">
+          <span className="type-caption text-text-2">
+            Skill · ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por
+            mata-equipo.
+          </span>
+        </p>
       </div>
 
       {/* Actividad reciente (adaptación del supuesto D: la API expone eventos kill/death, no partidas) */}

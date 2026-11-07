@@ -44,7 +44,8 @@ model Player {
   kd            Float       @default(0)
   timePlayed    Int         @default(0) // segundos; con fuente log: suma de Session (abiertas: en curso, cap 4h)
   connections   Int         @default(0) // nº de conexiones/partidas (líneas J)
-  skill         Float       @default(0) // heurística: kd*10 + kills/hora
+  skill         Float       @default(0) // valor EXPUESTO: skillElo + bonus de racha (ver docs/API.md "skill ELO")
+  skillElo      Float       @default(0) // ELO base por eventos (0 = nunca procesado → se expone 1000 al inicializarse)
   headshots     Int         @default(0) // kills con hitloc head/helmet (fuente log)
   damageDealt   Int         @default(0) // daño total infligido (K + D, fuente log)
   damageTaken   Int         @default(0) // daño total recibido (K + D + world, fuente log)
@@ -107,12 +108,18 @@ model KillEvent {
   server     String?  // etiqueta de servidor si la fuente la expone
   time       DateTime
   timeEpoch  Int // epoch en segundos
+  // Flag de skill: true cuando este evento YA alimentó el ELO de los players.
+  // El recompute FROM SCRATCH del bootstrap es automático: tras la migración
+  // TODOS los eventos existentes quedan con false y el primer sync los procesa
+  // en orden cronológico (timeEpoch ASC, id ASC).
+  skillProcessed Boolean @default(false)
 
   @@index([originGuid, timeEpoch])
   @@index([targetGuid, timeEpoch])
   @@index([timeEpoch])
   @@index([weapon])
   @@index([map])
+  @@index([skillProcessed, timeEpoch])
 }
 
 /// Estado incremental por fuente (evita reimportar kill events ya conocidos)

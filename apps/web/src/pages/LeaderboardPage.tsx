@@ -400,6 +400,11 @@ export function LeaderboardPage() {
                       <p className="type-caption mt-0.5 tabular text-text-2">
                         {formatInt(player.kills)} K · {formatInt(player.deaths)} M ·{" "}
                         {formatDuration(player.timePlayed)}
+                        {player.skill !== null && player.skill !== undefined && (
+                          <>
+                            {" "}· Skill {formatSkill(player.skill)}
+                          </>
+                        )}
                       </p>
                     </div>
                     <span className={`type-number-m shrink-0 tabular ${kdTextClass(player.kd)}`}>

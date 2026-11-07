@@ -19,10 +19,16 @@ import { errMessage } from '../../lib/errors.js';
  *   D;... (mismo layout que K) → daño no letal (NO se almacena como evento:
  *     alimenta damageDealt/damageTaken de los Player implicados)
  *
+ * BOTS (`+spawnBot N`): el guid llega como token literal "botN" y se mapea
+ * DETERMINISTA a un guid decimal del rango dedicado 0xb07… (ver
+ * botGuidToDecimal). El perfil del bot acumula stats entre reboots.
+ *
  * Ejemplos REALES (de este server):
  *   0:04 J;b94be6deca6c750c;4;Mandango ProMax
  *   0:39 K;b94be6deca6c750c;4;axis;Mandango ProMax;;-1;world;;none;100;MOD_FALLING;none
  *   (en el kill "world" la víctima tiene vguid vacío, vcid=-1 y vteam="world")
+ *   0:12 J;bot5;15;Laupetin
+ *   0:20 K;bot5;15;axis;Laupetin;bot8;18;allies;OtroBot;ak47;120;MOD_RIFLE_BULLET;head
  *
  * Extracción por evento K (almacenado en KillEvent): weapon, damage, hitloc,
  * headshot (hitloc ∈ head/helmet), isTeamkill (ateam == vteam), map y gametype
@@ -94,13 +100,44 @@ const TIME_PREFIX = /^\s*\d{1,4}:\d{2}\s?/;
 const HEADSHOT_HITLOCS = new Set(['head', 'helmet']);
 
 /**
+ * GUIDs de BOTS (server dedicado con `+spawnBot N`, build r5318): el engine
+ * escribe en el log el guid literal "botN" (ej. "J;bot5;15;Laupetin",
+ * "K;bot5;15;axis;Laupetin;..."). No puede colisionar con hex reales porque
+ * la 'o' no es un dígito hex. Máximo 5 dígitos (cap 65535, muy por encima de
+ * cualquier sv_maxclients) → números fuera de rango se tratan como corruptos.
+ */
+const BOT_GUID_TOKEN = /^bot(\d{1,5})$/;
+/** Número máximo de bot aceptado (cap defensivo). */
+const BOT_GUID_MAX = 65_535;
+/** Prefijo hex del rango DEDICADO a bots: 16 hex chars "b07XXXXXXXXXXXXX". */
+const BOT_GUID_HEX_PREFIX = 'b07';
+/** Ancho fijo (en hex) de la parte numérica del guid de bot. */
+const BOT_GUID_HEX_WIDTH = 12;
+
+/**
+ * Mapeo DETERMINISTA botN → GUID decimal del rango 0xb07…:
+ *   bot5 → 0xb07 000000000005 → "794603859254181893"
+ * El mismo número de bot produce SIEMPRE el mismo guid (estable entre
+ * reboots): el perfil del bot acumula kills/deaths/skill partida tras partida.
+ * Rango "b07..." dedicado a bots (dentro de la máscara de 64 bits / 16 hex
+ * chars); cualquier guid hex explícito sigue parseándose por la rama hex.
+ */
+function botGuidToDecimal(n: number): string | null {
+  if (!Number.isInteger(n) || n < 0 || n > BOT_GUID_MAX) return null;
+  return BigInt(`0x${BOT_GUID_HEX_PREFIX}${n.toString(16).padStart(BOT_GUID_HEX_WIDTH, '0')}`).toString(10);
+}
+
+/**
  * Convierte un GUID hex (hasta 16 chars) del games_mp.log a decimal (BigInt)
  * para que coincida con el esquema de Player (NetworkId decimal).
  * Devuelve null si el GUID no es hex válido.
  */
 export function guidHexToDecimal(hex: string): string | null {
   const trimmed = hex.trim();
-  if (trimmed === '' || !/^[0-9a-fA-F]{1,16}$/.test(trimmed)) return null;
+  if (trimmed === '') return null;
+  const bot = BOT_GUID_TOKEN.exec(trimmed);
+  if (bot !== null) return botGuidToDecimal(Number(bot[1]));
+  if (!/^[0-9a-fA-F]{1,16}$/.test(trimmed)) return null;
   return BigInt(`0x${trimmed}`).toString(10);
 }
 
@@ -337,7 +374,8 @@ async function incrementPlayer(guid: string, data: Record<string, number | { inc
  *  - timePlayed: suma de Session (abiertas cuentan como en curso con cap).
  *  - bestStreak: mejor racha de kills sin death intercalado (eventos K almacenados).
  *  - matchesPlayed: nº de mapas distintos con actividad (eventos + sesiones).
- *  - kd y skill sobre esos valores.
+ *  - kd sobre esos valores. El SKILL ya NO va acá: es ELO por eventos y lo
+ *    escribe exclusivamente processSkillUpdates (src/services/skill/).
  */
 async function recomputeDerived(guid: string, now: Date): Promise<void> {
   const player = await prisma.player.findUnique({ where: { guid } });
@@ -386,12 +424,10 @@ async function recomputeDerived(guid: string, now: Date): Promise<void> {
   for (const row of sessionMaps) if (row.map) maps.add(row.map);
 
   const kd = round2(KD_RATIO(player.kills, player.deaths));
-  const hours = Math.max(1, timePlayed / 3_600);
-  const skill = round2(kd * 10 + player.kills / hours);
 
   await prisma.player.update({
     where: { guid },
-    data: { timePlayed, bestStreak: best, matchesPlayed: maps.size, kd, skill },
+    data: { timePlayed, bestStreak: best, matchesPlayed: maps.size, kd },
   });
 }
 

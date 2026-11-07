@@ -4,6 +4,7 @@ import { Errors, errMessage } from '../../lib/errors.js';
 import { IW4MAdminReader } from './iw4madmin.reader.js';
 import type { KillAggregates, SourceClient } from './iw4madmin.reader.js';
 import { ingestGameLog } from './gamelog.reader.js';
+import { processSkillUpdates } from '../skill/skill.service.js';
 
 export interface SyncResult {
   ok: boolean;
@@ -49,11 +50,8 @@ export function computeKd(kills: number, deaths: number): number {
   return deaths > 0 ? kills / deaths : kills;
 }
 
-/** Heurística de skill documentada: kd*10 + kills por hora jugada. */
-export function computeSkill(kills: number, deaths: number, timePlayedSeconds: number): number {
-  const hours = Math.max(1, timePlayedSeconds / 3_600);
-  return round2(computeKd(kills, deaths) * 10 + kills / hours);
-}
+/** Heurística de skill RETIRADA: el skill ahora es ELO real calculado sobre
+ * KillEvents (src/services/skill/). Ver docs/API.md sección "skill ELO". */
 
 function toSlices<T>(rows: T[], size: number): T[][] {
   const slices: T[][] = [];
@@ -137,7 +135,7 @@ export async function runSync(): Promise<SyncResult> {
             kills,
             deaths,
             kd: round2(computeKd(kills, deaths)),
-            skill: computeSkill(kills, deaths, client.totalConnectionTime),
+            // skill ya NO se escribe acá: lo calcula processSkillUpdates sobre KillEvents.
             timePlayed: client.totalConnectionTime,
             connections: client.connections,
             firstConnection: client.firstConnection,
@@ -226,6 +224,17 @@ export async function runSync(): Promise<SyncResult> {
         ok = false;
         warnings.push(`[GameLog] error: ${errMessage(err)}`);
       }
+    }
+
+    // ── Fuente 3: skill ELO incremental ──────────────────────────
+    // Tras ingestar TODAS las fuentes, aplica el ELO a los KillEvent NUEVOS
+    // (skillProcessed=false) en orden cronológico. Con los eventos anteriores
+    // a la migración del bootstrap sin marcar, procesa TODOS → recompute from scratch.
+    try {
+      await processSkillUpdates();
+    } catch (err) {
+      ok = false;
+      warnings.push(`[Skill] error: ${errMessage(err)}`);
     }
   } catch (err) {
     ok = false;

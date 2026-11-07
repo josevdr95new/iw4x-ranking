@@ -35,6 +35,14 @@ Todo error (4xx/5xx) responde:
 | `PLAYER_NOT_FOUND`       | 404  | GUID desconocido (¿corriste sync?) |
 | `SYNC_NOT_CONFIGURED`    | 503  | `IW4MADMIN_DB_PATH` no configurada |
 | `SYNC_SOURCE_UNAVAILABLE`| 503  | La DB de IW4MAdmin no existe o no se pudo abrir |
+| `IAM_NOT_CONFIGURED`     | 503  | Bridge de moderación: falta `IW4MADMIN_WEBFRONT_URL` |
+| `IAM_UPSTREAM_ERROR`     | 502  | Bridge: el webfront respondió 4xx/5xx a un proxy |
+| `IAM_UPSTREAM_UNREACHABLE` | 502 | Bridge: no se pudo contactar el webfront (la red o timeout) |
+| `IAM_UPSTREAM_NON_JSON`  | 502  | Bridge: el webfront devolvió no-JSON |
+| `IAM_UPSTREAM_LOGIN_REJECTED` | 503 | Bridge (remoto): credenciales `IW4MADMIN_API_USER/PASS` rechazadas |
+| `IAM_CLIENT_NOT_FOUND`   | 404  | Bridge: `clientId` inexistente o nombre sin match exacto |
+| `IAM_PENALTIES_DB_NOT_CONFIGURED` | 503 | Bridge: falta `IW4MADMIN_PENALTIES_DB_PATH` |
+| `IAM_PENALTIES_DB_UNAVAILABLE` | 503 | Bridge: la SQLite de IW4MAdmin no se pudo abrir (read-only) |
 | `INTERNAL`               | 500  | Error no controlado |
 
 ---
@@ -348,7 +356,7 @@ Response **200** (ejemplo real):
       "kd": 1.59,
       "timePlayed": 593392,
       "connections": 29,
-      "skill": 17.63,
+      "skill": 1042.5,
       "lastConnection": "2026-11-02T21:59:06.318Z",
       "linked": false
     },
@@ -361,7 +369,7 @@ Response **200** (ejemplo real):
       "kd": 1.83,
       "timePlayed": 521415,
       "connections": 424,
-      "skill": 20.23,
+      "skill": 1187.25,
       "lastConnection": "2026-10-04T21:59:06.318Z",
       "linked": true
     }
@@ -393,7 +401,7 @@ Response **200** (ejemplo real, truncado):
     "kd": 1.59,
     "timePlayed": 593392,
     "connections": 29,
-    "skill": 17.63,
+    "skill": 1042.5,
     "headshots": 61,
     "headshotPct": 21.11,
     "damageDealt": 25870,
@@ -547,6 +555,28 @@ Errores: `400 VALIDATION_ERROR` (sort inválido, page/pageSize fuera de rango).
 
 ---
 
+## skill (ELO real por eventos)
+
+`skill` sigue siendo un `number` en leaderboard/perfil/players/:guid (shape sin cambios), pero ya NO es una heurística por agregados: es **ELO calculado sobre KillEvents** (fuente única de stats = log / IW4MAdmin; IW4MAdmin NUNCA escribe en esta DB). Implementación: `apps/api/src/services/skill/`.
+
+Fórmula resumida (constantes en `apps/api/src/services/skill/elo.ts`):
+
+- Cada kill mueve puntos del atacante a la víctima ponderado por fuerza relativa (expected-score clásico, escala 400): `delta = K_medio × mult × (1 − expected)`. Zero-sum por evento.
+- `K` decrece con el skill (los novatos se mueven más): 40 (< 1150), 30 (1150–1600), 24 (> 1600).
+- `mult` (bonus del atacante): headshot ×1.25; hitloc difícil (`neck`) ×1.1; daño sobre 100: +1% cada 10 dmg, cap +25%. Combinación acotada por 1.6 (guard).
+- Teamkill: penalidad plana de 24 al atacante (la víctima no gana nada → sin farming de compañeros).
+- World/suicidio (defensivo; la ingesta por log no almacena estos eventos): pérdida plana de 4.
+- ELO base con **floor 150** y **cap 2500**; start 1000. Determinista: mismo set de eventos en el mismo orden (`timeEpoch ASC, id ASC`) → mismo skill.
+- Valor expuesto: `skill = skillElo + bonus de racha` (+2 por kill de la mejor racha, cap racha 20 → máximo +40). **Rango típico expuesto: ~150–2540**, con la mayoría de la población entre ~850 y ~1600 (útil para el tooltip del frontend).
+
+Procesamiento **incremental e idempotente**: cada sync aplica SOLO los KillEvent con `skillProcessed = false` (los nuevos), en orden cronológico, y los marca en la misma transacción (lotes de 2000). Los players sin eventos se inicializan a 1000.
+
+Recompute FROM SCRATCH (tras un reset de DB o recalibración del modelo): `npm run recompute:skill` desde la raíz del monorepo — desmarca TODOS los eventos, resetea `skillElo` y reprocesa el histórico completo en orden. El bootstrap de datos previos al deploy fue automático: los eventos existentes quedaron con `skillProcessed=false` por default y el primer sync los procesó todos.
+
+BOTS (`+spawnBot`): el guid literal `botN` que escribe el engine en games_mp.log se mapea DETERMINISTA a un guid del rango dedicado `0xb07…` → cada bot tiene perfil estable que acumula stats y participa del ELO como cualquier player.
+
+---
+
 ## Sync desde IW4MAdmin
 
 ### `POST /api/sync` 🔒
@@ -594,6 +624,185 @@ Response **200**:
 
 ---
 
+## Moderación (bridge IW4MAdmin) — `/api/admin/iam/*` 🔒 ADMIN
+
+> **Vecinos: NO duplicar stats ni perfiles.** El ranking/leaderboard/perfiles se alimenta del log del juego (`games_mp.log`). Esta sección es EXCLUSIVAMENTE moderación: penalidades y controlen vivo de IW4MAdmin. Nada de lo que consumas acá debe usarse para stats.
+
+Puente con el [webfront de IW4MAdmin](https://github.com/RaidMax/IW4M-Admin) instalado localmente (ver `docs/SETUP.md` §4G). **Fuente de verdad**: el código del webfront, tag `2025.12.16.1` — API JSON descubierta en `WebfrontCore/Controllers/API/*`.
+
+**Config (env de `apps/api/.env`)**:
+
+| Variable | Obligatoria | Para qué |
+| --- | --- | --- |
+| `IW4MADMIN_WEBFRONT_URL` | Sí (p. ej. `http://127.0.0.1:1624`) | Webfront al que se proxya el bridge. Sin esta env: `503 IAM_NOT_CONFIGURED`. |
+| `IW4MADMIN_PENALTIES_DB_PATH` | Solo para `penalties` y las penalidades abiertas de `clients` | SQLite de IW4MAdmin abierta SOLO-LECTURA (`D:/IW4MAdmin/Database/Database.db`). |
+| `IW4MADMIN_API_USER` / `IW4MADMIN_API_PASS` | **No** (opcional) | Solo si la API corre en otro host. Referencia a documentación de bootstrap; NO incluir credenciales reales en el repo. |
+
+**Mecanismo de auth descubierto (referencia)**: el webfront usa cookies de ASP.NET (`POST /api/client/{clientId}/login` con `{password}` → `Set-Cookie: .AspNetCore.Cookies=…`), PERO `BaseController.OnActionExecuting` otorga permisos **Console completos** a las requests de `127.0.0.1` sin el header `X-Forwarded-For`. En despliegue same-host NO se necesitan credenciales; el proxy llama directo (loopback de confianza). El proxy soporta login por cookie con cache y re-login automático (1 intento) al recibir 401 si están las envs de credenciales.
+
+El historial de penalidades se lee de la SQLite de IW4MAdmin en modo read-only — sin IPC ni API JSON del upstream (`GET /api/penalty/BanInfo` aún no existe). Los tipos de penalidad se filtran a warn/kick/tempban/ban (+unban en el historial); report y flags automatizados se excluyen del scope.
+
+Todos los endpoints exigen **JWT + rol ADMIN** (misma rama que `PUT /api/admin/server-config`).
+
+### `GET /api/admin/iam/status` 🔒 ADMIN
+
+Diagnóstico del bridge (NO devuelve 502 si el upstream está caído: siempre 200 con `error` legible).
+
+```json
+{
+  "configured": true,
+  "reachable": true,
+  "penaltiesDb": { "configured": true },
+  "error": null,
+  "servers": [
+    {
+      "id": 12700128961,
+      "name": "^7[^1RANKING^7] ^7Local Test Server E2E",
+      "game": "IW4",
+      "map": "Rust",
+      "gametype": "Team Deathmatch",
+      "players": 1,
+      "maxPlayers": 18,
+      "parser": "Call of Duty"
+    }
+  ]
+}
+```
+
+Errores: `200` siempre. Si no está config, `error` describe la env que falta.
+
+### `GET /api/admin/iam/clients?query=<nombre|xuid>` 🔒 ADMIN
+
+Búsqueda de clientes por **nombre** (LIKE, ≥3 chars) o **GUID hex** (xuid). El foco del UI: ver **penalidades abiertas** (bans activos, warns vigentes) y el nivel de cada cliente.
+
+```json
+{
+  "total": 1,
+  "query": "Player5",
+  "penaltiesDb": true,
+  "clients": [
+    {
+      "clientId": 5,
+      "name": "Player5",
+      "xuid": "AB12CD34",
+      "level": "User",
+      "openPenalties": [
+        {
+          "id": 2,
+          "type": "warn",
+          "reason": "abuso de voz",
+          "automated": false,
+          "when": "2026-11-05T14:00:00.000Z",
+          "expires": "2030-01-01T00:00:00.000Z",
+          "offender": { "clientId": 5, "name": "Player5" },
+          "punisher": { "clientId": 10, "name": "PunisherPat" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `openPenalties` es `null` (no `[]`) si `IW4MADMIN_PENALTIES_DB_PATH` no está configurada (no puedo saber si hay bans). `level` es `null` en el mismo caso.
+- El match de nombre ignora códigos de color del juego (`^1…`): `ColorGamer` resuelve al cliente `Color^2Gamer` si es único.
+- Errores: `400 VALIDATION_ERROR` (query corta), `403`, `503 IAM_NOT_CONFIGURED`.
+
+### `GET /api/admin/iam/penalties?limit=30` 🔒 ADMIN
+
+Historial reciente (warn/kick/tempban/ban/unban), más nuevo primero. `limit` entre 1 y 100 (default 30). Cada entrada usa el mismo shape `openPenalties` de `/clients`.
+
+Errores: `400 VALIDATION_ERROR`, `403`, `503 IAM_PENALTIES_DB_NOT_CONFIGURED` / `503 IAM_PENALTIES_DB_UNAVAILABLE`.
+
+### `POST /api/admin/iam/penalty` 🔒 ADMIN
+
+Emite una penalidad vía `POST /api/server/{serverId}/execute` del upstream, ejecutando `warn`/`kick`/`tempban`/`ban` con target **`@clientId`** (unívoco, online u offline). El primer server monitorizado es el elegido (solo uno en este despliegue).
+
+Request:
+
+```json
+{
+  "type": "tempban",
+  "durationMinutes": 90,
+  "reason": "exploit en CTF",
+  "clientId": 9
+}
+```
+
+| Campo | Regla |
+| --- | --- |
+| `type` | `warn` \| `kick` \| `tempban` \| `ban` (whitelist zod) |
+| `reason` | **Obligatorio** (≥3 y ≤200) — jamás vacío |
+| `clientId` | Entero positivo → target `@{id}`; se valida que exista (contra `GET /api/client/{id}`) |
+| `clientName` | Alternativa a `clientId`: match EXACTO limpando colorcodes/case; si es ambiguo → 400 pidiendo clientId |
+| `durationMinutes` | Solo `tempban`: 1..43200 (límite real de IW4MAdmin 30d, `MaximumTempBanTime` = 30.00:00:00) → comando SIEMPRE `<n>m` (minutos, única unidad segura del parser) |
+
+Reglas de negocio:
+
+- **warn/kick solo a players CONECTADOS**: el bridge verifica contra `GET /api/Status` (match por nombre limpio) → `400` si está offline.
+- tempban/ban funcionan también con el player desconectado (penalizar por `@id`, guardado en DB del upstream).
+- Nunca target por nombre de jugador activo (slot/name): TODOS los comandos van por `@id`.
+- El `reason` viaja tal cual (se sanitiza salto de línea manual) — por eso es obligatorio y no opcional ni vacío.
+
+Response **200**:
+
+```json
+{
+  "executed": true,
+  "type": "tempban",
+  "clientId": 9,
+  "serverId": 12700128961,
+  "output": ["Ejecutado: tempban @9 90m exploit"]
+}
+```
+
+`output` es el relé textual de la ejecución del upstream (útil para mostrar feedback en el UI).
+
+Errores:
+- `400 VALIDATION_ERROR` — motivo corto, tipo fuera de whitelist, tempban sin/exceso `durationMinutes`, sin `clientId`/`clientName`, o warn/kick a un cliente no conectado.
+- `404 IAM_CLIENT_NOT_FOUND` — `clientId` inexistente o nombre sin match exacto.
+- `502 IAM_UPSTREAM_*` — el webfront falló (`ERROR`/`UNREACHABLE`/`NON_JSON`) con detalle legible del upstream.
+- `503 IAM_NOT_CONFIGURED` / `503 IAM_UPSTREAM_LOGIN_*` — config o login remoto rechazado.
+
+### `GET /api/admin/iam/live` 🔒 ADMIN
+
+Jugadores conectados AHORA (el log del juego no da esto): servers con `players[]` y su `clientId` resuelto vía `GET /api/client/find`.
+
+```json
+{
+  "servers": [
+    {
+      "id": 12700128961,
+      "name": "^7[^1RANKING^7] ^7Local Test Server E2E",
+      "online": true,
+      "players": [
+        {
+          "name": "Player5",
+          "clientId": 5,
+          "clientNumber": 0,
+          "level": "User",
+          "ping": 50,
+          "score": 3,
+          "state": "Connected"
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `?resolve=false` evita las búsquedas de `clientId` (menos llamadas al upstream; `clientId` queda `null`).
+- `clientId` es `null` si el nombre no se resolvió (player conectado con otro nombre, spawner, bots, etc.) — el frontend debe tolerarlo.
+- Errores: `403`, `502 IAM_UPSTREAM_*`, `503 IAM_NOT_CONFIGURED`.
+
+### Notas para el frontend de moderación
+
+- `clients`, `penalties` y `live` son consultas read-only de moderación (show-only); `POST /penalty` es el único endpoint con side effect. Confirma siempre el motivo y pide confirmar en tempban/ban.
+- `name` del upstream puede contener códigos de color (`^1RANKING`): si el UI no los renderiza, sácalos con `/\^[0-9a-zA-Z]/g` (un solo carácter tras `^`).
+- Errors: revisar `error.code` (nunca mensaje humano) para decidir qué alerta mostrar.
+- NO usar este bridge para enriquecer stats/perfiles del leaderboard: es un canal aparte (ver nota arriba).
+
+---
+
 ## Resumen rápido de rutas
 
 | Método | Ruta                      | Auth | Descripción |
@@ -618,3 +827,8 @@ Response **200**:
 | GET    | `/api/admin/server-config` | ADMIN | Parsea el server.cfg real a estructura JSON |
 | PUT    | `/api/admin/server-config` | ADMIN | Regenera el cfg (backup + escritura atómica; restart opcional) |
 | POST   | `/api/admin/server/restart` | ADMIN | Reinicia el server (requiere ALLOW_SERVER_CONTROL=1) |
+| GET    | `/api/admin/iam/status`    | ADMIN | Diag del bridge IW4MAdmin (config/reachability/servers) |
+| GET    | `/api/admin/iam/clients`   | ADMIN | Búsqueda de clientes con penalidades abiertas y nivel |
+| GET    | `/api/admin/iam/penalties` | ADMIN | Historial reciente de warn/kick/tempban/ban/unban |
+| POST   | `/api/admin/iam/penalty`   | ADMIN | Emite warn/kick/tempban/ban vía execute (`@clientId`) |
+| GET    | `/api/admin/iam/live`      | ADMIN | Players conectados ahora con clientId resuelto |

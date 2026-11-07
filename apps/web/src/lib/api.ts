@@ -25,10 +25,13 @@ export function setToken(token: string | null): void {
   }
 }
 
+export type ApiIssue = { path: string | Array<string | number>; message: string };
+
 export interface ApiErrorBody {
   code: string;
   message: string;
-  details?: { issues?: Array<{ path: string; message: string }> };
+  /** docs/API.md documenta `{ issues: [...] }`; la API actual manda el array directo. Se aceptan ambas. */
+  details?: { issues?: ApiIssue[] } | ApiIssue[];
 }
 
 export class ApiError extends Error {
@@ -41,7 +44,10 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.code = body.code;
     this.status = status;
-    this.details = body.details;
+    // API.md documenta `details: { issues: [...] }`, pero la API actual manda el array
+    // directo (`details: [...]`). Se normaliza a la forma documentada (tolerante a ambas).
+    const raw = body.details;
+    this.details = Array.isArray(raw) ? { issues: raw } : raw;
   }
 
   /** Mapa campo → mensaje a partir de details.issues (validación zod). */
@@ -250,6 +256,112 @@ export interface RestartServerResponse {
   command: string;
 }
 
+/* Moderación bridge IW4MAdmin (docs/API.md §Moderación) */
+
+export interface IamStatusServer {
+  id: number;
+  name: string;
+  game: string;
+  map: string | null;
+  gametype: string | null;
+  players: number;
+  maxPlayers: number;
+  parser: string;
+}
+
+/** GET /api/admin/iam/status — siempre 200; diagnóstico en `error`. */
+export interface IamStatusResponse {
+  configured: boolean;
+  reachable: boolean;
+  penaltiesDb: { configured: boolean };
+  error: string | null;
+  servers: IamStatusServer[];
+}
+
+export type IamPenaltyType = "warn" | "kick" | "tempban" | "ban";
+/** El historial además registra unban. */
+export type IamPenaltyRecordType = IamPenaltyType | "unban";
+
+export interface IamPenaltyParty {
+  clientId: number;
+  name: string;
+}
+
+/** Shape único usado por /clients (openPenalties) y /penalties. Campos tolerantes: la DB upstream puede traer null. */
+export interface IamPenalty {
+  id: number;
+  type: IamPenaltyRecordType;
+  reason?: string | null;
+  automated?: boolean;
+  when: string;
+  expires?: string | null;
+  offender?: IamPenaltyParty | null;
+  punisher?: IamPenaltyParty | null;
+}
+
+export interface IamClient {
+  clientId: number;
+  name: string;
+  xuid: string | null;
+  /** null si la DB de penalidades no está configurada. */
+  level: string | null;
+  /** null si la DB de penalidades no está configurada. */
+  openPenalties: IamPenalty[] | null;
+}
+
+export interface IamClientsResponse {
+  total: number;
+  query: string;
+  penaltiesDb: boolean;
+  clients: IamClient[];
+}
+
+export interface IamPenaltiesResponse {
+  limit: number;
+  penaltiesDb: boolean;
+  penalties: IamPenalty[];
+}
+
+export interface IamLivePlayer {
+  name: string;
+  /** null si no se pudo resolver (player con otro nombre, bots…). */
+  clientId: number | null;
+  clientNumber: number | null;
+  level: string | null;
+  ping: number | null;
+  score: number | null;
+  state: string;
+}
+
+export interface IamLiveServer {
+  id: number;
+  name: string;
+  online: boolean;
+  players: IamLivePlayer[];
+}
+
+export interface IamLiveResponse {
+  servers: IamLiveServer[];
+}
+
+export interface IamPenaltyRequest {
+  type: IamPenaltyType;
+  /** Obligatorio: 3–200 chars. */
+  reason: string;
+  clientId: number;
+  /** Solo tempban: 1..43200 minutos. */
+  durationMinutes?: number;
+}
+
+export interface IamPenaltyResponse {
+  executed: boolean;
+  type: string;
+  clientId: number;
+  serverId: number;
+  /** Relé textual del upstream, para feedback en el UI. */
+  output: string[];
+}
+
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
@@ -353,5 +465,33 @@ export const api = {
 
   syncStatus() {
     return request<SyncStatusResponse>("/sync/status");
+  },
+
+  /* Moderación — bridge IW4MAdmin (docs/API.md §Moderación, ADMIN). */
+
+  iamStatus() {
+    return request<IamStatusResponse>("/admin/iam/status", { auth: true });
+  },
+
+  iamLive() {
+    return request<IamLiveResponse>("/admin/iam/live", { auth: true });
+  },
+
+  iamClients(query: string) {
+    return request<IamClientsResponse>(`/admin/iam/clients?query=${encodeURIComponent(query)}`, {
+      auth: true,
+    });
+  },
+
+  iamPenalties(limit = 30) {
+    return request<IamPenaltiesResponse>(`/admin/iam/penalties?limit=${limit}`, { auth: true });
+  },
+
+  iamPenalty(input: IamPenaltyRequest) {
+    return request<IamPenaltyResponse>("/admin/iam/penalty", {
+      method: "POST",
+      body: input,
+      auth: true,
+    });
   },
 };

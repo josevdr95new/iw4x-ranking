@@ -15,6 +15,7 @@ export interface PlayerDto {
   /** Segundos de juego. Con fuente log: suma de Session (abiertas: en curso, cap 4h). */
   timePlayed: number;
   connections: number;
+  /** skill = ELO interno (rival-relative + headshots + daño; floor 150, cap 2500, inicio 1000). Ver docs/API.md. */
   skill: number;
   headshots: number;
   /** % de kills que fueron headshot (hitloc head/helmet). */

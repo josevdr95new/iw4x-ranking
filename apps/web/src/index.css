@@ -43,6 +43,11 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Evita líneas huérfanas en párrafos (impeccable: straggler). Mejora progresiva. */
+  p {
+    text-wrap: pretty;
+  }
+
   ::selection {
     background: #8fd429;
     color: #0e1405;

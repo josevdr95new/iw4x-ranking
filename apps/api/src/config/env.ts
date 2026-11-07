@@ -20,6 +20,13 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).optional(),
   JWT_EXPIRES_IN: z.string().min(1).default('7d'),
   IW4MADMIN_DB_PATH: z.string().min(1).optional(),
+  /** URL del webfront de IW4MAdmin (ej. http://127.0.0.1:1624) - SOLO bridge de moderación. */
+  IW4MADMIN_WEBFRONT_URL: z.string().min(1).optional(),
+  /** Credenciales OPCIONALES de un cliente privilegiado del webfront (las NO recomendamos). */
+  IW4MADMIN_API_USER: z.string().min(1).optional(),
+  IW4MADMIN_API_PASS: z.string().min(1).optional(),
+  /** SQLite de IW4MAdmin, en SOLO-LECTURA, para el historial de penalidades NO para stats. */
+  IW4MADMIN_PENALTIES_DB_PATH: z.string().min(1).optional(),
   GAME_LOG_PATH: z
     .string()
     .optional()
@@ -63,6 +70,10 @@ export const env = {
   jwtSecret,
   jwtExpiresIn: raw.JWT_EXPIRES_IN,
   iw4madminDbPath: raw.IW4MADMIN_DB_PATH,
+  iw4madminWebfrontUrl: raw.IW4MADMIN_WEBFRONT_URL,
+  iw4madminApiUser: raw.IW4MADMIN_API_USER,
+  iw4madminApiPass: raw.IW4MADMIN_API_PASS,
+  iw4madminPenaltiesDbPath: raw.IW4MADMIN_PENALTIES_DB_PATH,
   gameLogPath: raw.GAME_LOG_PATH,
   gameServerAddress: raw.GAME_SERVER_ADDRESS,
   syncIntervalMinutes: raw.SYNC_INTERVAL_MINUTES,

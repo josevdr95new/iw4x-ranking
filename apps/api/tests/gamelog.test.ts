@@ -76,6 +76,62 @@ describe('guidHexToDecimal', () => {
   });
 });
 
+describe('guidHexToDecimal: GUIDs de bots ("botN", spawnBot real de r5318)', () => {
+  /** Fórmula aprobada por el orquestador: BigInt('0xb07' + n en hex, pad 12). */
+  const botExpected = (n: number): string => BigInt(`0xb07${n.toString(16).padStart(12, '0')}`).toString(10);
+
+  it('mapea botN DETERMINISTA al rango dedicado 0xb07… (dentro de la máscara de 16 hex chars / 64 bits)', () => {
+    expect(guidHexToDecimal('bot5')).toBe(botExpected(5));
+    expect(guidHexToDecimal('bot0')).toBe(botExpected(0));
+    expect(guidHexToDecimal('bot14')).toBe(botExpected(14));
+    // Máscara 64-bit: el guid mapeado SIEMPRE cabe en 16 hex chars y cae en el rango b07….
+    const asHex = BigInt(guidHexToDecimal('bot5')!).toString(16);
+    expect(asHex.startsWith('b07')).toBe(true);
+    expect(BigInt(guidHexToDecimal('bot5')!)).toBeLessThan(2n ** 64n);
+  });
+
+  it('es ESTABLE entre llamadas y distinto por número (el perfil del bot acumula)', () => {
+    expect(guidHexToDecimal('bot5')).toBe(guidHexToDecimal('bot5'));
+    expect(guidHexToDecimal('bot6')).not.toBe(guidHexToDecimal('bot5'));
+    expect(guidHexToDecimal('bot63')).not.toBe(guidHexToDecimal('bot36'));
+  });
+
+  it('no colisiona con el parseo hex real: tokens hex siguen siendo hex', () => {
+    expect(guidHexToDecimal(HEX_A)).toBe(DEC_A); // regresión: hex intacto
+    expect(guidHexToDecimal('bot')).toBeNull(); // sin número
+    expect(guidHexToDecimal('boto')).toBeNull(); // 'o' no es hex ni el patrón botN
+    expect(guidHexToDecimal('bot99999')).toBeNull(); // fuera del cap defensivo (65535)
+    expect(guidHexToDecimal('bot-1')).toBeNull();
+  });
+
+  it('las líneas con guid "botN" se parsean como eventos (no "ignored")', () => {
+    const BOT5 = BigInt('0xb07000000000005').toString(10);
+    const BOT8 = BigInt('0xb07000000000008').toString(10);
+    // J de bot (línea REAL verificada en el server con 14 bots).
+    expect(parseGameLogLine('  0:12 J;bot5;15;Laupetin')).toEqual({
+      kind: 'connect',
+      guid: BOT5,
+      name: 'Laupetin',
+      clientNum: 15,
+    });
+    // K bot mata bot (hitloc head: el headshot se calcula en la ingesta, no en el parseo).
+    const kill = parseGameLogLine('  0:20 K;bot5;15;axis;Laupetin;bot8;18;allies;OtroBot;ak47;120;MOD_RIFLE_BULLET;head');
+    expect(kill).toMatchObject({
+      kind: 'kill',
+      originGuid: BOT5,
+      targetGuid: BOT8,
+      weapon: 'ak47',
+      damage: 120,
+      hitloc: 'head',
+      isTeamkill: false,
+    });
+    // Q de bot.
+    expect(parseGameLogLine('  1:02 Q;bot5;15;Laupetin')).toMatchObject({ kind: 'disconnect', guid: BOT5 });
+    // Bot fuera de rango → evento corrupto (ignorado), como un hex inválido.
+    expect(parseGameLogLine('  0:20 K;bot99999;99;axis;x;bot8;18;allies;y;w;10;MOD;x')).toBe('ignored');
+  });
+});
+
 describe('parseGameLogLine', () => {
   it('parsea J (conexión) con prefijo de tiempo y devuelve GUID decimal', () => {
     const ev = parseGameLogLine(`  0:04 J;${HEX_A};4;Mandango ProMax`);
@@ -355,5 +411,120 @@ describe('SyncState/cursor de log (LogIngestState)', () => {
     expect(state!.currentMap).toBe('mp_rust');
     expect(state!.currentGametype).toBe('war');
     expect(state!.lastRunAt).not.toBeNull();
+  });
+});
+
+/**
+ * BOTS REALES del server dedicado (`+spawnBot N`): el engine escribe guid
+ * literal "botN". Fixture con líneas reales verificadas en campo (build
+ * r5318, 14 bots jugando). Equipos: Laupetin(bot5)=axis, BotSix(bot6)=allies,
+ * Alpha(humano)=axis.
+ */
+const BOT5_DEC = BigInt('0xb07000000000005').toString(10);
+const BOT6_DEC = BigInt('0xb07000000000006').toString(10);
+
+const BOT_LINES = [
+  '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+  '  0:04 J;bot5;15;Laupetin',
+  '  0:05 J;bot6;16;BotSix',
+  `  0:06 J;${HEX_A};0;Alpha`,
+  // 1) BOT mata BOT (headshot, equipos distintos → kill normal).
+  '  0:10 K;bot5;15;axis;Laupetin;bot6;16;allies;BotSix;ak47;120;MOD_RIFLE_BULLET;head',
+  // 2) BOT mata HUMANO (kill normal).
+  `  0:12 K;bot6;16;allies;BotSix;${HEX_A};0;axis;Alpha;mp5k;100;MOD_RIFLE_BULLET;torso_lower`,
+  // 3) HUMANO mata BOT (kill normal).
+  `  0:14 K;${HEX_A};0;axis;Alpha;bot6;16;allies;BotSix;ak74u;90;MOD_RIFLE_BULLET;chest`,
+  // 4) BOT muere por world (como el humano del fixture sintético).
+  '  0:16 K;bot6;16;allies;BotSix;;-1;world;;none;100;MOD_FALLING;none',
+  // 5) SUICIDIO de bot (origin == target → solo death, sin evento).
+  '  0:18 K;bot5;15;axis;Laupetin;bot5;15;axis;Laupetin;semtex;300;MOD_GRENADE;none',
+  // 6) Q del bot: cierra su sesión.
+  '  0:20 Q;bot5;15;Laupetin',
+];
+
+describe('ingesta con BOTS (guid literal "botN")', () => {
+  it('crea Players de bots con nombre, cuenta kills/deaths en los 4 sentidos y cierra su sesión con Q', async () => {
+    writeLog(BOT_LINES);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+
+    expect(result.ok).toBe(true);
+    expect(result.eventsSkipped).toBe(0); // ningún bot descartado por guid inválido
+    expect(result.killEventsSynced).toBe(3); // bot→bot, bot→humano, humano→bot
+    expect(result.linesParsed).toBe(10); // InitGame + 3 J + 5 K + Q
+    expect(result.sessionsOpened).toBe(3);
+    expect(result.sessionsClosed).toBe(1); // Q de bot5
+
+    const laupetin = await prisma.player.findUnique({ where: { guid: BOT5_DEC } });
+    const botsix = await prisma.player.findUnique({ where: { guid: BOT6_DEC } });
+    const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
+
+    // El J del bot creó el Player con SU nombre (guid mapeado, no 'unknown').
+    expect(laupetin?.name).toBe('Laupetin');
+    // Laupetin: 1 kill (headshot), 1 death (suicidio), headshot 1.
+    expect(laupetin?.kills).toBe(1);
+    expect(laupetin?.deaths).toBe(1);
+    expect(laupetin?.headshots).toBe(1);
+    expect(laupetin?.damageDealt).toBe(120);
+    expect(laupetin?.damageTaken).toBe(300); // daño del suicidio
+    expect(laupetin?.connections).toBe(1);
+    // Su sesión se cerró con Q.
+    const laupetinSessions = await prisma.session.findMany({ where: { guid: BOT5_DEC } });
+    expect(laupetinSessions).toHaveLength(1);
+    expect(laupetinSessions[0]?.end).not.toBeNull();
+
+    // BotSix: mató a Alpha (1), murió 3 veces (Laupetin + Alpha + world).
+    expect(botsix?.name).toBe('BotSix');
+    expect(botsix?.kills).toBe(1);
+    expect(botsix?.deaths).toBe(3);
+    expect(botsix?.damageDealt).toBe(100);
+    expect(botsix?.damageTaken).toBe(310); // 120 (kill de Laupetin) + 90 (kill de Alpha) + 100 (world)
+
+    // HUMANO sin regresión: Alpha mató al bot y murió contra el bot, guid hex intacto.
+    expect(alpha?.guid).toBe(DEC_A);
+    expect(alpha?.kills).toBe(1);
+    expect(alpha?.deaths).toBe(1);
+    expect(alpha?.damageDealt).toBe(90);
+    expect(alpha?.damageTaken).toBe(100);
+
+    // KillEvents: las 3 kills válidas, con guids mapeados y metadatos.
+    const events = await prisma.killEvent.findMany({ orderBy: [{ id: 'asc' }] });
+    expect(events).toHaveLength(3);
+    expect(events[0]).toMatchObject({ originGuid: BOT5_DEC, targetGuid: BOT6_DEC, headshot: true, damage: 120, weapon: 'ak47', map: 'mp_rust', gametype: 'war' });
+    expect(events[1]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: DEC_A, headshot: false, damage: 100, weapon: 'mp5k' });
+    expect(events[2]).toMatchObject({ originGuid: DEC_A, targetGuid: BOT6_DEC, headshot: false, damage: 90, weapon: 'ak74u' });
+
+    // World (línea 4) y suicidio (línea 5) NO generaron evento.
+    expect(events.some((e) => e.targetGuid === '' )).toBe(false);
+
+    // Sesiones: 3 abiertas por los J, solo la del bot cerrada por Q (las otras siguen en curso).
+    expect(await prisma.session.count()).toBe(3);
+    expect(await prisma.session.findFirst({ where: { guid: BOT6_DEC, end: null } })).not.toBeNull();
+    expect(await prisma.session.findFirst({ where: { guid: DEC_A, end: null } })).not.toBeNull();
+  });
+
+  it('es incremental con bots: re-ingesta no duplica y el guid del bot es estable', async () => {
+    writeLog(BOT_LINES);
+    await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    const second = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(second.killEventsSynced).toBe(0);
+    expect(await prisma.killEvent.count()).toBe(3);
+    expect(await prisma.player.count()).toBe(3);
+
+    // Misma partida tras un "reboot" del server (log nuevo, mismo bot5): MISMO guid.
+    const fresh = [
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  0:04 J;bot5;15;Laupetin',
+      '  0:09 K;bot5;15;axis;Laupetin;bot6;16;allies;BotSix;ak47;80;MOD_RIFLE_BULLET;neck\n',
+    ];
+    writeFileSync(LOG_PATH, fresh.map((l) => `${l}\n`).join(''), 'utf8');
+    const reboot = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(reboot.ok).toBe(true);
+    expect(reboot.killEventsSynced).toBe(1);
+
+    // El bot5 de "mañana" acumula sobre el perfil de "hoy" (mismo guid decimal).
+    const laupetin = await prisma.player.findUnique({ where: { guid: BOT5_DEC } });
+    expect(laupetin?.name).toBe('Laupetin');
+    expect(laupetin?.kills).toBe(2); // 1 del primer log + 1 del segundo
+    expect(laupetin?.connections).toBe(2); // 1 conexión por "sesión de server"
   });
 });
