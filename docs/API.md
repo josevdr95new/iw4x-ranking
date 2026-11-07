@@ -63,6 +63,10 @@ Todo error (4xx/5xx) responde:
 
 ## Auth
 
+> **Admin por defecto (seed)**: en el primer arranque con la tabla User vacía la API auto-crea un admin (`npm run seed:admin` lo crea/promueve manualmente; envs `ADMIN_NICK`/`ADMIN_EMAIL`/`ADMIN_PASSWORD`, defaults `admin` / `admin@admin.com` / `admin123`; `SEED_DEFAULT_ADMIN=0` desactiva el auto-seed). Si el admin ya existe, el seed **nunca** resetea su contraseña, solo asegura el rol. Ver `docs/INSTALACION.md`.
+>
+> **El email NO es credencial**: el login (`POST /api/auth/login`) es exclusivamente por **nick** (`identifier`); enviar un email en el campo devuelve 401 genérico. El email solo sirve para gestión de la cuenta (recuperación, promoción admin).
+
 > **Roles**: todo `user` ahora incluye `role: "USER" | "ADMIN"`. Los emails en `ADMIN_EMAILS` (env, separados por coma) reciben ADMIN automáticamente al **registrarse o loguear**; también existe `npm run promote:admin -- <email>` (`--demote` para revertir). Los endpoints `/api/admin/*` exigen `role=ADMIN` (403 `FORBIDDEN` en caso contrario; el rol se lee fresco de la DB en cada request).
 
 ### `POST /api/auth/register`

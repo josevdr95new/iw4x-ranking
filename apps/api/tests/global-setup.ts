@@ -18,6 +18,10 @@ const profilesStorageDir = resolve(here, 'data', 'profiles-storage');
  * 2. Genera la DB mock de IW4MAdmin con datos deterministas (seed fija).
  */
 export default function globalSetup(): void {
+  // Guard explícito: el auto-seed del admin por defecto NUNCA corre en tests
+  // (vitest.config + setup-env.ts ya fijan SEED_DEFAULT_ADMIN=0 en los workers;
+  // esto documenta la intención en el bootstrap del entorno de test).
+  process.env.SEED_DEFAULT_ADMIN = '0';
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
     rmSync(testDbFile + suffix, { force: true });
   }

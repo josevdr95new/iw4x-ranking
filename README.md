@@ -26,6 +26,15 @@ iw4x-ranking/
 
 ## Quickstart
 
+> ### 🚀 Primera instalación
+> Guía completa paso a paso en **[`docs/INSTALACION.md`](docs/INSTALACION.md)**.
+> Resumen: clonar → `npm install` → `.env` desde `.env.example` → `npm run db:push` → `npm run dev:api`.
+> En el primer arranque se auto-crea un **admin por defecto**: entra a la web con
+> nick **`admin`** / contraseña **`admin123`** (el login es SOLO por nick; el email no
+> es credencial). **⚠️ CAMBIA esa contraseña de inmediato tras el primer login.**
+> Útiles: `npm run seed:admin` (recrear/promover el admin, no resetea passwords) y
+> `npm run db:clean` (purgar datos de prueba, idempotente).
+
 ```powershell
 npm install
 Copy-Item .env.example apps/api/.env      # editar IW4MADMIN_DB_PATH

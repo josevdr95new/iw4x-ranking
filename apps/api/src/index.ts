@@ -1,7 +1,13 @@
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { prisma } from './lib/prisma.js';
+import { runStartupSeed } from './services/seed.service.js';
 import { startSyncScheduler, stopSyncScheduler } from './scheduler.js';
+
+// Primera instalación: si la tabla User está vacía, crea el admin por defecto
+// (nick "admin" / admin123) ANTES de escuchar. Idempotente y con guards
+// (NODE_ENV=test / SEED_DEFAULT_ADMIN=false). Nunca tumba el server.
+await runStartupSeed();
 
 const app = createApp();
 

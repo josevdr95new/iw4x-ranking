@@ -30,6 +30,9 @@ export default defineConfig({
       LINK_WINDOW_MINUTES: '10',
       CORS_ORIGIN: 'http://localhost:5173',
       ADMIN_EMAILS: 'admin-roles@test.local',
+      // Auto-seed del admin por defecto DESACTIVADO en tests (guard explícito;
+      // además seed.service ignora el bootstrap si NODE_ENV=test).
+      SEED_DEFAULT_ADMIN: '0',
       // Cloud save: storage aislado bajo tests/data (gitignored, se limpia en global-setup).
       PROFILE_STORAGE_DIR: resolve(here, 'tests', 'data', 'profiles-storage'),
     },

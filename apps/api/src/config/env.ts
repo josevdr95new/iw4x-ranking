@@ -35,6 +35,18 @@ const envSchema = z.object({
   SYNC_INTERVAL_MINUTES: z.coerce.number().default(0),
   SYNC_INTERVAL_SECONDS: z.coerce.number().default(0),
   ADMIN_EMAILS: z.string().default(''),
+  /** Admin por defecto (seed). Login SOLO por nick: el email no es credencial. */
+  ADMIN_NICK: z.string().min(1).default('admin'),
+  ADMIN_EMAIL: z.string().min(1).default('admin@admin.com'),
+  ADMIN_PASSWORD: z.string().min(1).default('admin123'),
+  /** Auto-seed al arrancar SOLO si la tabla User está vacía. Default true; "false"/"0" desactiva. */
+  SEED_DEFAULT_ADMIN: z
+    .string()
+    .optional()
+    .transform((value) => {
+      if (value === undefined || value.trim() === '') return true;
+      return !['false', '0', 'no', 'off'].includes(value.trim().toLowerCase());
+    }),
   LINK_WINDOW_MINUTES: z.coerce.number().int().positive().default(10),
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
   /** Raíz de almacenamiento del cloud save por cuenta (default: <repo>/apps/api/storage/profiles). */
@@ -83,6 +95,10 @@ export const env = {
   adminEmails: raw.ADMIN_EMAILS.split(',')
     .map((email) => email.trim().toLowerCase())
     .filter((email) => email.length > 0),
+  adminNick: raw.ADMIN_NICK,
+  adminEmail: raw.ADMIN_EMAIL.toLowerCase(),
+  adminPassword: raw.ADMIN_PASSWORD,
+  seedDefaultAdmin: raw.SEED_DEFAULT_ADMIN,
   linkWindowMinutes: raw.LINK_WINDOW_MINUTES,
   corsOrigins: raw.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())

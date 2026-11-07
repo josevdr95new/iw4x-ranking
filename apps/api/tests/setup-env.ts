@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 process.env.NODE_ENV = process.env.NODE_ENV ?? 'test';
+// El auto-seed del admin por defecto NUNCA corre en tests (cinturón y tirantes:
+// vitest.config ya inyecta SEED_DEFAULT_ADMIN=0; esto cubre runs sin esa config).
+process.env.SEED_DEFAULT_ADMIN = process.env.SEED_DEFAULT_ADMIN ?? '0';
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? 'file:./test.db';
 process.env.JWT_SECRET = process.env.JWT_SECRET ?? 'test-secret-test-secret-test-secret';
 process.env.LINK_WINDOW_MINUTES = process.env.LINK_WINDOW_MINUTES ?? '10';
