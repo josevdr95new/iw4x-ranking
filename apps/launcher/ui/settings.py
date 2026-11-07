@@ -1,4 +1,8 @@
-﻿"""Pantalla de ajustes: api_url, game_path, server por defecto, test de API."""
+﻿"""Pantalla de ajustes: api_url, game_path, server por defecto, test de API.
+
+Visual: bloques de sección '// CONEXIÓN //', '// JUEGO //', '// SERVER //'
+con hairlines; acción única ámbar (GUARDAR). Sin cambios de comportamiento.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,12 +12,28 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from api_client import NetworkError
-from ui.theme import COLORS, font
+from ui.hud import ghost_button, hairline, primary_button, section_label
+from ui.theme import COLORS, RADIUS, SP, font, section_text
 
 if TYPE_CHECKING:
     from ui.main_window import App
 
 log = logging.getLogger("ui.settings")
+
+
+def _entry(parent, width: int = 420) -> ctk.CTkEntry:
+    return ctk.CTkEntry(
+        parent, width=width, height=34, font=font(12),
+        fg_color=COLORS["panel2"], border_color=COLORS["border"],
+        text_color=COLORS["text"], corner_radius=RADIUS["input"],
+    )
+
+
+def _caption(parent, text: str) -> ctk.CTkLabel:
+    return ctk.CTkLabel(
+        parent, text=text, font=font(9, "bold", mono=True),
+        text_color=COLORS["text_dim"], anchor="w",
+    )
 
 
 class SettingsFrame(ctk.CTkFrame):
@@ -24,82 +44,77 @@ class SettingsFrame(ctk.CTkFrame):
         self.app = app
 
         ctk.CTkLabel(
-            self, text="⚙ Ajustes", font=font(22, "bold"), text_color=COLORS["text"]
-        ).pack(anchor="w", padx=28, pady=(24, 14))
+            self, text=section_text("AJUSTES"), font=font(20, "bold", mono=True),
+            text_color=COLORS["text"], anchor="w",
+        ).pack(fill="x", padx=SP["xl"], pady=(SP["xl"], SP["s"]))
+        hairline(self, COLORS["accent_border"]).pack(
+            fill="x", padx=SP["xl"], pady=(0, SP["l"])
+        )
 
-        card = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=14)
-        card.pack(padx=28, pady=6, fill="both", expand=True)
+        card = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=RADIUS["card"])
+        card.pack(padx=SP["xl"], pady=SP["s"], fill="both", expand=True)
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=SP["l"], pady=SP["m"])
 
-        # --- API URL ------------------------------------------------------
-        ctk.CTkLabel(
-            card, text="Dirección de la API", font=font(12),
-            text_color=COLORS["text_dim"], anchor="w",
-        ).pack(fill="x", padx=22, pady=(18, 2))
-        self.api_url = ctk.CTkEntry(card, width=420, height=34, font=font(13))
-        self.api_url.pack(fill="x", padx=22, pady=(0, 12))
+        # --- Conexión ------------------------------------------------------
+        section_label(inner, "CONEXIÓN").pack(fill="x", pady=(0, SP["s"]))
+        _caption(inner, "DIRECCIÓN DE LA API").pack(fill="x")
+        self.api_url = _entry(inner)
+        self.api_url.pack(fill="x", pady=(2, SP["m"]))
 
-        # --- Game path ------------------------------------------------------
-        ctk.CTkLabel(
-            card, text="Ruta del juego (iw4x.exe)", font=font(12),
-            text_color=COLORS["text_dim"], anchor="w",
-        ).pack(fill="x", padx=22, pady=(2, 2))
-        path_row = ctk.CTkFrame(card, fg_color="transparent")
-        path_row.pack(fill="x", padx=22, pady=(0, 12))
-        self.game_path = ctk.CTkEntry(path_row, height=34, font=font(13))
+        hairline(inner).pack(fill="x", pady=(0, SP["m"]))
+
+        # --- Juego ---------------------------------------------------------
+        section_label(inner, "JUEGO").pack(fill="x", pady=(0, SP["s"]))
+        _caption(inner, "RUTA DEL JUEGO (IW4X.EXE)").pack(fill="x")
+        path_row = ctk.CTkFrame(inner, fg_color="transparent")
+        path_row.pack(fill="x", pady=(2, SP["m"]))
+        self.game_path = _entry(path_row)
         self.game_path.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(
-            path_row, text="Examinar…", width=100, height=34, font=font(12),
-            fg_color=COLORS["panel2"], hover_color=COLORS["bg"],
-            command=self._browse_game,
-        ).pack(side="left", padx=(8, 0))
+        ghost_button(path_row, "EXAMINAR…", self._browse_game, width=110).pack(
+            side="left", padx=(SP["s"], 0)
+        )
 
-        # --- Server por defecto ----------------------------------------------
-        ctk.CTkLabel(
-            card, text="Server por defecto", font=font(12),
-            text_color=COLORS["text_dim"], anchor="w",
-        ).pack(fill="x", padx=22, pady=(2, 2))
+        # --- Server ----------------------------------------------------------
+        section_label(inner, "SERVER").pack(fill="x", pady=(0, SP["s"]))
+        _caption(inner, "SERVER POR DEFECTO").pack(fill="x")
         self.server_menu = ctk.CTkOptionMenu(
-            card, width=280, height=32, font=font(13),
+            inner, width=300, height=32, font=font(12),
             fg_color=COLORS["panel2"], button_color=COLORS["accent"],
-            button_hover_color=COLORS["accent_hover"],
+            button_hover_color=COLORS["accent_hover"], text_color=COLORS["text"],
+            dropdown_fg_color=COLORS["panel"], dropdown_hover_color=COLORS["panel2"],
+            corner_radius=RADIUS["input"],
         )
-        self.server_menu.pack(anchor="w", padx=22, pady=(0, 14))
+        self.server_menu.pack(anchor="w", pady=(2, SP["m"]))
 
-        # --- Forzar nick del ranking ------------------------------------------
-        self.force_nick_check = ctk.CTkCheckBox(
-            card, text="Forzar mi nick del ranking en el juego", font=font(12),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            checkmark_color="#ffffff", text_color=COLORS["text"],
+        # --- Nick obligatorio (nota informativa, no editable) ------------------
+        ctk.CTkLabel(
+            inner,
+            text="El juego siempre usa el nombre de tu cuenta del ranking.",
+            font=font(11), text_color=COLORS["text_dim"], anchor="w",
+            justify="left", wraplength=520,
+        ).pack(fill="x", pady=(0, SP["m"]))
+
+        # --- Acciones ---------------------------------------------------------
+        hairline(inner).pack(fill="x", pady=(0, SP["m"]))
+        actions = ctk.CTkFrame(inner, fg_color="transparent")
+        actions.pack(fill="x", pady=(0, SP["s"]))
+        ghost_button(actions, "PROBAR CONEXIÓN API", self._test_api, width=170).pack(
+            side="left"
         )
-        self.force_nick_check.pack(anchor="w", padx=22, pady=(2, 14))
-
-        # --- Acciones -------------------------------------------------------
-        actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.pack(fill="x", padx=22, pady=(4, 10))
-        ctk.CTkButton(
-            actions, text="Probar conexión API", height=36, font=font(12, "bold"),
-            fg_color=COLORS["panel2"], hover_color=COLORS["bg"],
-            text_color=COLORS["text"], command=self._test_api,
-        ).pack(side="left")
-        ctk.CTkButton(
-            actions, text="Guardar", height=36, width=120, font=font(12, "bold"),
-            fg_color=COLORS["play"], hover_color=COLORS["play_hover"],
-            command=self._save,
-        ).pack(side="right")
+        primary_button(actions, "GUARDAR", self._save, width=140).pack(side="right")
 
         # Resultado del test de conexión / guardado.
         self.feedback = ctk.CTkLabel(
-            card, text="", font=font(12), justify="left", wraplength=440,
+            inner, text="", font=font(11), justify="left", wraplength=520,
             text_color=COLORS["text_dim"], anchor="w",
         )
-        self.feedback.pack(fill="x", padx=22, pady=(0, 18))
+        self.feedback.pack(fill="x", pady=(0, SP["s"]))
 
-        # --- Volver ---------------------------------------------------------
-        ctk.CTkButton(
-            self, text="← Volver", width=110, height=34, font=font(12),
-            fg_color=COLORS["panel2"], hover_color=COLORS["bg"],
-            text_color=COLORS["text"], command=self.app.show_home,
-        ).pack(anchor="w", padx=28, pady=14)
+        # --- Volver -----------------------------------------------------------
+        ghost_button(self, "← VOLVER", self.app.show_home, width=110).pack(
+            anchor="w", padx=SP["xl"], pady=SP["m"]
+        )
 
     # --- Ciclo de la pantalla ----------------------------------------------
     def load_from_config(self) -> None:
@@ -114,10 +129,6 @@ class SettingsFrame(ctk.CTkFrame):
         idx = min(max(cfg.default_server, 0), len(labels) - 1) if labels else 0
         if labels:
             self.server_menu.set(labels[idx])
-        if cfg.force_nick:
-            self.force_nick_check.select()
-        else:
-            self.force_nick_check.deselect()
         self.feedback.configure(text="", text_color=COLORS["text_dim"])
 
     # --- Acciones ------------------------------------------------------------
@@ -161,7 +172,7 @@ class SettingsFrame(ctk.CTkFrame):
             str(error) if isinstance(error, NetworkError)
             else f"La API respondió con error: {getattr(error, 'message', error)}"
         )
-        self.feedback.configure(text=f"✘ {msg}", text_color=COLORS["error"])
+        self.feedback.configure(text=f"✘ {msg}", text_color=COLORS["danger"])
         log.info("Test de API falló: %s", msg)
 
     def _save(self) -> None:
@@ -183,7 +194,6 @@ class SettingsFrame(ctk.CTkFrame):
         cfg.set("api_url", base)
         cfg.set("game_path", self.game_path.get().strip())
         cfg.set("default_server", idx)
-        cfg.set("force_nick", bool(self.force_nick_check.get()))
         cfg.save()
 
         # Aplicar en caliente: nuevo cliente con la URL actualizada.

@@ -1,4 +1,4 @@
-﻿"""Prueba de humo del launcher contra la API real.
+"""Prueba de humo del launcher contra la API real.
 
 Uso:
     py apps\\launcher\\test_smoke.py
@@ -25,6 +25,7 @@ NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
 """
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -110,7 +111,7 @@ def phase_api_auth_flow() -> Optional[str]:
     api = ApiClient(API_URL)
     token: Optional[str] = None
     try:
-        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
+        token = ensure_login_retry(api)
         check("POST /api/auth/login (cuenta creada por el launcher)", True)
     except Exception as exc:
         check("POST /api/auth/login (cuenta creada por el launcher)", False, str(exc))
@@ -243,8 +244,11 @@ def run_phase(name: str, steps: List[Step], build_app: Callable[[], App],
     print(f"\n=== Fase GUI: {name} ===")
     ctk.set_appearance_mode("dark")
     app = build_app()
-    # En la prueba no queremos tracebacks de callbacks tras el destroy.
-    app.report_callback_exception = lambda *_a, **_k: None
+    # En la prueba los errores de callbacks de Tk van al LOG (no se silencian),
+    # para que un fallo de UI no deje la fase colgada sin diagnóstico.
+    app.report_callback_exception = lambda *_a: logging.getLogger("tk").error(
+        "Excepción en callback de Tk", exc_info=_a
+    )
     timed_out = False
 
     def guard_shot() -> None:
@@ -375,7 +379,7 @@ def phase_stats() -> None:
     # corridas por el trabajo paralelo en apps/api).
     api = ApiClient(API_URL)
     try:
-        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
+        token = ensure_login_retry(api)
         user = api.me(token)
         if not user_is_linked(user):
             guid = link_test_account(api, token)
@@ -406,8 +410,8 @@ def phase_stats() -> None:
             sub = str(panel.sub_label.cget("text"))
             check("panel de stats carga con valores reales (no '—')",
                   "—" not in (kills + kd), f"rank={rank} kills={kills} kd={kd}")
-            check("fila secundaria con tiempo jugado y jugador",
-                  "jugados" in sub and "jugador:" in sub, sub)
+            check("fila secundaria con tiempo jugado, server y jugador",
+                  "TIEMPO" in sub and "SERVER" in sub and "JUGADOR" in sub, sub)
             check("edad del dato visible ('hace Ns')",
                   "hace " in str(panel.age_label.cget("text")),
                   str(panel.age_label.cget("text")))
@@ -540,13 +544,28 @@ def phase_play_unlinked() -> None:
 # ---------------------------------------------------------------------------
 # Fase headless: vincular la cuenta de prueba con un GUID real del leaderboard
 # (la misma confirmación que lanza el flujo JUGAR al detectar el candidato).
+def ensure_login_retry(api: ApiClient, attempts: int = 3) -> str:
+    """ensure_login tolerando flaps de la API (reinicios del otro agente)."""
+    delay = 2.0
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return ensure_login(api, EMAIL, PASSWORD, DISPLAY)
+        except NetworkError as exc:
+            last_exc = exc
+            print(f"    API no responde (intento {attempt}/{attempts}); "
+                  f"reintento en {delay:.0f}s…")
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
 def phase_link_real() -> None:
     print("\n=== Fase headless: vinculación real con GUID del leaderboard ===")
     api = ApiClient(API_URL)
     guid: Optional[str] = None
 
     try:
-        token = ensure_login(api, EMAIL, PASSWORD, DISPLAY)
+        token = ensure_login_retry(api)
         user = api.me(token)
         guid = str(user.get("linkedGuid") or "") or None
         if not guid and (user.get("linkedGuids") or []):
@@ -601,7 +620,7 @@ def phase_play_linked() -> None:
     # La fase de stats termina con logout (borra el token del store de
     # prueba): re-logueamos aquí para que el auto-login funcione.
     try:
-        token = ensure_login(ApiClient(API_URL), EMAIL, PASSWORD, DISPLAY)
+        token = ensure_login_retry(ApiClient(API_URL))
         UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
     except Exception as exc:
         check("preparación de JUGAR vinculado (login)", False, str(exc))
@@ -688,11 +707,12 @@ class StubApi:
 
 
 def flow_once(stub: StubApi, respond: Optional[Callable[[GameFlow], None]] = None,
-              poll_interval: float = 0.4, poll_max: float = 1.2):
+              poll_interval: float = 0.4, poll_max: float = 1.2,
+              display_name: str = "El Tester"):
     events: List[Dict[str, Any]] = []
     flow = GameFlow(
         stub, "tok", r"C:\no\existe\iw4x.exe", "127.0.0.1:28961",
-        events.append, simulate=True,
+        events.append, simulate=True, display_name=display_name,
         poll_interval=poll_interval, poll_max_seconds=poll_max,
     )
     if respond is not None:
@@ -767,12 +787,12 @@ def phase_flow_logic() -> None:
           and "No se pudo conectar" in failed.get("msg", ""),
           str(failed))
 
-    # Ya vinculado → sin link/start y éxito inmediato (+ nick forzado).
+    # Ya vinculado → sin link/start y éxito inmediato (nick SIEMPRE forzado).
     stub = StubApi()
     evs: List[Dict[str, Any]] = []
     flow = GameFlow(stub, "tok", r"D:\Games\iw4x.exe", "127.0.0.1:28961",
                     evs.append, already_linked=True, simulate=True,
-                    force_nick=True, display_name="El Tester")
+                    display_name="El Tester")
     flow.run()
     check("cuenta ya vinculada → no llama a link/start",
           stub.link_start_calls == 0 and any(e["t"] == "success" for e in evs))
@@ -782,27 +802,35 @@ def phase_flow_logic() -> None:
               and "+connect" in e.get("msg", "") for e in evs),
           str(evs)[:300])
 
-    # force_nick sin displayName → arranca sin forzar, con motivo en el log.
+    # displayName vacío → NO se lanza el juego y se reporta el motivo oficial.
     stub = StubApi()
     evs = []
     flow = GameFlow(stub, "tok", r"D:\Games\iw4x.exe", "127.0.0.1:28961",
                     evs.append, already_linked=True, simulate=True,
-                    force_nick=True, display_name="")
+                    display_name="")
     flow.run()
-    check("sin displayName → avisa y no fuerza nick",
-          any("no se fuerza el nick" in e.get("msg", "")
-              for e in evs if e.get("t") == "log")
-          and not any("+set" in e.get("msg", "")
-                      for e in evs if e.get("t") == "log"),
+    failed = next((e for e in evs if e["t"] == "failed"), None)
+    check("sin displayName → NO lanza el juego (sin éxito)",
+          failed is not None
+          and not any(e["t"] == "success" for e in evs)
+          and failed.get("retry") is False,
+          str(failed))
+    check("sin displayName → mensaje oficial al usuario",
+          failed is not None and "Mi Cuenta (web)" in failed.get("msg", "")
+          and "nombre visible" in failed.get("msg", ""),
+          str(failed))
+    check("sin displayName → no se construyó comando de lanzamiento",
+          not any("SIMULACIÓN: comando" in e.get("msg", "")
+                  for e in evs if e.get("t") == "log"),
           str(evs)[:300])
 
 
 def phase_command_args() -> None:
-    """Fase lógica: armado del comando de arranque (función pura, sin juego)."""
-    print("\n=== Fase lógica: comando de arranque (+set name) ===")
+    """Fase lógica: armado del comando (nick SIEMPRE forzado, sin abrir juego)."""
+    print("\n=== Fase lógica: comando de arranque (+set name siempre) ===")
 
     args = build_game_args(r"D:\Games\Call of Duty 6\iw4x.exe",
-                           "192.168.2.251:28960", "Mandango ProMax", force_nick=True)
+                           "192.168.2.251:28960", "Mandango ProMax")
     check("comando: exe primero, +connect último",
           args[0] == r"D:\Games\Call of Duty 6\iw4x.exe"
           and args[-1] == "192.168.2.251:28960", str(args))
@@ -811,19 +839,14 @@ def phase_command_args() -> None:
     check("comando: lista plana de 6 argumentos (sin shell)",
           len(args) == 6 and all(isinstance(a, str) for a in args), str(args))
 
-    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "", force_nick=True)
-    check("sin displayName → no fuerza nick",
-          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
-
-    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "Tag", force_nick=False)
-    check("force_nick desactivado → no fuerza nick",
-          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
-
-    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "  Spam Bot  ",
-                           force_nick=True)
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "  Spam Bot  ")
     check("nick con espacios en extremos se recorta",
           args == ["iw4x.exe", "+set", "name", "Spam Bot", "+connect",
                    "1.2.3.4:28960"], str(args))
+
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "")
+    check("sin nick la función no emite +set (GameFlow bloquea antes)",
+          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
 
 
 # ---------------------------------------------------------------------------

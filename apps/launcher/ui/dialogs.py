@@ -1,13 +1,18 @@
-"""Diálogos modales del launcher (tema oscuro, en español)."""
+"""Diálogos modales del launcher (tema HUD oscuro, en español).
+
+Tarjetas con brackets de esquina, títulos mono, acción única ámbar.
+Mismos comportamientos e internos que la versión previa (el test los usa).
+"""
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
-from ui.theme import COLORS, font
+from ui.hud import ghost_button, hairline, primary_button, section_label
+from ui.theme import COLORS, RADIUS, SP, font, section_text
 
 log = logging.getLogger("ui.dialogs")
 
@@ -22,20 +27,20 @@ def _format_hour(iso: str) -> str:
 
 
 class ModalDialog(ctk.CTkToplevel):
-    """Base de diálogo modal oscuro: centrado sobre la ventana principal."""
+    """Base de diálogo modal oscuro: panel con hairline + brackets, centrado."""
 
     def __init__(self, master, title: str) -> None:
         super().__init__(master)
         self.title(title)
-        self.configure(fg_color=COLORS["panel"])
+        self.configure(fg_color=COLORS["bg"])
         self.resizable(False, False)
         self.transient(master)
         # Centrar respecto de la ventana principal.
         self.update_idletasks()
-        w, h = self.winfo_width() or 420, 10
+        w = self.winfo_width() or 440
         mx, my = master.winfo_rootx(), master.winfo_rooty()
         mw, mh = master.winfo_width(), master.winfo_height()
-        self.geometry(f"+{mx + (mw - w) // 2}+{my + (mh - h) // 3}")
+        self.geometry(f"+{mx + max(0, (mw - w) // 2)}+{my + (mh // 3)}")
 
 
 class CandidateDialog(ModalDialog):
@@ -56,17 +61,24 @@ class CandidateDialog(ModalDialog):
         self._chosen: Optional[str] = None
 
         ctk.CTkLabel(
+            self, text=section_text("IDENTIFICACIÓN"),
+            font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
+            anchor="w",
+        ).pack(fill="x", padx=SP["l"], pady=(SP["m"], 0))
+        ctk.CTkLabel(
             self,
             text="Vimos varios jugadores conectados ahora mismo.\n"
                  "Selecciona el que eres tú para vincular tu cuenta:",
-            font=font(13),
-            justify="left",
-        ).pack(padx=20, pady=(18, 10), anchor="w")
+            font=font(12), justify="left", text_color=COLORS["text"],
+            anchor="w",
+        ).pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["s"]))
+
+        hairline(self, COLORS["accent_border"]).pack(fill="x", padx=SP["l"])
 
         # Lista de opciones (radio buttons).
         self._var = ctk.StringVar(value="")
         box = ctk.CTkFrame(self, fg_color="transparent")
-        box.pack(padx=20, pady=4, fill="both", expand=True)
+        box.pack(padx=SP["l"], pady=SP["s"], fill="both", expand=True)
         for c in candidates:
             guid = str(c.get("guid", ""))
             name = str(c.get("name", "?"))
@@ -77,28 +89,20 @@ class CandidateDialog(ModalDialog):
                 text=label,
                 variable=self._var,
                 value=guid,
-                font=font(12),
+                font=font(11),
                 fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                border_color=COLORS["border_strong"],
+                text_color=COLORS["text"],
             ).pack(anchor="w", pady=3)
+
+        hairline(self).pack(fill="x", padx=SP["l"])
 
         # Botones de acción.
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(padx=20, pady=(10, 18), fill="x")
-        ctk.CTkButton(
-            row,
-            text="No soy ninguno",
-            fg_color=COLORS["panel2"],
-            hover_color=COLORS["bg"],
-            text_color=COLORS["text_dim"],
-            command=self._cancel,
-        ).pack(side="left")
-        ctk.CTkButton(
-            row,
-            text="Es mi cuenta ✓",
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_hover"],
-            command=self._confirm,
-        ).pack(side="right")
+        row.pack(fill="x", padx=SP["l"], pady=(SP["m"], SP["m"]))
+        ghost_button(row, "NO SOY NINGUNO", self._cancel, width=130).pack(side="left")
+        primary_button(row, "ES MI CUENTA ✓", self._confirm, width=130).pack(side="right")
 
         # Al cerrar con la X se trata como cancelación.
         self.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -131,16 +135,19 @@ class MsgBox(ModalDialog):
 
     def __init__(self, master, title: str, message: str, kind: str = "info") -> None:
         super().__init__(master, title=title)
-        color = {"error": COLORS["error"], "success": COLORS["ok"]}.get(kind, COLORS["text"])
+        color = {
+            "error": COLORS["danger"], "success": COLORS["ok"],
+        }.get(kind, COLORS["text"])
         self.geometry(f"+{master.winfo_rootx() + master.winfo_width() // 2 - 180}"
                       f"+{master.winfo_rooty() + master.winfo_height() // 3}")
 
+        hairline(self, COLORS["accent_border"]).pack(fill="x", padx=SP["l"],
+                                                     pady=(SP["m"], 0))
         ctk.CTkLabel(
-            self, text=message, font=font(13), text_color=color, justify="left",
-            wraplength=320,
-        ).pack(padx=24, pady=(22, 12))
-        ctk.CTkButton(
-            self, text="Aceptar", width=120, fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_hover"], command=self.destroy,
-        ).pack(pady=(0, 20))
+            self, text=message, font=font(12), text_color=color, justify="left",
+            wraplength=340,
+        ).pack(padx=SP["l"], pady=(SP["m"], SP["s"]))
+        primary_button(self, "ACEPTAR", self.destroy, width=130).pack(
+            pady=(0, SP["m"])
+        )
         self.after(120, self.grab_set)

@@ -54,9 +54,9 @@ class App(ctk.CTk):
         self.after(60, self._drain_tasks)
 
         # --- Ventana ---------------------------------------------------------
-        self.title("IW4x Ranking — Launcher")
-        self.geometry("780x580")
-        self.minsize(700, 520)
+        self.title("IW4X RANKING // TERMINAL DE JUGADOR")
+        self.geometry("840x680")
+        self.minsize(800, 620)
         self.configure(fg_color=COLORS["bg"])
         self._center()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -223,12 +223,12 @@ class App(ctk.CTk):
         self.store.clear()
         self.token = None
         self.user = None
-        # Detiene el ciclo de stats en vivo.
+        # Detiene el ciclo de stats y animaciones del strip.
         self._cancel_stats_timer()
         self._stats_fetching = False
         self.home_frame.stats_panel.stop_timers()
+        self.home_frame.reset_hud()
         self.home_frame.set_status("Todo listo.", "dim")
-        self.home_frame.play_btn.configure(text="JUGAR")
         self.show_login()
 
     # ================== Usuario / vinculación ==================
@@ -242,9 +242,9 @@ class App(ctk.CTk):
         self.show_home()
 
     def _update_play_as(self) -> None:
-        """Refresca 'Jugando como: <nick>' según usuario y config."""
+        """Refresca 'Jugando como: <nick>' — siempre visible (obligatorio)."""
         name = str((self.user or {}).get("displayName") or "")
-        self.home_frame.set_play_as(name, self.cfg.force_nick)
+        self.home_frame.set_play_as(name)
 
     # ================== Stats en vivo ==================
     def _update_stats_panel_state(self) -> None:
@@ -382,7 +382,7 @@ class App(ctk.CTk):
     def refresh_home_servers(self) -> None:
         """Recarga el dropdown de servers de la home desde la config."""
         self.home_frame.set_servers(self.cfg.servers, self.cfg.default_server)
-        self._update_play_as()  # force_nick puede haber cambiado en Ajustes
+        self._update_play_as()  # el displayName puede haber cambiado en la web
 
     def apply_api_url(self, base_url: str) -> None:
         """Cambia el cliente de API (tras editar ajustes)."""
@@ -428,7 +428,6 @@ class App(ctk.CTk):
             simulate=self.cfg.simulate_game,
             poll_interval=self.cfg.link_poll_interval,
             poll_max_seconds=self.cfg.link_poll_max_seconds,
-            force_nick=self.cfg.force_nick,
             display_name=display_name,
         )
         threading.Thread(target=self.flow.run, daemon=True, name="game-flow").start()
@@ -458,6 +457,7 @@ class App(ctk.CTk):
             if event.get("linked"):
                 # Refresca /auth/me para el badge VERIFICADO.
                 self.refresh_me()
+            home.set_deployed()  # strip ● EN PARTIDA
             self.flow = None
 
         elif kind == "failed":
@@ -477,4 +477,5 @@ class App(ctk.CTk):
             self.flow.cancel()
         self._cancel_stats_timer()
         self.home_frame.stats_panel.stop_timers()
+        self.home_frame.stop_animations()
         self.destroy()

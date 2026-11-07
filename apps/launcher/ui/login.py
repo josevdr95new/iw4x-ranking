@@ -1,4 +1,8 @@
-"""Pantalla de login/registro (email + password [+ displayName])."""
+"""Pantalla de login/registro (email + password [+ displayName]).
+
+Visual: terminal de acceso HUD — tarjeta con brackets de esquina, labels
+mono en mayúsculas, acción única ámbar. Cero cambios de comportamiento.
+"""
 from __future__ import annotations
 
 import logging
@@ -7,96 +11,132 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from api_client import ApiError, NetworkError
-from ui.theme import COLORS, font
+from ui.hud import BracketCard, hairline, primary_button, section_label
+from ui.theme import COLORS, RADIUS, SP, font, section_text, tracked
 
 if TYPE_CHECKING:  # evita import circular solo por tipado
     from ui.main_window import App
 
 log = logging.getLogger("ui.login")
 
+FIELD_W = 320
+
 
 class LoginFrame(ctk.CTkFrame):
-    """Formulario de entrada; el botón del enlace alterna modo registro."""
+    """Formulario de entrada; el enlace inferior alterna modo registro."""
 
     def __init__(self, master, app: "App") -> None:
-        super().__init__(master, fg_color=COLORS["bg"])
+        super().__init__(master, fg_color=COLORS["bg_deep"])
         self.app = app
         self._register_mode = False
 
-        # --- Título ---------------------------------------------------------
+        # --- Bloque de identidad (display) -----------------------------------
         ctk.CTkLabel(
-            self, text="IW4X RANKING", font=font(30, "bold"),
+            self, text=section_text("TERMINAL DE JUGADOR"),
+            font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
+        ).pack(pady=(64, SP["s"]))
+        ctk.CTkLabel(
+            self, text=tracked("IW4X RANKING"), font=font(30, "bold", mono=True),
             text_color=COLORS["text"],
-        ).pack(pady=(70, 2))
+        ).pack()
+        hairline(self, COLORS["accent_border"]).pack(
+            fill="x", padx=120, pady=(SP["m"], SP["s"])
+        )
         ctk.CTkLabel(
             self, text="Inicia sesión para jugar y vincular tu GUID",
-            font=font(13), text_color=COLORS["text_dim"],
-        ).pack(pady=(0, 30))
-
-        # --- Tarjeta del formulario ------------------------------------------
-        card = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=14)
-        card.pack(padx=40, pady=10)
-
-        self.email = ctk.CTkEntry(
-            card, width=300, height=38, placeholder_text="Email",
-            font=font(13),
-        )
-        self.email.pack(padx=24, pady=(24, 8))
-
-        self.password = ctk.CTkEntry(
-            card, width=300, height=38, placeholder_text="Contraseña",
-            show="•", font=font(13),
-        )
-        self.password.pack(padx=24, pady=8)
-
-        # Solo visible en modo registro.
-        self.display_name = ctk.CTkEntry(
-            card, width=300, height=38, placeholder_text="Nombre visible (tu tag)",
-            font=font(13),
-        )
-        self.display_name.pack(padx=24, pady=8)
-        self.display_name.pack_forget()
-
-        # Mensaje de estado (errores de validación/red).
-        self.status = ctk.CTkLabel(
-            card, text="", font=font(12), text_color=COLORS["error"],
-            wraplength=300, justify="left",
-        )
-        self.status.pack(padx=24, pady=(2, 0))
-
-        self.action_btn = ctk.CTkButton(
-            card, text="ENTRAR", width=300, height=42, font=font(14, "bold"),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            command=self._on_submit,
-        )
-        self.action_btn.pack(padx=24, pady=(10, 6))
-
-        # Enlace para alternar registro/login.
-        self.toggle_link = ctk.CTkButton(
-            card, text="¿No tienes cuenta? Crear cuenta",
             font=font(12), text_color=COLORS["text_dim"],
-            fg_color="transparent", hover_color=COLORS["panel"],
+        ).pack(pady=(0, SP["xl"]))
+
+        # --- Tarjeta HUD con brackets ----------------------------------------
+        card = BracketCard(self, accent=True)
+        card.pack(padx=SP["xl"], pady=SP["s"])
+        body = card.inner
+
+        # Campos con caption mono (label de form, estilo HUD).
+        self.email = self._make_entry(body, "jugador@ejemplo.com")
+        self._field(body, "EMAIL", self.email, 0)
+        self.password = self._make_entry(body, "••••••••", show="•")
+        self._field(body, "CONTRASEÑA", self.password, 1)
+        # El campo de nombre va en su propia caja para ocultarlo/mostrarlo
+        # (CTk no tiene pack_after: recolocamos la caja con pack -after).
+        self.display_box = ctk.CTkFrame(body, fg_color="transparent")
+        self.display_name = self._make_entry(self.display_box, "TuTag")
+        self._field(self.display_box, "NOMBRE VISIBLE (TU TAG)",
+                    self.display_name, 0)
+        self.display_box.tk.call(
+            "pack", "configure", self.display_box,
+            "-after", self.password, "-fill", "x",
+        )
+        self.display_box.pack_forget()  # solo visible en modo registro
+
+        # Estado (errores de validación/red).
+        self.status = ctk.CTkLabel(
+            body, text="", font=font(11), text_color=COLORS["danger"],
+            wraplength=FIELD_W, justify="left", anchor="w",
+        )
+        self.status.pack(fill="x", padx=SP["l"], pady=(0, 0))
+
+        self.action_btn = primary_button(
+            body, "ENTRAR", self._on_submit, width=FIELD_W, height=44
+        )
+        self.action_btn.configure(font=font(14, "bold", mono=True))
+        self.action_btn.pack(fill="x", padx=SP["l"], pady=(SP["m"], 0))
+
+        hairline(body).pack(fill="x", padx=SP["l"], pady=(SP["m"], 0))
+
+        self.toggle_link = ctk.CTkButton(
+            body,
+            text="¿No tienes cuenta? Crear cuenta",
+            font=font(11),
+            text_color=COLORS["text_dim"],
+            fg_color="transparent",
+            hover_color=COLORS["panel2"],
+            corner_radius=RADIUS["btn"],
             command=self._toggle_mode,
         )
-        self.toggle_link.pack(padx=24, pady=(0, 18))
+        self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["m"]))
 
         # Enter = enviar.
-        self.email.bind("<Return>", lambda _e: self._on_submit())
-        self.password.bind("<Return>", lambda _e: self._on_submit())
-        self.display_name.bind("<Return>", lambda _e: self._on_submit())
+        for entry in (self.email, self.password, self.display_name):
+            entry.bind("<Return>", lambda _e: self._on_submit())
 
-    # --- Comportamiento -------------------------------------------------------
+    # --- Constructores de campo (entry HUD) ---------------------------------
+    @staticmethod
+    def _make_entry(parent, placeholder: str, show: str = "") -> ctk.CTkEntry:
+        return ctk.CTkEntry(
+            parent, width=FIELD_W, height=38, placeholder_text=placeholder,
+            show=show, font=font(12),
+            fg_color=COLORS["panel2"], border_color=COLORS["border"],
+            text_color=COLORS["text"], corner_radius=RADIUS["input"],
+        )
+
+    def _field(self, parent, caption: str, entry, row: int):
+        """Caption mono + entry; devuelve el caption para poder ocultarlo."""
+        caption_label = ctk.CTkLabel(
+            parent, text=caption, font=font(9, "bold", mono=True),
+            text_color=COLORS["text_dim"], anchor="w",
+        )
+        caption_label.pack(fill="x", padx=SP["l"],
+                           pady=((SP["l"] if row == 0 else SP["s"]), 2))
+        entry.pack(fill="x", padx=SP["l"])
+        return caption_label
+
+    # --- Comportamiento (idéntico al previo) --------------------------------
     def _toggle_mode(self) -> None:
         """Alterna entre login y creación de cuenta."""
         self._register_mode = not self._register_mode
         if self._register_mode:
             self.action_btn.configure(text="CREAR CUENTA")
             self.toggle_link.configure(text="Ya tengo cuenta: entrar")
-            self.display_name.pack(padx=24, pady=8)  # type: ignore[no-untyped-call]
+            # Recoloca la caja del nombre justo tras la contraseña.
+            self.display_box.tk.call(
+                "pack", "configure", self.display_box,
+                "-after", self.password, "-fill", "x",
+            )
         else:
             self.action_btn.configure(text="ENTRAR")
             self.toggle_link.configure(text="¿No tienes cuenta? Crear cuenta")
-            self.display_name.pack_forget()
+            self.display_box.pack_forget()
         self.status.configure(text="")
 
     def _on_submit(self) -> None:
@@ -144,5 +184,5 @@ class LoginFrame(ctk.CTkFrame):
                 msg += "y el nombre 3–32."
         else:  # NetworkError
             msg = str(error)
-        self.status.configure(text=msg, text_color=COLORS["error"])
+        self.status.configure(text=msg, text_color=COLORS["danger"])
         log.info("Fallo de autenticación en pantalla login: %s", msg)

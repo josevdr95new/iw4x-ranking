@@ -25,8 +25,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo
     # para poder probar el polling de vinculación contra la API.
     "simulate_game": False,
-    # Fuerza el nick del ranking en el juego (+set name <displayName>).
-    "force_nick": True,
     # Ajustes finos del polling de vinculación (los valores del contrato son
     # 10s / 180s; se exponen para poder acortarlos en pruebas).
     "link_poll_interval": 10,
@@ -77,10 +75,6 @@ class AppConfig:
     @property
     def simulate_game(self) -> bool:
         return bool(self.data.get("simulate_game", False))
-
-    @property
-    def force_nick(self) -> bool:
-        return bool(self.data.get("force_nick", True))
 
     @property
     def link_poll_interval(self) -> int:
@@ -137,5 +131,8 @@ def load_config() -> AppConfig:
     # Merge: defaults para claves ausentes (el archivo puede ser viejo).
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
+    # 'force_nick' quedó obsoleto (el nick SIEMPRE se fuerza): se purga
+    # silenciosamente para que no vuelva al archivo al guardar.
+    merged.pop("force_nick", None)
     log.info("Config cargada desde %s", path)
     return AppConfig(merged)

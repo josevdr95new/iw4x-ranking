@@ -1,4 +1,9 @@
-"""Pantalla principal (logueado): cabecera, server, JUGAR, consola mini."""
+"""Pantalla principal (logueado): cabecera HUD, server, JUGAR héroe, consola.
+
+El botón JUGAR es el protagonista: bloque ámbar grande con strip de estado
+(● LISTO → ● CONECTANDO → ● EN PARTIDA / ● FALLO). La consola mini vive en
+una barra inferior tipo terminal. Sin cambios de comportamiento.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,17 +13,22 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import customtkinter as ctk
 
 from api_client import user_is_linked
+from ui.hud import DotState, ghost_button, hairline, section_label, status_chip
 from ui.stats_panel import StatsPanel
-from ui.theme import COLORS, font
+from ui.theme import COLORS, RADIUS, SP, font, section_text
 
 if TYPE_CHECKING:
     from ui.main_window import App
 
 log = logging.getLogger("ui.home")
 
+TEXT_LISTO = "JUGAR"
+TEXT_CONECTANDO = "CONECTANDO…"
+TEXT_REINTENTAR = "REINTENTAR"
+
 
 class HomeFrame(ctk.CTkFrame):
-    """Vista del jugador: estado de vinculación, server y botón JUGAR."""
+    """Vista del jugador: operador, server, stats y despliegue."""
 
     def __init__(self, master, app: "App") -> None:
         super().__init__(master, fg_color=COLORS["bg"])
@@ -26,95 +36,105 @@ class HomeFrame(ctk.CTkFrame):
         self._servers: List[Dict[str, str]] = []
         self._server_labels: Dict[str, int] = {}  # texto mostrado → índice
 
-        # =================== Cabecera ===================
+        # =================== Cabecera (banda elevada) ===================
         header = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=0)
         header.pack(fill="x")
 
         left = ctk.CTkFrame(header, fg_color="transparent")
-        left.pack(side="left", padx=20, pady=12)
+        left.pack(side="left", padx=SP["xl"], pady=SP["m"])
+        section_label(left, "OPERADOR").pack(anchor="w")
         self.user_label = ctk.CTkLabel(
-            left, text="—", font=font(17, "bold"), text_color=COLORS["text"]
+            left, text="—", font=font(18, "bold"), text_color=COLORS["text"],
+            anchor="w",
         )
         self.user_label.pack(anchor="w")
         self.email_label = ctk.CTkLabel(
-            left, text="", font=font(11), text_color=COLORS["text_dim"]
+            left, text="", font=font(10), text_color=COLORS["text_faint"],
+            anchor="w",
         )
         self.email_label.pack(anchor="w")
 
-        # Badge de vinculación (VERIFICADO / SIN VINCULAR).
-        self.badge = ctk.CTkLabel(
-            header, text="  …  ", font=font(11, "bold"), text_color="#ffffff",
-            fg_color=COLORS["warn"], corner_radius=8,
-        )
-        self.badge.pack(side="right", padx=(10, 20), pady=16)
-
         right = ctk.CTkFrame(header, fg_color="transparent")
-        right.pack(side="right", padx=0, pady=12)
-        ctk.CTkButton(
-            right, text="⚙ Ajustes", width=90, height=30, font=font(12),
-            fg_color=COLORS["panel2"], hover_color=COLORS["bg"],
-            text_color=COLORS["text"], command=self.app.show_settings,
-        ).pack(side="left", padx=4)
-        ctk.CTkButton(
-            right, text="Cerrar sesión", width=110, height=30, font=font(12),
-            fg_color=COLORS["panel2"], hover_color=COLORS["bg"],
-            text_color=COLORS["text"], command=self.app.logout,
-        ).pack(side="left", padx=(4, 12))
+        right.pack(side="right", padx=SP["l"], pady=SP["m"])
+        self.badge = status_chip(header, "  …  ", kind="accent")
+        self.badge.configure(corner_radius=RADIUS["btn"])
+        self.badge.pack(side="right", padx=(SP["s"], SP["xl"]), pady=SP["m"])
+        ghost_button(right, "AJUSTES", self.app.show_settings, width=92).pack(
+            side="left", padx=SP["xs"]
+        )
+        ghost_button(right, "CERRAR SESIÓN", self.app.logout, width=124).pack(
+            side="left", padx=SP["s"]
+        )
+        hairline(self).pack(fill="x")
 
         # =================== Cuerpo ===================
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=24, pady=(16, 20))
+        body.pack(fill="both", expand=True, padx=SP["xl"], pady=(SP["l"], SP["m"]))
 
-        # Selector de server + estado.
+        # Selector de server + estado + strip HUD.
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x")
         ctk.CTkLabel(
-            row, text="Server:", font=font(13), text_color=COLORS["text_dim"]
+            row, text=section_text("SERVIDOR"), font=font(10, "bold", mono=True),
+            text_color=COLORS["text_dim"],
         ).pack(side="left")
         self.server_menu = ctk.CTkOptionMenu(
-            row, width=280, height=32, font=font(13),
+            row, width=270, height=32, font=font(12),
             fg_color=COLORS["panel2"], button_color=COLORS["accent"],
             button_hover_color=COLORS["accent_hover"],
+            text_color=COLORS["text"], dropdown_fg_color=COLORS["panel"],
+            dropdown_hover_color=COLORS["panel2"], corner_radius=RADIUS["input"],
             command=self._on_server_change,
         )
-        self.server_menu.pack(side="left", padx=10)
+        self.server_menu.pack(side="left", padx=SP["m"])
         self.status = ctk.CTkLabel(
-            row, text="Todo listo.", font=font(13, "bold"),
-            text_color=COLORS["text_dim"],
+            row, text="Todo listo.", font=font(12, "bold"),
+            text_color=COLORS["text_dim"], anchor="e",
         )
-        self.status.pack(side="left", padx=14)
+        self.status.pack(side="right", padx=(SP["m"], 0))
+        self.hud_state = DotState(row, "listo")
+        self.hud_state.pack(side="right")
 
         # Identidad con la que se jugará (nick del ranking forzado en el juego).
         self.play_as = ctk.CTkLabel(
             body, text="", font=font(11), text_color=COLORS["text_dim"],
             anchor="w",
         )
-        self.play_as.pack(fill="x", pady=(6, 0))
+        self.play_as.pack(fill="x", pady=(SP["s"], 0))
 
         # Panel de estadísticas en vivo (rank/kills/etc.), refrescado por App.
-        self.stats_panel = StatsPanel(self, on_manual_refresh=self.app.refresh_stats_manual)
-        self.stats_panel.pack(fill="x", pady=(10, 0))
+        self.stats_panel = StatsPanel(
+            body, on_manual_refresh=self.app.refresh_stats_manual
+        )
+        self.stats_panel.pack(fill="x", pady=(SP["m"], 0))
 
-        # Botón grande JUGAR.
+        # --- Botón héroe JUGAR (bloque ámbar, esquinas afiladas) -------------
         self.play_btn = ctk.CTkButton(
-            body, text="JUGAR", height=64, font=font(22, "bold"),
-            fg_color=COLORS["play"], hover_color=COLORS["play_hover"],
-            corner_radius=12, command=self.app.start_play,
+            body, text=TEXT_LISTO, height=64, font=font(26, "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            text_color=COLORS["on_accent"], corner_radius=RADIUS["btn"],
+            command=self.app.start_play,
         )
-        self.play_btn.pack(fill="x", pady=(14, 10), ipady=2)
+        self.play_btn.pack(fill="x", pady=(SP["m"], 0), ipady=2)
 
-        # Consola mini (log de estado).
-        console_card = ctk.CTkFrame(body, fg_color=COLORS["panel"], corner_radius=12)
+        # =================== Consola (barra inferior terminal) ============
+        hairline(self).pack(fill="x")
+        console_card = ctk.CTkFrame(self, fg_color=COLORS["console"],
+                                    corner_radius=0)
         console_card.pack(fill="both", expand=True)
+        head = ctk.CTkFrame(console_card, fg_color="transparent")
+        head.pack(fill="x", padx=SP["l"], pady=(SP["s"], 0))
         ctk.CTkLabel(
-            console_card, text="  Actividad", font=font(11, "bold"),
-            text_color=COLORS["text_dim"], anchor="w",
-        ).pack(fill="x", padx=8, pady=(8, 0))
+            head, text=section_text("REGISTRO DE ACTIVIDAD"),
+            font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
+            anchor="w",
+        ).pack(side="left")
         self.console = ctk.CTkTextbox(
-            console_card, font=font(12, mono=True), fg_color=COLORS["panel2"],
-            text_color=COLORS["text"], wrap="word", height=220,
+            console_card, font=font(11, mono=True), fg_color=COLORS["console"],
+            text_color=COLORS["text_dim"], wrap="word", height=170,
         )
-        self.console.pack(fill="both", expand=True, padx=8, pady=(4, 10))
+        self.console.pack(fill="both", expand=True, padx=SP["l"],
+                         pady=(SP["xs"], SP["m"]))
         self.console.configure(state="disabled")
 
     # --- Datos y estado ---------------------------------------------------
@@ -134,11 +154,12 @@ class HomeFrame(ctk.CTkFrame):
             )
             self.badge.configure(
                 text=f"  VERIFICADO · {guid}  ",
-                fg_color=COLORS["play"], text_color="#ffffff",
+                fg_color=COLORS["ok_dim"], text_color=COLORS["ok"],
             )
         else:
             self.badge.configure(
-                text="  SIN VINCULAR  ", fg_color=COLORS["warn"], text_color="#ffffff"
+                text="  SIN VINCULAR  ",
+                fg_color=COLORS["accent_subtle"], text_color=COLORS["accent"],
             )
 
     def set_servers(self, servers: List[Dict[str, str]], default_index: int) -> None:
@@ -164,9 +185,9 @@ class HomeFrame(ctk.CTkFrame):
     def _on_server_change(self, _label: str) -> None:
         self.log_line(f"Server seleccionado: {self.selected_server()}")
 
-    def set_play_as(self, display_name: str, force_nick: bool) -> None:
-        """Línea discreta 'Jugando como: <nick>' (solo si se fuerza el nick)."""
-        if force_nick and (display_name or "").strip():
+    def set_play_as(self, display_name: str) -> None:
+        """Línea 'Jugando como: <nick>' — SIEMPRE visible (nick obligatorio)."""
+        if (display_name or "").strip():
             self.play_as.configure(text=f"Jugando como: {display_name.strip()}")
         else:
             self.play_as.configure(text="")
@@ -175,20 +196,37 @@ class HomeFrame(ctk.CTkFrame):
         """Texto de estado junto al selector (dim/ok/warn/error)."""
         color = {
             "dim": COLORS["text_dim"], "ok": COLORS["ok"],
-            "warn": COLORS["warn"], "error": COLORS["error"],
+            "warn": COLORS["accent"], "error": COLORS["danger"],
         }.get(kind, COLORS["text_dim"])
         self.status.configure(text=text, text_color=color)
 
     def set_playing(self, playing: bool) -> None:
-        """Deshabilita JUGAR mientras corre el flujo; REINTENTAR tras fallo."""
+        """Estados del héroe: CONECTANDO (disabled) / LISTO (fin o abortado)."""
         if playing:
-            self.play_btn.configure(state="disabled", text="CONECTANDO…")
+            self.play_btn.configure(state="disabled", text=TEXT_CONECTANDO)
+            self.hud_state.set_state("conectando")
         else:
-            self.play_btn.configure(state="normal", text="JUGAR")
+            self.play_btn.configure(state="normal", text=TEXT_LISTO)
+            self.hud_state.set_state("listo")
+
+    def set_deployed(self) -> None:
+        """Éxito de lanzamiento: botón operativo y strip EN PARTIDA."""
+        self.play_btn.configure(state="normal", text=TEXT_LISTO)
+        self.hud_state.set_state("en_partida")
 
     def set_retry(self) -> None:
-        """Tras un fallo con reintento, el botón grande pasa a REINTENTAR."""
-        self.play_btn.configure(state="normal", text="REINTENTAR")
+        """Tras un fallo con reintento: REINTENTAR + strip rojo."""
+        self.play_btn.configure(state="normal", text=TEXT_REINTENTAR)
+        self.hud_state.set_state("fallo")
+
+    def reset_hud(self) -> None:
+        """Vuelve al estado LISTO (logout)."""
+        self.play_btn.configure(state="normal", text=TEXT_LISTO)
+        self.hud_state.set_state("listo")
+
+    def stop_animations(self) -> None:
+        """Cancela animaciones del strip (logout/cierre)."""
+        self.hud_state.stop()
 
     def log_line(self, text: str) -> None:
         """Añade una línea con timestamp a la consola mini (hilo principal)."""

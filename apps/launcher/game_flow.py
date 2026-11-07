@@ -34,7 +34,6 @@ def build_game_args(
     game_path: str,
     server_address: str,
     display_name: str = "",
-    force_nick: bool = False,
 ) -> List[str]:
     """Construye el comando de arranque del juego (función pura, testeable).
 
@@ -43,13 +42,16 @@ def build_game_args(
 
         [iw4x.exe, +set, name, <nick>, +connect, <ip:puerto>]
 
+    El nick del ranking SIEMPRE viaja en el comando (decisión del dueño: el
+    juego arranca con el displayName de la cuenta, sin toggle ni config).
     Los engines Q3 procesan ``+set`` después de cargar las configs, por lo
     que el nick queda vigente para la sesión aunque el config del juego
-    tenga guardado otro nombre.
+    tenga guardado otro nombre. Si ``display_name`` viene vacío no se añade
+    el ``+set`` — GameFlow bloquea el arranque antes de llegar aquí.
     """
     args = [game_path]
     nick = (display_name or "").strip()
-    if force_nick and nick:
+    if nick:
         args += ["+set", "name", nick]
     args += ["+connect", server_address]
     return args
@@ -70,7 +72,6 @@ class GameFlow:
         simulate: bool = False,
         poll_interval: int = 10,
         poll_max_seconds: int = 180,
-        force_nick: bool = False,
         display_name: str = "",
     ) -> None:
         self.api = api
@@ -82,7 +83,6 @@ class GameFlow:
         self.simulate = simulate
         self.poll_interval = poll_interval
         self.poll_max_seconds = poll_max_seconds
-        self.force_nick = force_nick
         self.display_name = display_name
 
         # Sincronización con el diálogo de candidatos (multi-GUID detectado).
@@ -142,18 +142,22 @@ class GameFlow:
             return "Tu sesión expiró. Inicia sesión de nuevo."
         return exc.message
 
+    # Mensaje oficial cuando la cuenta no tiene displayName (defensa: el
+    # registro ya lo exige). Sin nick no hay partida — decisión del dueño.
+    NO_NICK_MSG = (
+        "Tu cuenta no tiene nombre visible: actualízalo en Mi Cuenta (web) "
+        "antes de jugar."
+    )
+
     def _launch_game(self) -> bool:
         """Abre iw4x.exe conectando al server elegido. False si no se pudo."""
-        # Aviso si el usuario quiere forzar nick pero la cuenta no tiene uno
-        # utilizable: el juego arrancará con su nick guardado.
-        if self.force_nick and not (self.display_name or "").strip():
-            self._log(
-                "Tu cuenta no tiene nombre visible: el juego usará su nick "
-                "guardado (no se fuerza el nick del ranking)."
-            )
+        # El nick del ranking es OBLIGATORIO: sin displayName no se lanza.
+        if not (self.display_name or "").strip():
+            self._failed(self.NO_NICK_MSG, retry=False)
+            return False
 
         cmd = build_game_args(
-            self.game_path, self.server_address, self.display_name, self.force_nick
+            self.game_path, self.server_address, self.display_name
         )
 
         if self.simulate:
