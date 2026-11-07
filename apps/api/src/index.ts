@@ -3,6 +3,11 @@ import { env } from './config/env.js';
 import { prisma } from './lib/prisma.js';
 import { runStartupSeed } from './services/seed.service.js';
 import { startSyncScheduler, stopSyncScheduler } from './scheduler.js';
+import {
+  startModerationEnforcer,
+  stopModerationEnforcer,
+} from './services/enforcer.service.js';
+import { resetSharedRcon } from './lib/rcon/iw4x-rcon.js';
 
 // Primera instalación: si la tabla User está vacía, crea el admin por defecto
 // (nick "admin" / admin123) ANTES de escuchar. Idempotente y con guards
@@ -15,9 +20,15 @@ const server = app.listen(env.port, () => {
   console.log(`[api] IW4x Ranking escuchando en http://localhost:${env.port} (env=${env.nodeEnv})`);
   console.log(`[api] CORS permitido para: ${env.corsOrigins.join(', ')}`);
   console.log(`[api] IW4MAdmin DB: ${env.iw4madminDbPath ?? '(no configurada — sync manual devolverá 503)'}`);
+  console.log(
+    env.rconPassword
+      ? `[api] Moderación nativa RCON: ${env.rconHost}:${env.rconPort} (enforcer cada ${env.rconEnforcerIntervalMs}ms)`
+      : '[api] Moderación nativa RCON: DESACTIVADA (falta RCON_PASSWORD)',
+  );
 });
 
 const scheduler = startSyncScheduler();
+const enforcerTimer = startModerationEnforcer();
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -25,6 +36,8 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[api] recibido ${signal}; cerrando...`);
   stopSyncScheduler(scheduler);
+  stopModerationEnforcer(enforcerTimer);
+  resetSharedRcon();
   server.close();
   await prisma.$disconnect();
   process.exit(0);

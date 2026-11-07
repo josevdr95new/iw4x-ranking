@@ -20,13 +20,27 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).optional(),
   JWT_EXPIRES_IN: z.string().min(1).default('7d'),
   IW4MADMIN_DB_PATH: z.string().min(1).optional(),
-  /** URL del webfront de IW4MAdmin (ej. http://127.0.0.1:1624) - SOLO bridge de moderación. */
-  IW4MADMIN_WEBFRONT_URL: z.string().min(1).optional(),
-  /** Credenciales OPCIONALES de un cliente privilegiado del webfront (las NO recomendamos). */
-  IW4MADMIN_API_USER: z.string().min(1).optional(),
-  IW4MADMIN_API_PASS: z.string().min(1).optional(),
-  /** SQLite de IW4MAdmin, en SOLO-LECTURA, para el historial de penalidades NO para stats. */
-  IW4MADMIN_PENALTIES_DB_PATH: z.string().min(1).optional(),
+  // ── Moderación NATIVA por RCON (reemplaza el bridge IW4MADMIN_WEBFRONT_URL) ──
+  /** Host del server dedicado IW4x (default 127.0.0.1). */
+  RCON_HOST: z.string().min(1).default('127.0.0.1'),
+  /** Puerto UDP del server (default 28961). */
+  RCON_PORT: z.coerce.number().int().min(1).max(65535).default(28961),
+  /** Password de `rcon_password` del server.cfg. SIN default: vacío = moderación 503. */
+  RCON_PASSWORD: z
+    .string()
+    .optional()
+    .transform((value) => (value !== undefined && value.trim().length > 0 ? value.trim() : undefined)),
+  /** Spacing mínimo entre comandos rcon en ms (default 200; server: rcon_timeout 100). */
+  RCON_SPACING_MS: z.coerce.number().int().min(0).default(200),
+  /** Timeout de respuesta rcon por intento en ms (default 1200; lecturas reintentan). */
+  RCON_RESPONSE_TIMEOUT_MS: z.coerce.number().int().min(100).default(1200),
+  /** Intervalo del enforcer (tempbans/bans de nuestra DB re-kickeados) en ms (default 30000). */
+  RCON_ENFORCER_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+  /** Path a userraw/bans.json del server para leerlo en el panel (SOLO lectura). */
+  RCON_BANS_FILE: z
+    .string()
+    .optional()
+    .transform((value) => (value !== undefined && value.trim().length > 0 ? value.trim() : undefined)),
   GAME_LOG_PATH: z
     .string()
     .optional()
@@ -84,10 +98,13 @@ export const env = {
   jwtSecret,
   jwtExpiresIn: raw.JWT_EXPIRES_IN,
   iw4madminDbPath: raw.IW4MADMIN_DB_PATH,
-  iw4madminWebfrontUrl: raw.IW4MADMIN_WEBFRONT_URL,
-  iw4madminApiUser: raw.IW4MADMIN_API_USER,
-  iw4madminApiPass: raw.IW4MADMIN_API_PASS,
-  iw4madminPenaltiesDbPath: raw.IW4MADMIN_PENALTIES_DB_PATH,
+  rconHost: raw.RCON_HOST,
+  rconPort: raw.RCON_PORT,
+  rconPassword: raw.RCON_PASSWORD,
+  rconSpacingMs: raw.RCON_SPACING_MS,
+  rconResponseTimeoutMs: raw.RCON_RESPONSE_TIMEOUT_MS,
+  rconEnforcerIntervalMs: raw.RCON_ENFORCER_INTERVAL_MS,
+  rconBansFile: raw.RCON_BANS_FILE,
   gameLogPath: raw.GAME_LOG_PATH,
   gameServerAddress: raw.GAME_SERVER_ADDRESS,
   syncIntervalMinutes: raw.SYNC_INTERVAL_MINUTES,

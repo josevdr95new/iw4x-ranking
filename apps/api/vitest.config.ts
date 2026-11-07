@@ -21,6 +21,12 @@ export default defineConfig({
       DATABASE_URL: TEST_DATABASE_URL,
       JWT_SECRET: 'test-secret-test-secret-test-secret',
       IW4MADMIN_DB_PATH: resolve(here, 'tests', 'data', 'mock-iw4madmin.sqlite'),
+      // Moderación nativa RCON: DESACTIVADA por defecto en tests (los tests de
+      // moderación fijan RCON_PASSWORD/RCON_PORT por test contra un fake UDP).
+      RCON_PASSWORD: '',
+      RCON_BANS_FILE: '',
+      RCON_SPACING_MS: '15',
+      RCON_RESPONSE_TIMEOUT_MS: '150',
       // El .env real apunta al games_mp.log local: en tests SE DESACTIVA la fuente log
       // (cadena vacía → undefined tras el transform del schema) para que el sync de
       // sync.test.ts use solo el mock determinista.

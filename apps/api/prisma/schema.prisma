@@ -176,6 +176,33 @@ model KillEvent {
   @@index([skillProcessed, timeEpoch])
 }
 
+/// Penalidad de MODERACIÓN NATIVA (rcon IW4x, sin IW4MAdmin):
+/// warn/kick/tempban/ban/unban emitidos desde el panel o el enforcer.
+/// El guid del ofensor es decimal (formato Player.guid) o "botN" para bots
+/// (por eso NO hay FK: un bot puede no tener fila en Player).
+/// El BAN permanente del server vive en userraw/bans.json (vía rcon banClient);
+/// esta tabla es el HISTORIAL + la capa offline (enforcer re-kickea al conectar).
+model Penalty {
+  id               Int       @id @default(autoincrement())
+  offenderGuid     String    // GUID del ofensor (decimal del log, o "botN")
+  offenderPlayerId Int?      // Player.id si existe la fila (soft reference)
+  offenderName     String?   // snapshot del nombre visto al emitir
+  punisherUserId   Int?      // User.id del admin (null = sistema/enforcer)
+  punisherName     String?   // snapshot del display del admin
+  type             String    // warn | kick | tempban | ban | unban
+  reason           String?
+  automated        Boolean   @default(false)
+  source           String    @default("panel") // panel | enforcer
+  active           Boolean   @default(true)    // false = expirada o revocada (unban)
+  createdAt        DateTime  @default(now())
+  /// Solo tempban (per-caso, en minutos). warn/ban/kick = null.
+  expiresAt        DateTime?
+
+  @@index([createdAt])
+  @@index([offenderGuid, active])
+  @@index([type, active, expiresAt])
+}
+
 /// Estado incremental por fuente (evita reimportar kill events ya conocidos)
 model SyncState {
   id            Int       @id @default(autoincrement())

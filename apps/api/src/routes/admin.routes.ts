@@ -5,17 +5,21 @@ import { asyncHandler } from '../lib/http.js';
 import { validate, parseWith } from '../middleware/validate.js';
 import {
   createPenalty,
-  getIamStatus,
+  getModerationStatus,
   getLivePlayers,
-  getRecentPenalties,
-  searchClients,
-} from '../services/iam.service.js';
+  getPenaltyHistory,
+  getServerBans,
+  searchModerationClients,
+  unbanPlayer,
+  type PunisherInfo,
+} from '../services/moderation.service.js';
 import { getAliasConflicts } from '../services/alias.service.js';
 import {
   iamClientsQuery,
   iamLiveQuery,
   iamPenaltiesQuery,
   iamPenaltyInput,
+  iamUnbanInput,
 } from '../dto/iam.dto.js';
 import { identityAlertsQuery, identityAlertResolveInput, identityAlertIdParam } from '../dto/identity.dto.js';
 import { getIdentityAlerts, resolveIdentityAlert } from '../services/identity.service.js';
@@ -74,12 +78,20 @@ adminRouter.post(
   }),
 );
 
-// ── Bridge de moderación con IW4MAdmin (/api/admin/iam/*) ─────────────────
+// ── Moderación NATIVA por RCON del server IW4x (/api/admin/iam/*) ──────────
+// Mismos paths/shapes que consumía la web (ModerationPanel/PenaltyModal);
+// implementación interna nueva: rcon directo + historial en NUESTRA DB.
+
+// El admin del JWT queda registrado como punisher de cada penalidad.
+function punisherOf(req: { user?: { id: number; displayName: string } }): PunisherInfo | undefined {
+  if (!req.user) return undefined;
+  return { userId: req.user.id, name: req.user.displayName };
+}
 
 adminRouter.get(
   '/iam/status',
   asyncHandler(async (_req, res) => {
-    res.json(await getIamStatus());
+    res.json(await getModerationStatus());
   }),
 );
 
@@ -87,7 +99,7 @@ adminRouter.get(
   '/iam/clients',
   validate(iamClientsQuery, 'query'),
   asyncHandler(async (req, res) => {
-    res.json(await searchClients(req.query as unknown as Parameters<typeof searchClients>[0]));
+    res.json(await searchModerationClients(req.query as unknown as Parameters<typeof searchModerationClients>[0]));
   }),
 );
 
@@ -95,7 +107,7 @@ adminRouter.get(
   '/iam/penalties',
   validate(iamPenaltiesQuery, 'query'),
   asyncHandler(async (req, res) => {
-    res.json(await getRecentPenalties(req.query as unknown as Parameters<typeof getRecentPenalties>[0]));
+    res.json(await getPenaltyHistory(req.query as unknown as Parameters<typeof getPenaltyHistory>[0]));
   }),
 );
 
@@ -111,6 +123,22 @@ adminRouter.post(
   '/iam/penalty',
   asyncHandler(async (req, res) => {
     const input = parseWith(iamPenaltyInput, req.body ?? {});
-    res.json(await createPenalty(input));
+    res.json(await createPenalty(input, punisherOf(req)));
+  }),
+);
+
+// Nuevos (nativos): unban vía rcon + bans.json read-only del server.
+adminRouter.post(
+  '/iam/unban',
+  asyncHandler(async (req, res) => {
+    const input = parseWith(iamUnbanInput, req.body ?? {});
+    res.json(await unbanPlayer(input, punisherOf(req)));
+  }),
+);
+
+adminRouter.get(
+  '/iam/bans',
+  asyncHandler(async (_req, res) => {
+    res.json(await getServerBans());
   }),
 );

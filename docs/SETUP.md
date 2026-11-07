@@ -195,6 +195,8 @@ El reader de IW4MAdmin sigue disponible y es **combinable** con el log ([4C](#4c
 
 Instalado como **suite de moderación** (bans / penalidades / reportes / comandos in-game / webfront) — **NO como fuente de stats**. Ver sección 4C para la fuente del ranking.
 
+> ⚠️ **DEPRECATED para la moderación del panel**: desde la migración a **moderación nativa por RCON** (ver [docs/API.md §Moderación](API.md#moderación-nativa-rcon-iw4x--apiadminiam--admin)), el panel admin del ranking ya NO depende de IW4MAdmin ni de su webfront/SQLite: habla directo con el server por RCON (`RCON_PASSWORD` en `apps/api/.env`). IW4MAdmin puede seguir corriendo como herramienta paralela (webfront/comandos in-game) o apagarse sin afectar al panel. La env `IW4MADMIN_DB_PATH` sigue siendo SOLO una fuente alternativa de stats (ver nota al final de la sección).
+
 - **Versión**: IW4MAdmin 2025.12.16.1 (último estable del [repo oficial](https://github.com/RaidMax/IW4M-Admin))
 - **Ubicación**: `D:\IW4MAdmin` (fuera del repo y de la carpeta del juego)
 - **Requisito**: .NET 10.x ASP.NET Core (runtime 10.0.14 instalado vía `winget install Microsoft.DotNet.AspNetCore.10 --source winget --silent`)

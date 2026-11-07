@@ -33,16 +33,15 @@ Todo error (4xx/5xx) responde:
 | `GUID_ALREADY_LINKED`    | 409  | El GUID ya pertenece a otra cuenta |
 | `NOT_FOUND`              | 404  | Ruta inexistente |
 | `PLAYER_NOT_FOUND`       | 404  | GUID desconocido (¿corriste sync?) |
-| `SYNC_NOT_CONFIGURED`    | 503  | `IW4MADMIN_DB_PATH` no configurada |
-| `SYNC_SOURCE_UNAVAILABLE`| 503  | La DB de IW4MAdmin no existe o no se pudo abrir |
-| `IAM_NOT_CONFIGURED`     | 503  | Bridge de moderación: falta `IW4MADMIN_WEBFRONT_URL` |
-| `IAM_UPSTREAM_ERROR`     | 502  | Bridge: el webfront respondió 4xx/5xx a un proxy |
-| `IAM_UPSTREAM_UNREACHABLE` | 502 | Bridge: no se pudo contactar el webfront (la red o timeout) |
-| `IAM_UPSTREAM_NON_JSON`  | 502  | Bridge: el webfront devolvió no-JSON |
-| `IAM_UPSTREAM_LOGIN_REJECTED` | 503 | Bridge (remoto): credenciales `IW4MADMIN_API_USER/PASS` rechazadas |
-| `IAM_CLIENT_NOT_FOUND`   | 404  | Bridge: `clientId` inexistente o nombre sin match exacto |
-| `IAM_PENALTIES_DB_NOT_CONFIGURED` | 503 | Bridge: falta `IW4MADMIN_PENALTIES_DB_PATH` |
-| `IAM_PENALTIES_DB_UNAVAILABLE` | 503 | Bridge: la SQLite de IW4MAdmin no se pudo abrir (read-only) |
+| `SYNC_NOT_CONFIGURED`    | 503  | No hay fuente de stats (`IW4MADMIN_DB_PATH` o `GAME_LOG_PATH`) |
+| `SYNC_SOURCE_UNAVAILABLE`| 503  | La DB fuente de stats no existe o no se pudo abrir |
+| `MODERATION_NOT_CONFIGURED` | 503 | Moderación nativa: falta `RCON_PASSWORD` |
+| `MODERATION_UNREACHABLE` | 502  | Moderación: el server IW4x no respondió por RCON (timeout tras reintentos; password/throttle/caído) |
+| `MODERATION_TARGET_NOT_FOUND` | 404 | Moderación: `clientId` inexistente o nombre sin match exacto entre conectados |
+| `MODERATION_INTERNAL`    | 500  | Error interno del servicio de moderación |
+| `TARGET_IS_BOT`          | 403  | Moderación: warn/tempban/ban a un bot (solo kick permitido) |
+| `CID_MISMATCH`           | 409  | Moderación: el slot cambió de jugador entre lectura y acción (anti-TOCTOU; nada se envió) |
+| `MODERATION_BANS_FILE_CORRUPT` | 502 | Moderación: `RCON_BANS_FILE` no es JSON válido |
 | `SHA_MISMATCH`           | 400  | Cloud save: el `sha256` declarado no coincide con el hash real del contenido (server recalcula) |
 | `SAVE_NOT_FOUND`         | 404  | Cloud save: la cuenta nunca subió un save |
 | `SAVE_VERSION_NOT_FOUND` | 404  | Cloud save: la `version` pedida no existe o fue podada (se conservan las últimas 10) |
@@ -893,29 +892,30 @@ Response **200**:
 
 ---
 
-## Moderación (bridge IW4MAdmin) — `/api/admin/iam/*` 🔒 ADMIN
+## Moderación NATIVA (RCON IW4x) — `/api/admin/iam/*` 🔒 ADMIN
 
-> **Vecinos: NO duplicar stats ni perfiles.** El ranking/leaderboard/perfiles se alimenta del log del juego (`games_mp.log`). Esta sección es EXCLUSIVAMENTE moderación: penalidades y controlen vivo de IW4MAdmin. Nada de lo que consumas acá debe usarse para stats.
+> **Vecinos: NO duplicar stats ni perfiles.** El ranking/leaderboard/perfiles se alimenta del log del juego (`games_mp.log`). Esta sección es EXCLUSIVAMENTE moderación: penalidades y control en vivo del server. Nada de lo que consumas acá debe usarse para stats.
 
-Puente con el [webfront de IW4MAdmin](https://github.com/RaidMax/IW4M-Admin) instalado localmente (ver `docs/SETUP.md` §4G). **Fuente de verdad**: el código del webfront, tag `2025.12.16.1` — API JSON descubierta en `WebfrontCore/Controllers/API/*`.
+**SIN IW4MAdmin**: la moderación habla DIRECTO con el server dedicado IW4x por **RCON UDP** (protocolo Quake: `FF FF FF FF rcon <password> <cmd>`, latin1; respuestas `print\n`; `getinfo <challenge>` sin auth). El historial vive en **NUESTRA DB** (tabla `Penalty` de Prisma). El ban permanente del juego se persiste en `userraw/bans.json` (escrito SOLO por el server vía `banClient`/`unbanClient`; el panel lo LEE si `RCON_BANS_FILE` apunta a él).
 
 **Config (env de `apps/api/.env`)**:
 
 | Variable | Obligatoria | Para qué |
 | --- | --- | --- |
-| `IW4MADMIN_WEBFRONT_URL` | Sí (p. ej. `http://127.0.0.1:1624`) | Webfront al que se proxya el bridge. Sin esta env: `503 IAM_NOT_CONFIGURED`. |
-| `IW4MADMIN_PENALTIES_DB_PATH` | Solo para `penalties` y las penalidades abiertas de `clients` | SQLite de IW4MAdmin abierta SOLO-LECTURA (`D:/IW4MAdmin/Database/Database.db`). |
-| `IW4MADMIN_API_USER` / `IW4MADMIN_API_PASS` | **No** (opcional) | Solo si la API corre en otro host. Referencia a documentación de bootstrap; NO incluir credenciales reales en el repo. |
+| `RCON_HOST` / `RCON_PORT` | No (default `127.0.0.1:28961`) | UDP del server dedicado. |
+| `RCON_PASSWORD` | **Sí** | El MISMO valor de `rcon_password` del server.cfg. Sin esto: `503 MODERATION_NOT_CONFIGURED` y el enforcer no arranca. |
+| `RCON_SPACING_MS` | No (default 200) | Spacing entre comandos: el server throtea (`rcon_timeout=100`) con drop silencioso. |
+| `RCON_RESPONSE_TIMEOUT_MS` | No (default 1200) | Timeout por intento. Las LECTURAS reintentan con backoff (el server a veces tarda >1s); las ESCRITURAS **jamás** se reintentan. |
+| `RCON_ENFORCER_INTERVAL_MS` | No (default 30000) | Intervalo del enforcer (ver abajo). |
+| `RCON_BANS_FILE` | No | Path a `userraw/bans.json` para listar bans del juego (SOLO lectura). |
 
-**Mecanismo de auth descubierto (referencia)**: el webfront usa cookies de ASP.NET (`POST /api/client/{clientId}/login` con `{password}` → `Set-Cookie: .AspNetCore.Cookies=…`), PERO `BaseController.OnActionExecuting` otorga permisos **Console completos** a las requests de `127.0.0.1` sin el header `X-Forwarded-For`. En despliegue same-host NO se necesitan credenciales; el proxy llama directo (loopback de confianza). El proxy soporta login por cookie con cache y re-login automático (1 intento) al recibir 401 si están las envs de credenciales.
+**Enforcer** (`RCON_ENFORCER_INTERVAL_MS`): el juego NO tiene tempban per-caso por minutos (`tempBanClient` usa el dvar GLOBAL `sv_kickBanTime`) y `banClient` exige al jugador conectado. Por eso tempban/ban offline viven en nuestra DB y el enforcer hace `status()` cada tick y `clientkick` a cualquier guid con penalidad activa que esté conectado. Al expirar el tempban el jugador vuelve solo (la fila se marca inactive).
 
-El historial de penalidades se lee de la SQLite de IW4MAdmin en modo read-only — sin IPC ni API JSON del upstream (`GET /api/penalty/BanInfo` aún no existe). Los tipos de penalidad se filtran a warn/kick/tempban/ban (+unban en el historial); report y flags automatizados se excluyen del scope.
-
-Todos los endpoints exigen **JWT + rol ADMIN** (misma rama que `PUT /api/admin/server-config`).
+Todos los endpoints exigen **JWT + rol ADMIN** (misma rama que `PUT /api/admin/server-config`). El admin del JWT queda registrado como `punisher` de cada penalidad.
 
 ### `GET /api/admin/iam/status` 🔒 ADMIN
 
-Diagnóstico del bridge (NO devuelve 502 si el upstream está caído: siempre 200 con `error` legible).
+Diagnóstico (NO devuelve 502 si el server está caído: siempre 200 con `error` legible).
 
 ```json
 {
@@ -928,43 +928,46 @@ Diagnóstico del bridge (NO devuelve 502 si el upstream está caído: siempre 20
       "id": 12700128961,
       "name": "^7[^1RANKING^7] ^7Local Test Server E2E",
       "game": "IW4",
-      "map": "Rust",
-      "gametype": "Team Deathmatch",
-      "players": 1,
+      "map": "mp_terminal",
+      "gametype": "war",
+      "players": 2,
       "maxPlayers": 18,
-      "parser": "Call of Duty"
+      "parser": "IW4x RCON"
     }
   ]
 }
 ```
 
-Errores: `200` siempre. Si no está config, `error` describe la env que falta.
+- `penaltiesDb.configured` es SIEMPRE `true` (el historial es nuestra DB; ya no depende de una SQLite externa).
+- Errores: `200` siempre; `error` describe la env que falta o el fallo rcon.
 
-### `GET /api/admin/iam/clients?query=<nombre|xuid>` 🔒 ADMIN
+### `GET /api/admin/iam/clients?query=<nombre|guid>` 🔒 ADMIN
 
-Búsqueda de clientes por **nombre** (LIKE, ≥3 chars) o **GUID hex** (xuid). El foco del UI: ver **penalidades abiertas** (bans activos, warns vigentes) y el nivel de cada cliente.
+Búsqueda en **la base del ranking** (Player + PlayerAlias): nombre LIKE limpio (≥3 chars, ignora `^X` y case) o **guid** (hex 16 del status o decimal del ranking). `level` = `"Banned"` solo si tiene ban activo (no hay niveles nativos). `openPenalties` SIEMPRE disponible (nuestra DB).
 
 ```json
 {
   "total": 1,
-  "query": "Player5",
+  "query": "toxicplayer",
   "penaltiesDb": true,
   "clients": [
     {
       "clientId": 5,
-      "name": "Player5",
-      "xuid": "AB12CD34",
-      "level": "User",
+      "name": "^1Toxic^7Player",
+      "xuid": "12345678901234567",
+      "level": "Banned",
       "openPenalties": [
         {
-          "id": 2,
-          "type": "warn",
-          "reason": "abuso de voz",
+          "id": 12,
+          "type": "ban",
+          "reason": "cheating (permban)",
           "automated": false,
-          "when": "2026-11-05T14:00:00.000Z",
-          "expires": "2030-01-01T00:00:00.000Z",
-          "offender": { "clientId": 5, "name": "Player5" },
-          "punisher": { "clientId": 10, "name": "PunisherPat" }
+          "when": "2026-11-07T18:00:00.000Z",
+          "expires": null,
+          "active": true,
+          "source": "panel",
+          "offender": { "clientId": 5, "guid": "12345678901234567", "name": "ToxicPlayer" },
+          "punisher": { "clientId": 1, "name": "Mod Admin" }
         }
       ]
     }
@@ -972,19 +975,16 @@ Búsqueda de clientes por **nombre** (LIKE, ≥3 chars) o **GUID hex** (xuid). E
 }
 ```
 
-- `openPenalties` es `null` (no `[]`) si `IW4MADMIN_PENALTIES_DB_PATH` no está configurada (no puedo saber si hay bans). `level` es `null` en el mismo caso.
-- El match de nombre ignora códigos de color del juego (`^1…`): `ColorGamer` resuelve al cliente `Color^2Gamer` si es único.
-- Errores: `400 VALIDATION_ERROR` (query corta), `403`, `503 IAM_NOT_CONFIGURED`.
+- `clientId` = `Player.id` del ranking (sirve para POST penalty online y offline).
+- Errores: `400 VALIDATION_ERROR` (query corta), `403 FORBIDDEN`.
 
 ### `GET /api/admin/iam/penalties?limit=30` 🔒 ADMIN
 
-Historial reciente (warn/kick/tempban/ban/unban), más nuevo primero. `limit` entre 1 y 100 (default 30). Cada entrada usa el mismo shape `openPenalties` de `/clients`.
-
-Errores: `400 VALIDATION_ERROR`, `403`, `503 IAM_PENALTIES_DB_NOT_CONFIGURED` / `503 IAM_PENALTIES_DB_UNAVAILABLE`.
+Historial desde **NUESTRA DB** (warn/kick/tempban/ban/unban), más nuevo primero. `limit` entre 1 y 100 (default 30). Cada entrada usa el mismo shape de `openPenalties` (arriba). Sin 503: la DB es propia.
 
 ### `POST /api/admin/iam/penalty` 🔒 ADMIN
 
-Emite una penalidad vía `POST /api/server/{serverId}/execute` del upstream, ejecutando `warn`/`kick`/`tempban`/`ban` con target **`@clientId`** (unívoco, online u offline). El primer server monitorizado es el elegido (solo uno en este despliegue).
+Emite una penalidad NATIVA por rcon + registra `Penalty` en nuestra DB.
 
 Request:
 
@@ -999,18 +999,18 @@ Request:
 
 | Campo | Regla |
 | --- | --- |
-| `type` | `warn` \| `kick` \| `tempban` \| `ban` (whitelist zod) |
-| `reason` | **Obligatorio** (≥3 y ≤200) — jamás vacío |
-| `clientId` | Entero positivo → target `@{id}`; se valida que exista (contra `GET /api/client/{id}`) |
-| `clientName` | Alternativa a `clientId`: match EXACTO limpando colorcodes/case; si es ambiguo → 400 pidiendo clientId |
-| `durationMinutes` | Solo `tempban`: 1..43200 (límite real de IW4MAdmin 30d, `MaximumTempBanTime` = 30.00:00:00) → comando SIEMPRE `<n>m` (minutos, única unidad segura del parser) |
+| `type` | `warn` \| `kick` \| `tempban` \| `ban` |
+| `reason` | **Obligatorio** (≥3 y ≤200) — viaja al juego (`tell`) y queda en la DB |
+| `clientId` | `Player.id` del ranking: ONLINE (resuelve el slot por guid) u OFFLINE (solo tempban/ban → enforcer) |
+| `clientName` | Match EXACTO limpio contra los CONECTADOS; ambiguo → 400 pidiendo clientId/cid |
+| `cid` | **Nuevo**: slot directo de `status` (num). Útil para bots (sin Player en la base) |
+| `durationMinutes` | Solo `tempban`: 1..43200 → `clientkick` inmediato + `Penalty.expiresAt` (per-caso REAL; el enforcer re-kickea al conectar) |
 
 Reglas de negocio:
 
-- **warn/kick solo a players CONECTADOS**: el bridge verifica contra `GET /api/Status` (match por nombre limpio) → `400` si está offline.
-- tempban/ban funcionan también con el player desconectado (penalizar por `@id`, guardado en DB del upstream).
-- Nunca target por nombre de jugador activo (slot/name): TODOS los comandos van por `@id`.
-- El `reason` viaja tal cual (se sanitiza salto de línea manual) — por eso es obligatorio y no opcional ni vacío.
+- **Anti-TOCTOU**: antes de cada escritura con slot se RE-LÉE `status` y se verifica que el cid sigue teniendo el guid objetivo; si cambió → `409 CID_MISMATCH` y NINGÚN comando.
+- **Bots**: `warn`/`tempban`/`ban` → `403 TARGET_IS_BOT`; `kick` SÍ (liberar slots).
+- warn → `tell <cid> "<razón>"`; kick → `clientkick <cid>`; ban online → `banClient <cid>` (persistente en bans.json); ban/tempban offline → solo DB + enforcer.
 
 Response **200**:
 
@@ -1020,21 +1020,49 @@ Response **200**:
   "type": "tempban",
   "clientId": 9,
   "serverId": 12700128961,
-  "output": ["Ejecutado: tempban @9 90m exploit"]
+  "output": ["penalty#42", "clientkick 3 (tempban 90m)"]
 }
 ```
 
-`output` es el relé textual de la ejecución del upstream (útil para mostrar feedback en el UI).
-
 Errores:
-- `400 VALIDATION_ERROR` — motivo corto, tipo fuera de whitelist, tempban sin/exceso `durationMinutes`, sin `clientId`/`clientName`, o warn/kick a un cliente no conectado.
-- `404 IAM_CLIENT_NOT_FOUND` — `clientId` inexistente o nombre sin match exacto.
-- `502 IAM_UPSTREAM_*` — el webfront falló (`ERROR`/`UNREACHABLE`/`NON_JSON`) con detalle legible del upstream.
-- `503 IAM_NOT_CONFIGURED` / `503 IAM_UPSTREAM_LOGIN_*` — config o login remoto rechazado.
+- `400 VALIDATION_ERROR` — motivo corto, tempban sin `durationMinutes`, sin target, warn/kick offline.
+- `403 TARGET_IS_BOT` — warn/tempban/ban a un bot.
+- `404 MODERATION_TARGET_NOT_FOUND` — `clientId` inexistente o nombre sin match exacto.
+- `409 CID_MISMATCH` — el slot rotó entre lectura y acción (anti-TOCTOU).
+- `502 MODERATION_UNREACHABLE` — el server no respondió por rcon (password/throttle/caído).
+- `503 MODERATION_NOT_CONFIGURED` — falta `RCON_PASSWORD`.
+
+### `POST /api/admin/iam/unban` 🔒 ADMIN (NUEVO)
+
+Revoca el ban permanente: `unbanClient guid <HEX uppercase>` (bans.json del server) + marca nuestras `Penalty` activas (ban/tempban) como revocadas y registra la entrada `unban`.
+
+```json
+{ "clientId": 9 }        // Player.id del ranking
+{ "guid": "0B08D9C7F6A1B234" }  // HEX (formato status/bans.json) o decimal
+{ "cid": 3 }             // slot conectado
+```
+
+Response: mismo shape de `POST /penalty` con `type: "unban"`; `output` incluye el HEX usado (ej. `"unbanClient guid 0B08D9C7F6A1B234"`).
+
+### `GET /api/admin/iam/bans` 🔒 ADMIN (NUEVO)
+
+Lee `userraw/bans.json` del server (SOLO lectura; `RCON_BANS_FILE`). Sin la env → `configured:false` con lista vacía; archivo inexistente (aún sin bans) → `exists:false`.
+
+```json
+{
+  "configured": true,
+  "exists": true,
+  "file": "D:/Call of Duty 6/userraw/bans.json",
+  "bans": [
+    { "kind": "ip", "value": "192.168.3.66", "guidDecimal": null },
+    { "kind": "guid", "value": "0B08D9C7F6A1B234", "guidDecimal": "795124787090403892" }
+  ]
+}
+```
 
 ### `GET /api/admin/iam/live` 🔒 ADMIN
 
-Jugadores conectados AHORA (el log del juego no da esto): servers con `players[]` y su `clientId` resuelto vía `GET /api/client/find`.
+Jugadores conectados AHORA: `status()` + `getinfo()` combinados por rcon.
 
 ```json
 {
@@ -1043,14 +1071,19 @@ Jugadores conectados AHORA (el log del juego no da esto): servers con `players[]
       "id": 12700128961,
       "name": "^7[^1RANKING^7] ^7Local Test Server E2E",
       "online": true,
+      "map": "mp_terminal",
+      "gametype": "war",
       "players": [
         {
-          "name": "Player5",
+          "name": "^1Toxic^7Player",
           "clientId": 5,
           "clientNumber": 0,
-          "level": "User",
-          "ping": 50,
-          "score": 3,
+          "guid": "12345678901234567",
+          "isBot": false,
+          "connecting": false,
+          "level": null,
+          "ping": 30,
+          "score": 1250,
           "state": "Connected"
         }
       ]
@@ -1059,16 +1092,18 @@ Jugadores conectados AHORA (el log del juego no da esto): servers con `players[]
 }
 ```
 
-- `?resolve=false` evita las búsquedas de `clientId` (menos llamadas al upstream; `clientId` queda `null`).
-- `clientId` es `null` si el nombre no se resolvió (player conectado con otro nombre, spawner, bots, etc.) — el frontend debe tolerarlo.
-- Errores: `403`, `502 IAM_UPSTREAM_*`, `503 IAM_NOT_CONFIGURED`.
+- `clientId` = `Player.id` si el guid está en nuestra base (sync del log cada 30s); `null` si aún no (el frontend debe tolerarlo). `guid` es decimal (formato ranking) o `botN` para bots.
+- `clientNumber` (slot/cid) SIEMPRE presente — para acciones directas (bots incluidos: kick por `cid`).
+- `?resolve=false` evita la resolución contra la DB (`clientId` queda `null`).
+- Errores: `403`, `502 MODERATION_UNREACHABLE`, `503 MODERATION_NOT_CONFIGURED`.
 
 ### Notas para el frontend de moderación
 
-- `clients`, `penalties` y `live` son consultas read-only de moderación (show-only); `POST /penalty` es el único endpoint con side effect. Confirma siempre el motivo y pide confirmar en tempban/ban.
-- `name` del upstream puede contener códigos de color (`^1RANKING`): si el UI no los renderiza, sácalos con `/\^[0-9a-zA-Z]/g` (un solo carácter tras `^`).
-- Errors: revisar `error.code` (nunca mensaje humano) para decidir qué alerta mostrar.
-- NO usar este bridge para enriquecer stats/perfiles del leaderboard: es un canal aparte (ver nota arriba).
+- `clients`, `penalties`, `bans` y `live` son consultas read-only; `POST /penalty` y `POST /unban` son los únicos con side effect. Confirma siempre el motivo y pide confirmación en tempban/ban.
+- `name` puede contener códigos de color (`^1RANKING`): sácalos con `/\^[0-9a-zA-Z]/g` (un solo carácter tras `^`).
+- Errores: revisar `error.code` (nunca mensaje humano) para decidir qué alerta mostrar.
+- NO usar estos endpoints para enriquecer stats/perfiles del leaderboard: es un canal aparte (ver nota arriba).
+- Para kickear bots desde el panel: `POST /penalty` con `cid` (los bots no tienen `clientId` resuelto).
 
 ---
 
