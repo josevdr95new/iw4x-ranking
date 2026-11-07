@@ -101,7 +101,31 @@ class SettingsFrame(ctk.CTkFrame):
             checkmark_color=COLORS["on_accent"], text_color=COLORS["text"],
             border_color=COLORS["border_strong"], corner_radius=2,
         )
-        self.cloud_save_check.pack(anchor="w", pady=(0, SP["m"]))
+        self.cloud_save_check.pack(anchor="w", pady=(0, SP["s"]))
+
+        # --- Auto-guardado periódico (evita perder progreso si la PC muere) --
+        autosave_row = ctk.CTkFrame(inner, fg_color="transparent")
+        autosave_row.pack(fill="x", pady=(0, SP["m"]))
+        self.autosave_check = ctk.CTkCheckBox(
+            autosave_row, text="Auto-guardar progreso cada",
+            font=font(12), fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            checkmark_color=COLORS["on_accent"], text_color=COLORS["text"],
+            border_color=COLORS["border_strong"], corner_radius=2,
+            command=self._autosave_toggle,
+        )
+        self.autosave_check.pack(side="left")
+        self.autosave_minutes = ctk.CTkEntry(
+            autosave_row, width=64, height=30, font=font(12),
+            fg_color=COLORS["panel2"], border_color=COLORS["border"],
+            text_color=COLORS["text"], corner_radius=RADIUS["input"],
+            justify="center",
+        )
+        self.autosave_minutes.pack(side="left", padx=(SP["s"], 0))
+        ctk.CTkLabel(
+            autosave_row, text="min (0 = nunca)", font=font(11),
+            text_color=COLORS["text_dim"], anchor="w",
+        ).pack(side="left", padx=(6, 0))
 
         # --- Acciones ---------------------------------------------------------
         hairline(inner).pack(fill="x", pady=(0, SP["m"]))
@@ -141,9 +165,31 @@ class SettingsFrame(ctk.CTkFrame):
             self.cloud_save_check.select()
         else:
             self.cloud_save_check.deselect()
+        # Auto-guardado: el valor SIEMPRE va al entry (visible aunque sea 0);
+        # el checkbox refleja si está activo (>0).
+        self.autosave_minutes.delete(0, "end")
+        self.autosave_minutes.insert(0, str(cfg.autosave_minutes))
+        if cfg.autosave_minutes > 0:
+            self.autosave_check.select()
+        else:
+            self.autosave_check.deselect()
         self.feedback.configure(text="", text_color=COLORS["text_dim"])
 
     # --- Acciones ------------------------------------------------------------
+    def _autosave_toggle(self) -> None:
+        """Al activar el auto-guardado, sugiere 10 min si el entry está en 0."""
+        if self.autosave_check.get() \
+                and not self.autosave_minutes.get().strip():
+            self.autosave_minutes.delete(0, "end")
+            self.autosave_minutes.insert(0, "10")
+
+    def _autosave_minutes_value(self) -> int:
+        """Minutos del entry acotados a ≥0 (0 = desactivado)."""
+        try:
+            return max(0, int(self.autosave_minutes.get().strip() or 0))
+        except ValueError:
+            return 0
+
     def _browse_game(self) -> None:
         """Selector de archivo para iw4x.exe."""
         chosen = filedialog.askopenfilename(
@@ -207,11 +253,18 @@ class SettingsFrame(ctk.CTkFrame):
         cfg.set("game_path", self.game_path.get().strip())
         cfg.set("default_server", idx)
         cfg.set("cloud_save", bool(self.cloud_save_check.get()))
+        # Auto-guardado: solo cuenta si el checkbox está activo; el valor es
+        # entero ≥0 (0 = desactivado). Basura en el entry → 0 (sin crash).
+        autosave_minutes = self._autosave_minutes_value()
+        if not self.autosave_check.get():
+            autosave_minutes = 0
+        cfg.set("autosave_minutes", autosave_minutes)
         cfg.save()
 
         # Aplicar en caliente: nuevo cliente con la URL actualizada.
         self.app.apply_api_url(base)
         self.app.refresh_home_servers()
         self.feedback.configure(text="✔ Ajustes guardados.", text_color=COLORS["ok"])
-        log.info("Ajustes guardados: api_url=%s default_server=%s", base, idx)
+        log.info("Ajustes guardados: api_url=%s default_server=%s "
+                 "autosave_minutes=%s", base, idx, autosave_minutes)
         self.app.show_home()

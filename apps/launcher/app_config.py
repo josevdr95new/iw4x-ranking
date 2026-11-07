@@ -32,6 +32,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 10s / 180s; se exponen para poder acortarlos en pruebas).
     "link_poll_interval": 10,
     "link_poll_max_seconds": 180,
+    # Auto-guardado periódico del progreso en la nube (pedido del dueño:
+    # evitar pérdida de progreso si la PC muere a mitad de sesión).
+    # 0 = desactivado. Editable en Ajustes.
+    "autosave_minutes": 10,
 }
 
 
@@ -131,6 +135,14 @@ class AppConfig:
             return max(5, int(self.data.get("link_poll_max_seconds", 180)))
         except (TypeError, ValueError):
             return 180
+
+    @property
+    def autosave_minutes(self) -> int:
+        """Minutos entre auto-guardados del progreso (0 = desactivado)."""
+        try:
+            return max(0, int(self.data.get("autosave_minutes", 10)))
+        except (TypeError, ValueError):
+            return 10
 
     # --- Escritura ---------------------------------------------------------
     def save(self) -> None:

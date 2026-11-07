@@ -46,7 +46,8 @@ se muestra la ruta exacta del archivo de config.
   "default_server": 0,
   "simulate_game": false,
   "link_poll_interval": 10,
-  "link_poll_max_seconds": 180
+  "link_poll_max_seconds": 180,
+  "autosave_minutes": 10
 }
 ```
 
@@ -67,6 +68,7 @@ se muestra la ruta exacta del archivo de config.
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el polling de vinculación contra la API). |
 | `link_poll_interval`    | Segundos entre consultas de candidatos (default 10).          |
 | `link_poll_max_seconds` | Tiempo máximo de espera de conexión (default 180 = 3 min).    |
+| `autosave_minutes`      | **Auto-guardado** del progreso en la nube cada X minutos (default **10**; **0 = desactivado**). Evita perder progreso si la PC muere a mitad de sesión: sube solo lo que cambió, respeta lo más nuevo y no consulta la API si nada cambió. Editable en Ajustes. |
 
 ## Datos por usuario
 
@@ -95,6 +97,62 @@ se muestra la ruta exacta del archivo de config.
    iw4x.exe sube el progreso de la sesión. Los errores de sync NUNCA impiden
    jugar.
 
+## Auto-guardado periódico (contra pérdida de progreso)
+
+Además del sync pre-lanzamiento y post-sesión, el launcher **auto-guarda el
+progreso cada `autosave_minutes`** (default 10; 0 = desactivado; editable en
+Ajustes: "Auto-guardar progreso cada X minutos"). Corre en un hilo de fondo
+(nunca bloquea la UI) y **también mientras estás jugando**: si la PC muere a
+mitad de sesión, se pierde como máximo lo de los últimos X minutos (el juego
+hace flush del .stat a fin de ronda, así que lo subido es lo último flushed).
+
+Reglas del tick (misma decisión de `decide_sync` que el resto del sync):
+
+| Estado                                                    | Acción                                      | Log                                  |
+| --------------------------------------------------------- | ------------------------------------------- | ------------------------------------ |
+| Local más nuevo que el server (o hash distinto / server vacío) | **Sube** con SHA-256 validado          | `Auto-guardado: progreso sincronizado ✓` |
+| Idéntico al último manifiesto visto                       | **Nada** — ni consulta la API (caché)       | silencio                             |
+| Server más nuevo (otra PC subió algo más reciente)        | **No sobrescribe** — se respeta al arrancar | `Auto-guardado omitido: el server tiene versión más nueva…` |
+| Save ilegible (el juego lo está escribiendo a medias)     | **Salta el tick** y reintenta en el próximo | `autosave: archivo en escritura (…), reintentando en X min` |
+| Sin login / `cloud_save` off / minutos = 0                | Nada                                        | silencio                             |
+
+NUNCA hay dos subidas concurrentes (lock global `UPLOAD_LOCK` compartido con
+el post-sesión y el cierre).
+
+## Cerrar el launcher = detener el juego y guardar el progreso (SIEMPRE)
+
+Si cierras la ventana del launcher mientras el juego que ÉL abrió sigue
+corriendo, el launcher hace esto antes de cerrarse (sin toggle: siempre pasa):
+
+1. La ventana desaparece al instante (feedback inmediato).
+2. Mata el **árbol completo de procesos** del juego con
+   `taskkill /PID <pid> /T /F`, usando el PID que el propio launcher lanzó
+   (guardado al abrir el juego). **Nunca mata por nombre de proceso** — el
+   server dedicado también se llama `iw4x.exe`, y un `taskkill /IM iw4x.exe`
+   lo tumbaría; el launcher jamás toca procesos que no abrió él.
+3. Espera a que el proceso esté realmente muerto (poll, máx. 5 s).
+4. Sube el progreso de la sesión a tu cuenta (el mismo upload post-sesión de
+   siempre, **una sola vez**, con presupuesto de ~10 s). Logs:
+   `Launcher cerrado: juego detenido.` → `Progreso subido a tu cuenta ✓` →
+   `Cerrando…`.
+5. **Guardado final SIEMPRE**, tenga o no juego vivo: tras el paso anterior,
+   el launcher intenta una última subida del estado local (misma decisión de
+   siempre: solo sube si cambió respecto al server, presupuesto ~10 s). Así,
+   si jugaste, cerraste el juego y dejaste el launcher abierto horas, el
+   último estado igual llega a tu cuenta.
+6. Si el juego ya se había cerrado solo, no hay kill ni doble upload: el
+   flujo post-sesión normal hace la subida como siempre.
+
+El mismo camino de cierre se garantiza por tres vías redundantes e
+idempotentes: el botón X de la ventana (`WM_DELETE_WINDOW`), un
+`try/finally` alrededor del mainloop y un hook `atexit`.
+
+> **Limitación honesta:** si matas el launcher desde el Administrador de
+> tareas (o se va la luz), el proceso no puede ejecutar su propia secuencia de
+> cierre: en ese caso el juego sigue vivo y el upload de esa sesión no ocurre
+> (se subirá en el próximo arranque si tu PC tiene lo más nuevo). Ningún
+> programa puede salvarse de un kill externo.
+
 ## Tests
 
 ```bat
@@ -106,8 +164,8 @@ py apps\launcher\tests\test_smoke.py   # solo E2E/GUI (requiere API :3000)
 | Archivo              | Qué cubre |
 | -------------------- | --------- |
 | `tests/run_all.py`   | Runner: ejecuta **units primero** y **smoke después**; resumen por archivo (checks OK/fallidos, tiempo, exit del proceso) y exit != 0 si algo falla. |
-| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: `candidate_matches` / `pick_candidate` (nicks ^X, recencia), puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config` y `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`). |
-| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR + `+set name`, guard de nick, verificación de identidad automática, stats en vivo, cloud-sync (pipeline stub + E2E contra la API), 409s (`GUID_ALREADY_LINKED` / `USER_ALREADY_LINKED`), regresión visual del formulario y de la **franja CONEXIÓN del login** (URL visible + botón PROBAR antes del login). |
+| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: `candidate_matches` / `pick_candidate` (nicks ^X, recencia), puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config`, `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`), `kill_tree` / `wait_process_exit` (taskkill `/PID /T /F` con stub de subprocess; fallos tragados) y el **autosave** (decisión de subida con stub, caché sin API, server más nuevo respetado, save ilegible → skip, config `autosave_minutes`). |
+| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR + `+set name`, guard de nick, verificación de identidad automática, stats en vivo, cloud-sync (pipeline stub + E2E contra la API), 409s (`GUID_ALREADY_LINKED` / `USER_ALREADY_LINKED`), regresión visual del formulario y de la **franja CONEXIÓN del login** (URL visible + botón PROBAR antes del login), el **cierre del launcher** (kill tree del PID lanzado + upload único con stubs; sin juego vivo no toca nada) y el **autosave + guardado final al cerrar** (tick sube con cambios, sin cambios no consulta la API, cierre sin juego sube el último estado). |
 
 Cuenta de prueba: `launcher-test@test.local` / `LauncherTest2026` (la crea el
 propio smoke si la DB está limpia). NO es pytest: scripts secuenciales que

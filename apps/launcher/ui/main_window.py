@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 from api_client import ApiClient, ApiError, NetworkError, user_is_linked
 from app_config import AppConfig
+from autosave import Autosave
 from game_flow import GameFlow
 from ui.home import HomeFrame
 from ui.login import LoginFrame
@@ -53,6 +54,26 @@ class App(ctk.CTk):
         # Cola de tareas para el hilo de UI.
         self._tasks: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self.after(60, self._drain_tasks)
+
+        # Cierre: secuencia ÚNICA e idempotente (WM_DELETE_WINDOW + try/finally
+        # del mainloop + atexit pasan todos por _shutdown_sequence).
+        self._shutdown_done = False
+        self._shutdown_lock = threading.Lock()
+
+        # Auto-guardado periódico del progreso (pedido del dueño, SIEMPRE):
+        # cada cfg.autosave_minutes sube el progreso si cambió (0 = off).
+        # Providers en caliente: login/logout, URL de API y config editada en
+        # Ajustes aplican al siguiente tick sin reiniciar nada.
+        self.autosave = Autosave(
+            period_provider=lambda: self.cfg.autosave_minutes,
+            token_provider=lambda: self.token,
+            game_dir_provider=lambda: (os.path.dirname(self.cfg.game_path)
+                                       if self.cfg.game_path else ""),
+            cloud_provider=lambda: self.cfg.cloud_save,
+            api_provider=lambda: self.api,
+            log_cb=self._autosave_log,
+        )
+        self.autosave.start()
 
         # --- Ventana ---------------------------------------------------------
         self.title("IW4X RANKING // TERMINAL DE JUGADOR")
@@ -493,10 +514,90 @@ class App(ctk.CTk):
 
     # ================== Cierre ==================
     def _on_close(self) -> None:
-        log.info("Cerrando launcher")
-        if self.flow is not None:
-            self.flow.cancel()
-        self._cancel_stats_timer()
-        self.home_frame.stats_panel.stop_timers()
-        self.home_frame.stop_animations()
-        self.destroy()
+        """WM_DELETE_WINDOW: oculta la ventana y ejecuta la secuencia de salida.
+
+        Comportamiento SIEMPRE (decisión del dueño): si este launcher dejó un
+        juego vivo, la secuencia mata su ÁRBOL completo, espera su muerte y
+        sube el progreso (presupuesto ~15s) antes de cerrar de verdad.
+        """
+        log.info("Cierre de ventana solicitado")
+        try:
+            self.withdraw()  # feedback inmediato: la ventana "ya se cerró"
+        except Exception:
+            pass
+        self._shutdown_sequence()
+
+    def emergency_shutdown(self) -> None:
+        """Red de seguridad para salidas que NO pasan por WM_DELETE_WINDOW
+        (try/finally del mainloop en main.py y atexit). Idempotente: si la
+        secuencia ya corrió, no hace nada. NUNCA explota en el cierre.
+        """
+        try:
+            self._shutdown_sequence()
+        except Exception:
+            log.exception("Secuencia de cierre best-effort falló")
+
+    def _shutdown_sequence(self) -> None:
+        """Secuencia única de cierre: detener juego → guardar → salir."""
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                return
+            self._shutdown_done = True
+
+        # Para el ciclo de auto-guardado antes de subir el estado final
+        # (un tick en vuelo seguiría con el lock; el force de abajo espera).
+        try:
+            self.autosave.stop()
+        except Exception:
+            pass
+
+        flow = self.flow
+        self.flow = None
+        if flow is not None:
+            flow.cancel()  # aborta polling/vinculación lo antes posible
+            try:
+                # Mata SOLO el árbol del PID que este launcher lanzó y sube
+                # el progreso una vez (presupuesto ~15s dentro del flow).
+                flow.stop_game_for_exit()
+            except Exception:
+                log.exception("No se pudo detener el juego / subir el progreso")
+
+        # Guardado final SIEMPRE (con o sin juego vivo): si el estado local
+        # cambió desde el último sync, sube. Best-effort, presupuesto ~10s:
+        # NUNCA bloquea el cierre más que eso. Caso cubierto: jugó, cerró el
+        # juego, dejó el launcher abierto horas y lo cierra ahora.
+        try:
+            if self.autosave.tick(force=True, budget=10.0) == "upload":
+                self._log_line_safe("Progreso subido a tu cuenta ✓")
+        except Exception:
+            log.exception("Guardado final antes de salir falló")
+
+        # Limpieza de timers (best-effort: la ventana puede estar rota ya).
+        try:
+            self._cancel_stats_timer()
+        except Exception:
+            pass
+        try:
+            self.home_frame.stats_panel.stop_timers()
+            self.home_frame.stop_animations()
+        except Exception:
+            pass
+
+        self._log_line_safe("Cerrando…")
+        log.info("Cerrando…")
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def _log_line_safe(self, msg: str) -> None:
+        """log_line tolerante a fallos (para usar durante el cierre)."""
+        try:
+            self.home_frame.log_line(msg)
+        except Exception:
+            pass
+
+    def _autosave_log(self, msg: str) -> None:
+        """Logs del auto-guardado: al archivo y a la consola mini (en UI)."""
+        log.info("[autosave] %s", msg)
+        self.post(lambda m=msg: self._log_line_safe(m))

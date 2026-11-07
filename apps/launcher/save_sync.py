@@ -21,12 +21,18 @@ import hashlib
 import logging
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger("save_sync")
+
+# Lock GLOBAL de subidas de saves: en TODO el launcher (post-sesión del
+# GameFlow, auto-guardado periódico y cierre) hay COMO MÁXIMO UN PUT de
+# progreso en vuelo — nunca dos subidas concurrentes del mismo save.
+UPLOAD_LOCK = threading.Lock()
 
 # Archivos de save reconocidos (whitelist del server).
 GUID_REL = "guid.dat"          # IDENTIDAD: %LOCALAPPDATA%\iw4x\guid.dat

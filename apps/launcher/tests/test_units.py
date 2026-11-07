@@ -23,13 +23,16 @@ from __future__ import annotations
 import hashlib
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 # Importa los módulos del launcher (directorio padre, sin depender del cwd).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_config import AppConfig, DEFAULT_CONFIG, normalize_api_url  # noqa: E402
+import game_flow as gf  # noqa: E402
 from game_flow import build_game_args, candidate_matches, pick_candidate  # noqa: E402
 import save_sync as ss  # noqa: E402
 from save_sync import (  # noqa: E402
@@ -331,6 +334,289 @@ def phase_normalize_api_url() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6. game_flow.kill_tree: taskkill /T /F del árbol SOLO por PID (stub).
+def phase_kill_tree() -> None:
+    print("\n=== Units: kill_tree (taskkill /T /F con stub de subprocess) ===")
+
+    calls: list = []
+
+    class FakeResult:
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+
+    def fake_run(cmd, **kwargs):
+        calls.append((list(cmd), dict(kwargs)))
+        return FakeResult(0)
+
+    orig_run = gf.subprocess.run
+
+    # Éxito: taskkill con /T /F y el PID correcto, sin shell y con timeout.
+    gf.subprocess.run = fake_run
+    try:
+        ok = gf.kill_tree(4242)
+        check("kill_tree: llama a taskkill con /T /F y el PID correcto",
+              ok is True and len(calls) == 1
+              and calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"],
+              str(calls))
+        kw = calls[0][1]
+        check("kill_tree: sin shell y con timeout corto (best-effort acotado)",
+              not kw.get("shell") and isinstance(kw.get("timeout"), (int, float)),
+              str(kw))
+    finally:
+        gf.subprocess.run = orig_run
+
+    # taskkill falla (PID inexistente → returncode 128): False sin explotar.
+    gf.subprocess.run = lambda cmd, **kw: FakeResult(128)
+    try:
+        check("kill_tree: taskkill con error (128) → False sin explotar",
+              gf.kill_tree(4242) is False)
+    finally:
+        gf.subprocess.run = orig_run
+
+    # taskkill lanza excepción (TimeoutExpired/OSError): False sin explotar.
+    def boom(cmd, **kw):
+        raise TimeoutExpired(cmd, 5)
+
+    gf.subprocess.run = boom
+    try:
+        check("kill_tree: excepción de taskkill → False sin explotar",
+              gf.kill_tree(4242) is False)
+    finally:
+        gf.subprocess.run = orig_run
+
+    # PIDs basura: NUNCA se invoca taskkill (guard de argumento).
+    calls.clear()
+    gf.subprocess.run = fake_run
+    try:
+        check("kill_tree: pid inválido (0/None/'x'/negativo) → False sin llamar",
+              gf.kill_tree(0) is False and gf.kill_tree(None) is False
+              and gf.kill_tree("x") is False and gf.kill_tree(-3) is False
+              and calls == [])
+    finally:
+        gf.subprocess.run = orig_run
+
+
+# ---------------------------------------------------------------------------
+# 7. game_flow.wait_process_exit: poll acotado a la muerte del proceso.
+def phase_wait_process_exit() -> None:
+    print("\n=== Units: wait_process_exit (poll ≤ timeout) ===")
+
+    class FakeProc:
+        """poll() devuelve None las primeras N veces y luego el código 0."""
+        def __init__(self, alive_polls: int) -> None:
+            self._left = alive_polls
+
+        def poll(self):
+            if self._left > 0:
+                self._left -= 1
+                return None
+            return 0
+
+    check("wait_process_exit: proceso que muere → True",
+          gf.wait_process_exit(FakeProc(2), timeout=5, poll=0.01) is True)
+
+    class Zombie:
+        def poll(self):
+            return None  # nunca muere
+
+    t0 = time.monotonic()
+    died = gf.wait_process_exit(Zombie(), timeout=0.2, poll=0.02)
+    check("wait_process_exit: proceso que no muere → False dentro del plazo",
+          died is False and (time.monotonic() - t0) < 2.0,
+          f"{time.monotonic() - t0:.2f}s")
+
+    class Broken:
+        def poll(self):
+            raise OSError("handle roto")
+
+    check("wait_process_exit: poll() que explota → True (asume muerto)",
+          gf.wait_process_exit(Broken(), timeout=5, poll=0.01) is True)
+
+
+# ---------------------------------------------------------------------------
+# 8. autosave: decisión de subida, caché, server más nuevo, lectura rota.
+def phase_autosave() -> None:
+    print("\n=== Units: autosave (decide_sync upload-only, caché, server nuevo) ===")
+    import base64
+    import tempfile
+
+    from app_config import AppConfig
+    from autosave import Autosave, collect_local_hashes
+
+    # --- Config: autosave_minutes (default 10, 0 = off, acotado ≥0) ----------
+    check("autosave config: clave nueva en DEFAULT_CONFIG (default 10)",
+          DEFAULT_CONFIG.get("autosave_minutes") == 10,
+          str(DEFAULT_CONFIG.get("autosave_minutes")))
+    check("autosave config: dict vacío → 10; 'x' → 10",
+          AppConfig({}).autosave_minutes == 10
+          and AppConfig({"autosave_minutes": "x"}).autosave_minutes == 10)
+    check("autosave config: 0 → 0 (off); negativo → acotado a 0",
+          AppConfig({"autosave_minutes": 0}).autosave_minutes == 0
+          and AppConfig({"autosave_minutes": -5}).autosave_minutes == 0)
+
+    # --- Stub de API de saves con contadores (sin red) -----------------------
+    from datetime import datetime, timedelta, timezone
+
+    def iso_utc(offset_hours: float) -> str:
+        """ISO-8601 UTC desplazado del reloj actual (tests sin depender del
+        día: el manifiesto puede ser pasado o futuro a voluntad)."""
+        dt = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
+        return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    class StubSaveApi:
+        def __init__(self, upload_offset_hours: float = 1.0) -> None:
+            self.manifest_calls = 0
+            self.upload_calls = 0
+            self.store: dict = {}
+            self.updated = "2026-11-07T10:00:00.000Z"
+            # Cada PUT que cambia algo 'fresca' el manifiesto N horas al
+            # futuro (o al pasado, con offset negativo, para simular server
+            # viejo). Así la decisión nunca depende de la hora del día.
+            self.upload_offset_hours = upload_offset_hours
+
+        def save_manifest(self, token):
+            self.manifest_calls += 1
+            if not self.store:
+                return {"exists": False}
+            return {"exists": True, "version": 1, "updatedAt": self.updated,
+                    "files": [{"path": p, "sha256": sha256_local(d)}
+                              for p, d in sorted(self.store.items())]}
+
+        def save_download(self, token, path, version=None):
+            return self.store[path]
+
+        def save_upload(self, token, files, build=None):
+            self.upload_calls += 1
+            changed = False
+            for f in files:
+                data = base64.b64decode(f["dataBase64"])
+                if self.store.get(f["path"]) != data:
+                    changed = True
+                self.store[f["path"]] = data
+            if changed:
+                self.updated = iso_utc(self.upload_offset_hours)
+            return {"saved": changed}
+
+    def sha256_local(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-autosave-"))
+    (tmp / "players").mkdir(parents=True)
+    stat = tmp / "players" / "iw4x.stat"
+    guid_tmp = str(tmp / "localapp" / "iw4x" / "guid.dat")
+
+    def make(stub, minutes=10):
+        logs: list = []
+        a = Autosave(period_provider=lambda: minutes,
+                     token_provider=lambda: "tok",
+                     game_dir_provider=lambda: str(tmp),
+                     cloud_provider=lambda: True,
+                     api_provider=lambda: stub,
+                     log_cb=logs.append, guid_path=guid_tmp)
+        return a, logs
+
+    # collect_local_hashes: hash correcto; ausente → fuera, SIN fallo.
+    stat.write_bytes(b"PROGRESS-1")
+    hashes, failed = collect_local_hashes(str(tmp), guid_path=guid_tmp)
+    check("collect_local_hashes: hash del .stat correcto y sin fallos",
+          hashes.get("iw4x.stat") == sha256_local(b"PROGRESS-1")
+          and failed == [], f"{hashes} {failed}")
+    hashes_missing, failed_missing = collect_local_hashes(
+        str(tmp / "vacio"), guid_path=guid_tmp)
+    check("collect_local_hashes: carpeta sin saves → sin hashes y sin fallos",
+          hashes_missing == {} and failed_missing == [],
+          f"{hashes_missing} {failed_missing}")
+
+    # 1) local nuevo + server vacío → sube, log discreto exacto.
+    stub = StubSaveApi(upload_offset_hours=1.0)
+    a, logs = make(stub)
+    r = a.tick()
+    check("autosave: local nuevo + server vacío → sube",
+          r == "upload" and stub.upload_calls == 1,
+          f"{r} upload_calls={stub.upload_calls}")
+    check("autosave: log 'Auto-guardado: progreso sincronizado ✓'",
+          any("Auto-guardado: progreso sincronizado ✓" in x for x in logs),
+          str(logs))
+    # El server 'subió' hace 1h al futuro → para el tick 3 lo envejecemos.
+    stub.updated = iso_utc(-2.0)
+
+    # 2) sin cambios → NI consulta la API (caché de hashes).
+    calls = (stub.manifest_calls, stub.upload_calls)
+    logs.clear()
+    r = a.tick()
+    check("autosave: sin cambios → 'skip-identical' SIN llamada a la API",
+          r == "skip-identical"
+          and (stub.manifest_calls, stub.upload_calls) == calls and logs == [],
+          f"{r} manifest={stub.manifest_calls} upload={stub.upload_calls} {logs}")
+
+    # 2b) forzado (cierre): consulta, pero idéntico → NO repite el PUT.
+    r = a.tick(force=True)
+    check("autosave forzado (cierre): idéntico → consulta y NO repite PUT",
+          r == "noop" and stub.upload_calls == 1,
+          f"{r} upload_calls={stub.upload_calls}")
+
+    # 3) el progreso local cambió → sube de nuevo.
+    stat.write_bytes(b"PROGRESS-2")
+    logs.clear()
+    r = a.tick()
+    check("autosave: progreso local cambió → sube de nuevo",
+          r == "upload" and stub.upload_calls == 2,
+          f"{r} upload_calls={stub.upload_calls}")
+
+    # 4) server más nuevo → NO pisa desde el autosave (se respeta al arrancar).
+    stub2 = StubSaveApi(upload_offset_hours=2.0)  # PUT 'fresca' +2h al futuro
+    seed = [{"path": "iw4x.stat",
+             "dataBase64": base64.b64encode(b"SERVER-NEWER").decode(),
+             "sha256": sha256_local(b"SERVER-NEWER")}]
+    stub2.save_upload("tok", seed)
+    a2, logs2 = make(stub2)
+    r = a2.tick()
+    check("autosave: server más nuevo → omitido, sin sobrescribir",
+          r == "download" and stub2.upload_calls == 1
+          and stub2.store["iw4x.stat"] == b"SERVER-NEWER",
+          f"{r} upload_calls={stub2.upload_calls}")
+    check("autosave: log 'versión más nueva' al omitir",
+          any("versión más nueva" in x for x in logs2), str(logs2))
+
+    # 5) save en escritura (ilegible) → skip del tick sin crash + log dim.
+    stat.unlink()
+    stat.mkdir()  # abrir un directorio da PermissionError en Windows
+    a3, logs3 = make(stub)
+    try:
+        r = a3.tick()
+        crashed = False
+    except Exception as exc:  # pragma: no cover
+        r, crashed = f"EXC:{exc}", True
+    check("autosave: save ilegible (a medias) → 'busy-read' sin crash",
+          crashed is False and r == "busy-read", f"r={r}")
+    check("autosave: log dim 'archivo en escritura… reintentando'",
+          any("archivo en escritura" in x and "reintentando" in x for x in logs3),
+          str(logs3))
+    stat.rmdir()
+    stat.write_bytes(b"PROGRESS-2")
+
+    # 6) autosave_minutes=0 → desactivado, sin API.
+    a4, _logs4 = make(stub, minutes=0)
+    calls = (stub.manifest_calls, stub.upload_calls)
+    r = a4.tick()
+    check("autosave: minutos=0 → 'disabled' sin llamada a la API",
+          r == "disabled"
+          and (stub.manifest_calls, stub.upload_calls) == calls,
+          f"{r} manifest={stub.manifest_calls} upload={stub.upload_calls}")
+
+    # 7) cloud_save off → desactivado (aunque haya cambios y force).
+    stat.write_bytes(b"PROGRESS-3")
+    a5, _logs5 = make(stub)
+    a5.cloud_provider = lambda: False
+    calls = (stub.manifest_calls, stub.upload_calls)
+    r = a5.tick(force=True)
+    check("autosave: cloud_save off → 'disabled' incluso forzado",
+          r == "disabled"
+          and (stub.manifest_calls, stub.upload_calls) == calls,
+          f"{r} manifest={stub.manifest_calls} upload={stub.upload_calls}")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -345,6 +631,9 @@ def main() -> int:
     phase_command_args()
     phase_app_config()
     phase_normalize_api_url()
+    phase_kill_tree()
+    phase_wait_process_exit()
+    phase_autosave()
 
     fails = sum(1 for r in RESULTS if r.startswith("[FALLO"))
     print("\n================ RESUMEN ================")

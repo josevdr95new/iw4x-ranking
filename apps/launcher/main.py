@@ -7,6 +7,7 @@ Configuración en launcher.config.json (se crea con defaults si no existe).
 """
 from __future__ import annotations
 
+import atexit
 import logging
 
 import customtkinter as ctk
@@ -39,7 +40,18 @@ def main() -> None:
     ctk.set_default_color_theme("dark-blue")
 
     app = App(cfg, ApiClient(cfg.api_url), UserStore())
-    app.mainloop()
+
+    # Regla del dueño (SIEMPRE, sin toggle): si el launcher se cierra, el
+    # juego que ÉL lanzó muere entero (árbol) y el progreso se sube. Tres
+    # vías de salida, una sola secuencia (idempotente dentro de App):
+    #   1. WM_DELETE_WINDOW      → App._on_close
+    #   2. try/finally acá       → App.emergency_shutdown (no-op si ya corrió)
+    #   3. atexit (última red)   → App.emergency_shutdown (idem)
+    atexit.register(app.emergency_shutdown)
+    try:
+        app.mainloop()
+    finally:
+        app.emergency_shutdown()
 
     logging.getLogger("main").info("Launcher terminado")
 

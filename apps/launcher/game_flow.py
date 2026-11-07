@@ -19,6 +19,7 @@ la UI salta la verificación y solo abre el juego.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -28,7 +29,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from api_client import ApiClient, ApiError, NetworkError
 from logging_setup import app_data_dir
-from save_sync import default_guid_path, sync_after_session, sync_before_launch
+from save_sync import (UPLOAD_LOCK, default_guid_path, sync_after_session,
+                       sync_before_launch)
 
 log = logging.getLogger("game_flow")
 
@@ -99,8 +101,63 @@ def build_game_args(
     return args
 
 
+KILL_TREE_TIMEOUT = 5.0  # segundos máximos de taskkill (best-effort, corto)
+
+
+def kill_tree(pid: int, timeout: float = KILL_TREE_TIMEOUT) -> bool:
+    """Mata el ÁRBOL completo del proceso ``pid`` (Windows: taskkill /T /F).
+
+    SOLO se invoca con PIDs que el launcher lanzó (el Popen de GameFlow):
+    NUNCA se mata por nombre de imagen — iw4x.exe también es el server
+    dedicado y un ``taskkill /IM iw4x.exe`` lo tumbaría (prohibido).
+    Best-effort: cualquier fallo (taskkill ausente, returncode != 0, PID
+    inválido, excepción) devuelve False sin explotar.
+    """
+    try:
+        pid = int(pid)  # rechaza None/basura sin lanzar
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name != "nt":  # fallback POSIX (solo el proceso; sin árbol)
+        try:
+            os.kill(pid, 9)
+            return True
+        except OSError:
+            return False
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True, timeout=timeout, check=False,
+        )
+        return result.returncode == 0
+    except Exception:  # OSError/TimeoutExpired/cualquier cosa: best-effort
+        return False
+
+
+def wait_process_exit(process: Any, timeout: float, poll: float = 0.1) -> bool:
+    """Espera (poll) a que ``process`` muera. True si murió dentro del plazo."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            if process.poll() is not None:
+                return True
+        except Exception:  # proceso ya recolectado/handle roto: está muerto
+            return True
+        if time.monotonic() >= deadline:
+            try:
+                return process.poll() is not None
+            except Exception:
+                return True
+        time.sleep(poll)
+
+
 class GameFlow:
     """Un intento de 'jugar' (con o sin vinculación pendiente)."""
+
+    # Presupuestos del cierre del launcher (siempre activo, sin toggle).
+    GAME_EXIT_WAIT = 5.0       # espera (s) a que el proceso muera tras el kill
+    GAME_UPLOAD_BUDGET = 10.0  # presupuesto (s) de la subida antes de cerrar
 
     def __init__(
         self,
@@ -135,10 +192,39 @@ class GameFlow:
         # Cancelación (al cerrar la ventana o cerrar sesión).
         self._cancelled = threading.Event()
 
+        # Upload post-sesión: EXACTAMENTE una vez por sesión. El hilo normal
+        # (post p.wait()) y el cierre del launcher compiten por el mismo
+        # worker; el guard evita subir el save dos veces.
+        self._session_lock = threading.Lock()
+        self._session_finalized = False
+        self._upload_worker: Optional[threading.Thread] = None
+        self._upload_result: Optional[str] = None
+
     # --- API hacia la UI ----------------------------------------------------
     def cancel(self) -> None:
         """Pide abortar el flujo lo antes posible."""
         self._cancelled.set()
+
+    def game_pid(self) -> Optional[int]:
+        """PID del juego que ESTE flujo lanzó (None si no hay juego)."""
+        p = self._process
+        if p is None:
+            return None
+        try:
+            pid = int(p.pid)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return pid or None
+
+    def game_running(self) -> bool:
+        """¿El juego lanzado por este flujo sigue vivo? (nunca mira otros)"""
+        p = self._process
+        if p is None:
+            return False
+        try:
+            return p.poll() is None
+        except Exception:
+            return False
 
     # --- Hilo de trabajo ----------------------------------------------------
     def run(self) -> None:
@@ -175,14 +261,62 @@ class GameFlow:
             return f"la API respondió {exc.code}: {exc.message}"
         return str(exc)
 
+    def _upload_enabled(self) -> bool:
+        """¿Toca subir progreso en esta sesión? (cloud_save activo y real)"""
+        return bool(self.cloud_save and self.game_dir) and not self.simulate
+
+    def _upload_once(self, budget: Optional[float] = None) -> None:
+        """Sube el progreso UNA sola vez por sesión (guard anti-duplicado).
+
+        La primera llamada gana el flag y lanza el worker en un hilo propio;
+        las demás (hilo post-sesión vs. cierre del launcher) esperan al MISMO
+        worker — nunca dos uploads. Con ``budget`` (cierre del launcher) la
+        espera está acotada; con None (flujo normal) espera lo que tarde,
+        igual que antes.
+        """
+        with self._session_lock:
+            if self._session_finalized:
+                worker = self._upload_worker  # alguien más ganó: esperarlo
+            else:
+                self._session_finalized = True
+                if not self._upload_enabled():
+                    return
+                worker = threading.Thread(target=self._upload_work,
+                                          daemon=True, name="save-upload")
+                self._upload_worker = worker
+                worker.start()  # arranca ya: el join de abajo lo espera
+        if worker is None:
+            return
+        if budget is None:
+            worker.join()          # flujo normal: espera como siempre
+        else:
+            worker.join(budget)    # cierre del launcher: presupuesto duro
+
+    def _upload_work(self) -> None:
+        """Cuerpo del upload post-sesión (corre en el worker dedicado)."""
+        try:
+            with UPLOAD_LOCK:  # JAMÁS dos PUTs de saves concurrentes
+                self._upload_result = sync_after_session(
+                    self.api, self.token, self.game_dir, log=self._log,
+                    guid_path=default_guid_path(),
+                )
+        except (NetworkError, ApiError, OSError) as exc:
+            self._upload_result = "error"
+            self._log(f"⚠ Subida de progreso omitida: "
+                      f"{self._transport_error_text(exc)}")
+        except Exception:  # nunca tumbar el flujo/cierre por un upload
+            self._upload_result = "error"
+            log.exception("Upload post-sesión falló de forma inesperada")
+
     def _await_game_and_upload(self) -> None:
         """POST-sesión: espera al cierre de iw4x.exe y sube el progreso.
 
         Regla de oro: el juego hace flush del .stat al terminar la ronda, así
         que la subida solo ocurre cuando el proceso YA murió. NUNCA bloquea
-        jugar ni toca nada en modo simulación.
+        jugar ni toca nada en modo simulación. Si el launcher cerró el juego
+        primero, el guard de ``_upload_once`` evita la doble subida.
         """
-        if not (self.cloud_save and self.game_dir) or self.simulate:
+        if not self._upload_enabled():
             return
         process = self._process
         if process is None:
@@ -192,12 +326,35 @@ class GameFlow:
         except Exception:  # proceso ya recolectado: nada que esperar
             pass
         self._log("Juego cerrado: revisando tu progreso…")
-        try:
-            sync_after_session(self.api, self.token, self.game_dir, log=self._log,
-                               guid_path=default_guid_path())
-        except (NetworkError, ApiError, OSError) as exc:
-            self._log(f"⚠ Subida de progreso omitida: "
-                      f"{self._transport_error_text(exc)}")
+        self._upload_once()
+
+    def stop_game_for_exit(self) -> None:
+        """Cierre del launcher con juego vivo: kill tree → muerte → upload.
+
+        Comportamiento SIEMPRE (decisión del dueño, sin toggle). SOLO toca el
+        árbol del PID que ESTE flujo lanzó — jamás por nombre de proceso (el
+        server dedicado también es iw4x.exe). Presupuesto duro: ≤5s esperando
+        la muerte + ≤10s de subida; después el cierre continúa sí o sí.
+        Si el juego ya murió solo NO hace nada: el flujo post-sesión normal
+        (``_await_game_and_upload``) se encarga y el upload no se duplica.
+        """
+        if not self.game_running():
+            return
+        pid = self.game_pid()
+        self._log("Launcher cerrado: juego detenido.")
+        killed = bool(pid) and kill_tree(pid)
+        if pid and not killed:
+            try:
+                self._process.kill()  # fallback: al menos el proceso raíz
+            except Exception:
+                pass
+        if not wait_process_exit(self._process, self.GAME_EXIT_WAIT):
+            log.warning("El juego (PID %s) no confirmó su muerte a tiempo; "
+                        "el cierre continúa", pid)
+        self._log("Juego cerrado: revisando tu progreso…")
+        self._upload_once(budget=self.GAME_UPLOAD_BUDGET)
+        if self._upload_result == "upload":
+            self._log("Progreso subido a tu cuenta ✓")
 
     @staticmethod
     def _api_error_text(exc: ApiError) -> str:

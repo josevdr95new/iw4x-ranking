@@ -26,6 +26,14 @@ Qué verifica:
                 (desambiguado por recencia); sin match → timeout con copy
                 de nick; 409 ya verificada → éxito; API caída → retry.
   8. (lógica)   pick_candidate: se testea EN UNITS (tests/test_units.py).
+  9. (GUI/stubs) cierre del launcher (SIEMPRE): WM_DELETE_WINDOW y
+                 emergency_shutdown (finally/atexit) matan el ÁRBOL del PID
+                 que el launcher lanzó (stub, taskkill por PID, nunca por
+                 nombre) y suben el progreso UNA vez; sin juego vivo el
+                 cierre no toca nada.
+  10. (GUI/stubs) autosave: tick con cambios sube, sin cambios NO consulta
+                 la API (caché de hashes) y otro cambio vuelve a subir; el
+                 cierre SIN juego vivo hace el guardado final SIEMPRE.
 
 Híbridos que quedan aquí (con red/GUI o estado): pipeline stub de
 cloud-sync, todas las fases GUI, fases headless contra la API real y los
@@ -284,6 +292,10 @@ def quiesce(app: App) -> None:
     try:
         for aid in app.tk.call("after", "info"):
             app.tk.call("after", "cancel", aid)
+    except Exception:
+        pass
+    try:
+        app.autosave.stop()  # no dejar el ciclo de auto-guardado colgando
     except Exception:
         pass
     app.destroy()
@@ -1144,6 +1156,337 @@ def phase_flow_logic() -> None:
 
 
 # ---------------------------------------------------------------------------
+def phase_exit_hook() -> None:
+    """Fase cierre del launcher: WM_DELETE_WINDOW y emergency_shutdown (stubs).
+
+    Con un doble del Popen (PID falso) y ``kill_tree`` parcheado, verifica el
+    comportamiento SIEMPRE pedido por el dueño:
+    - cerrar la ventana mata el ÁRBOL del PID que el launcher lanzó
+      (taskkill por PID — JAMÁS por nombre: el server dedicado también es
+      iw4x.exe);
+    - tras la muerte intenta el upload del save (stub) UNA sola vez;
+    - la salida por try/finally del mainloop / atexit (``emergency_shutdown``)
+      hace lo mismo;
+    - sin juego vivo (sin flow, o juego ya muerto) el cierre no toca nada
+      (el upload lo hace el flujo post-sesión normal, sin duplicar);
+    - la secuencia es idempotente: la red de seguridad no repite kill/upload.
+    """
+    print("\n=== Fase cierre del launcher: kill tree + upload (stubs) ===")
+    import tempfile
+
+    import game_flow as gf
+
+    class StubProc:
+        """Doble del Popen del juego con PID falso (nunca un juego real)."""
+
+        def __init__(self, pid: int, exited: bool = False) -> None:
+            self.pid = pid
+            self._exited = exited
+            self.kill_calls = 0
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self.kill_calls += 1
+            self._exited = True
+
+    def make_game_dir() -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="iw4x-exit-"))
+        (tmp / "players").mkdir(parents=True)
+        (tmp / "players" / "iw4x.stat").write_bytes(
+            f"EXIT-PROGRESS-{time.time_ns()}".encode())
+        return tmp
+
+    def make_flow(game_dir: str, proc: StubProc):
+        events: List[Dict[str, Any]] = []
+        stub = StubApi()
+        flow = GameFlow(stub, "tok", r"C:\no\existe\iw4x.exe", "127.0.0.1:28961",
+                        events.append, already_linked=True, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        game_dir=game_dir)
+        flow._process = proc  # inyección: el "juego" que el launcher lanzó
+        return flow, stub, events
+
+    killed: List[Optional[int]] = []
+    procs_by_pid: Dict[int, StubProc] = {}
+    orig_kill_tree = gf.kill_tree
+
+    def fake_kill_tree(pid, timeout=None):
+        killed.append(pid)
+        p = procs_by_pid.get(pid)
+        if p is not None:
+            p._exited = True  # el árbol murió (como el taskkill /F real)
+        return True
+
+    gf.kill_tree = fake_kill_tree
+    try:
+        # --- Escenario A: juego vivo + cierre de ventana (WM_DELETE_WINDOW) --
+        dir_a = make_game_dir()
+        expected_a = (dir_a / "players" / "iw4x.stat").read_bytes()
+        proc_a = StubProc(424242)
+        procs_by_pid[424242] = proc_a
+        flow_a, stub_a, evs_a = make_flow(str(dir_a), proc_a)
+        holder_a: List[App] = []
+        console_a: List[str] = []
+
+        def step_close_a(app: App, done: Callable[[], None]) -> None:
+            holder_a.append(app)
+            orig_log_line = app.home_frame.log_line
+
+            def spy_log_line(text):
+                console_a.append(str(text))
+                orig_log_line(text)
+
+            app.home_frame.log_line = spy_log_line
+            app.flow = flow_a
+            # El "dueño" cierra la ventana: withdraw → kill tree → upload →
+            # "Cerrando…" → destroy (todo síncrono, presupuesto ~15s).
+            app._on_close()
+
+        run_phase("cierre con juego vivo (WM_DELETE_WINDOW)", [step_close_a],
+                  lambda: App(make_test_cfg(), ApiClient(API_URL),
+                              UserStore(STORE_PATH)))
+
+        logs_a = [str(e.get("msg", "")) for e in evs_a if e.get("t") == "log"]
+
+        def idx(msg: str) -> int:
+            return logs_a.index(msg) if msg in logs_a else -1
+
+        check("cierre ventana: killer invocado con el PID que lanzó el launcher",
+              killed == [424242], str(killed))
+        check("cierre ventana: kill SOLO por PID (nunca por nombre de imagen)",
+              all(isinstance(k, int) for k in killed), str(killed))
+        check("cierre ventana: el upload del save se intentó después (stub)",
+              stub_a.save_upload_calls >= 1, str(stub_a.save_upload_calls))
+        check("cierre ventana: el progreso llegó a la cuenta (stub)",
+              stub_a._save_store.get("iw4x.stat") == expected_a,
+              repr(stub_a._save_store.get("iw4x.stat"))[:60])
+        check("cierre ventana: log 'Launcher cerrado: juego detenido.'",
+              "Launcher cerrado: juego detenido." in logs_a, str(logs_a))
+        check("cierre ventana: log 'Progreso subido a tu cuenta ✓'",
+              "Progreso subido a tu cuenta ✓" in logs_a, str(logs_a))
+        check("cierre ventana: secuencia de logs kill → revisar → subido",
+              0 <= idx("Launcher cerrado: juego detenido.")
+              < idx("Juego cerrado: revisando tu progreso…")
+              < idx("Progreso subido a tu cuenta ✓"), str(logs_a))
+        check("cierre ventana: log 'Cerrando…' en la consola",
+              "Cerrando…" in console_a, str(console_a))
+        check("cierre ventana: upload UNA sola vez (sin duplicar)",
+              stub_a.save_upload_calls == 1 and flow_a._upload_result == "upload",
+              f"calls={stub_a.save_upload_calls} result={flow_a._upload_result}")
+        calls_before = stub_a.save_upload_calls
+        try:
+            holder_a[0].emergency_shutdown()  # red atexit tras destroy: no-op
+        except Exception as exc:
+            check("cierre idempotente: emergency_shutdown posterior no explota",
+                  False, str(exc))
+        check("cierre idempotente: la red de seguridad no repite kill/upload",
+              killed == [424242] and stub_a.save_upload_calls == calls_before,
+              f"killed={killed} calls={stub_a.save_upload_calls}")
+
+        # --- Escenario B: salida por finally del mainloop / atexit ----------
+        dir_b = make_game_dir()
+        proc_b = StubProc(424243)
+        procs_by_pid[424243] = proc_b
+        flow_b, stub_b, _evs_b = make_flow(str(dir_b), proc_b)
+
+        def step_exit_b(app: App, done: Callable[[], None]) -> None:
+            app.flow = flow_b
+            app.emergency_shutdown()  # misma secuencia, otra vía de salida
+
+        run_phase("salida por finally/atexit (emergency_shutdown)",
+                  [step_exit_b],
+                  lambda: App(make_test_cfg(), ApiClient(API_URL),
+                              UserStore(STORE_PATH)))
+
+        check("salida finally/atexit: también mata el juego lanzado",
+              killed == [424242, 424243], str(killed))
+        check("salida finally/atexit: intenta el upload del save (stub)",
+              stub_b.save_upload_calls >= 1, str(stub_b.save_upload_calls))
+
+        # --- Escenario C: sin juego vivo → el cierre no toca nada -----------
+        killed_before = len(killed)
+        dir_c = make_game_dir()
+        proc_dead = StubProc(424244, exited=True)  # juego YA muerto solo
+        flow_dead, stub_dead, evs_dead = make_flow(str(dir_c), proc_dead)
+
+        def step_no_flow(app: App, done: Callable[[], None]) -> None:
+            app._on_close()  # sin flow: cierre normal, sin kill/upload
+
+        def step_dead_game(app: App, done: Callable[[], None]) -> None:
+            app.flow = flow_dead
+            app._on_close()  # juego ya muerto: el post-sesión normal sube
+
+        run_phase("cierre sin flow", [step_no_flow],
+                  lambda: App(make_test_cfg(), ApiClient(API_URL),
+                              UserStore(STORE_PATH)))
+        run_phase("cierre con juego ya muerto", [step_dead_game],
+                  lambda: App(make_test_cfg(), ApiClient(API_URL),
+                              UserStore(STORE_PATH)))
+
+        check("sin juego vivo: el cierre NO invoca al killer",
+              len(killed) == killed_before, f"killed={killed}")
+        check("sin juego vivo: sin upload ni eventos (no duplica post-sesión)",
+              stub_dead.save_upload_calls == 0 and not evs_dead
+              and flow_dead._session_finalized is False
+              and flow_dead._upload_result is None,
+              f"calls={stub_dead.save_upload_calls} evs={evs_dead}")
+    finally:
+        gf.kill_tree = orig_kill_tree
+
+
+# ---------------------------------------------------------------------------
+def phase_autosave_close() -> None:
+    """Fase autosave + guardado final al cerrar (App real, API stub).
+
+    - Un tick del autosave con cambios sube ("Auto-guardado: progreso
+      sincronizado ✓" en la consola); sin cambios NO consulta la API
+      (caché de hashes); otro cambio vuelve a subir.
+    - Cerrar el launcher SIN juego vivo hace SIEMPRE el guardado final
+      (incondicional, presupuesto ~10s) y sube el último estado si cambió.
+    """
+    print("\n=== Fase autosave: ticks con/sin cambios + cierre sin juego ===")
+    import tempfile
+
+    holder: List[App] = []
+    holder_stub: List[StubApi] = []
+    console: List[str] = []
+    tick_results: List[Optional[str]] = []
+    manifest_calls = {"n": 0}
+    snap: Dict[str, int] = {}  # llamadas a la API vistas AL TERMINAR cada tick
+
+    def make_game_dir() -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="iw4x-autosmoke-"))
+        (tmp / "players").mkdir(parents=True)
+        return tmp
+
+    def wire_autosave_spy(app: App, game_dir: Path,
+                          sink: List[str]) -> StubApi:
+        """Conecta la App al stub: token, api y game_path de prueba."""
+        stub = StubApi()
+        orig_manifest = stub.save_manifest
+
+        def counting_manifest(token):
+            manifest_calls["n"] += 1
+            return orig_manifest(token)
+
+        stub.save_manifest = counting_manifest
+        app.cfg.set("game_path", str(game_dir / "iw4x.exe"))
+        app.token = "tok"
+        app.api = stub
+        orig_log_line = app.home_frame.log_line
+
+        def spy_log_line(text):
+            sink.append(str(text))
+            orig_log_line(text)
+
+        app.home_frame.log_line = spy_log_line
+        return stub
+
+    # --- S1: ticks del autosave (con cambios / sin cambios / otro cambio) ----
+    dir_s1 = make_game_dir()
+    stat_s1 = dir_s1 / "players" / "iw4x.stat"
+    stat_s1.write_bytes(b"AUTOSAVE-1")
+
+    def step_wire(app: App, done: Callable[[], None]) -> None:
+        holder.append(app)
+        holder_stub.append(wire_autosave_spy(app, dir_s1, console))
+        app.autosave.stop()  # ticks MANUALES acá: el ciclo no interfiere
+        done()
+
+    def step_tick1(app: App, done: Callable[[], None]) -> None:
+        tick_results.append(app.autosave.tick())  # local nuevo → upload
+        snap["calls_t1"] = holder_stub[0].save_upload_calls
+        snap["manifest_t1"] = manifest_calls["n"]
+        app.after(250, done)  # deja drenar post() → el log llega a la consola
+
+    def step_tick2(app: App, done: Callable[[], None]) -> None:
+        tick_results.append(app.autosave.tick())  # idéntico → skip sin API
+        snap["calls_t2"] = holder_stub[0].save_upload_calls
+        snap["manifest_t2"] = manifest_calls["n"]
+        done()
+
+    def step_tick3(app: App, done: Callable[[], None]) -> None:
+        stat_s1.write_bytes(b"AUTOSAVE-2")
+        tick_results.append(app.autosave.tick())  # cambió → upload de nuevo
+        app.after(250, done)
+
+    run_phase("autosave: ticks con y sin cambios",
+              [step_wire, step_tick1, step_tick2, step_tick3],
+              lambda: (STORE_PATH.unlink(missing_ok=True),
+                       App(make_test_cfg(), ApiClient(API_URL),
+                           UserStore(STORE_PATH)))[1])
+
+    stub1 = holder_stub[0]
+    check("autosave tick: con cambios sube (1er tick → 'upload')",
+          tick_results[:1] == ["upload"]
+          and snap.get("calls_t1") == 1 and snap.get("manifest_t1") == 1,
+          f"{tick_results} {snap}")
+    check("autosave tick: log 'Auto-guardado: progreso sincronizado ✓' "
+          "llega a la consola",
+          any("Auto-guardado: progreso sincronizado ✓" in x for x in console),
+          str(console))
+    check("autosave tick: sin cambios → 'skip-identical' y NI una llamada "
+          "más a la API",
+          tick_results[1:2] == ["skip-identical"]
+          and snap.get("manifest_t2") == 1 and snap.get("calls_t2") == 1,
+          f"{tick_results} {snap}")
+    check("autosave tick: nuevo cambio → sube el contenido nuevo",
+          tick_results[2:3] == ["upload"] and stub1.save_upload_calls == 2
+          and stub1._save_store.get("iw4x.stat") == b"AUTOSAVE-2",
+          f"{tick_results} store={stub1._save_store.get('iw4x.stat')!r}")
+    check("autosave wiring: contadores del manager de la App",
+          holder[0].autosave.upload_ticks == 2
+          and holder[0].autosave.ticks == 3
+          and holder[0].autosave.api_ticks == 2,
+          f"ticks={holder[0].autosave.ticks} "
+          f"api={holder[0].autosave.api_ticks} "
+          f"uploads={holder[0].autosave.upload_ticks}")
+
+    # --- S2: cierre SIN juego vivo → guardado final SIEMPRE ------------------
+    dir_s2 = make_game_dir()
+    (dir_s2 / "players" / "iw4x.stat").write_bytes(b"FINAL-SAVE-1")
+    holder2: List[App] = []
+    console2: List[str] = []
+    stub2_holder: List[StubApi] = []
+
+    def step_close_final(app: App, done: Callable[[], None]) -> None:
+        holder2.append(app)
+        stub2_holder.append(wire_autosave_spy(app, dir_s2, console2))
+        app._on_close()  # sin flow: skip kill → guardado final → Cerrando…
+
+    run_phase("cierre sin juego → guardado final", [step_close_final],
+              lambda: (STORE_PATH.unlink(missing_ok=True),
+                       App(make_test_cfg(), ApiClient(API_URL),
+                           UserStore(STORE_PATH)))[1])
+
+    stub2 = stub2_holder[0]
+    check("cierre sin juego: el guardado final sube el último estado (stub)",
+          stub2.save_upload_calls == 1
+          and stub2._save_store.get("iw4x.stat") == b"FINAL-SAVE-1",
+          f"calls={stub2.save_upload_calls} "
+          f"store={stub2._save_store.get('iw4x.stat')!r}")
+    check("cierre sin juego: log 'Progreso subido a tu cuenta ✓'",
+          "Progreso subido a tu cuenta ✓" in console2, str(console2))
+    check("cierre sin juego: log 'Cerrando…' al final",
+          "Cerrando…" in console2, str(console2))
+    calls_before = stub2.save_upload_calls
+    try:
+        holder2[0].emergency_shutdown()  # red atexit tras destroy: no-op
+    except Exception as exc:
+        check("cierre sin juego: emergency_shutdown posterior no explota",
+              False, str(exc))
+    check("cierre sin juego: la red de seguridad no repite el guardado final",
+          stub2.save_upload_calls == calls_before,
+          f"calls={stub2.save_upload_calls}")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     # Consola Windows (cp1252): nunca romper por caracteres Unicode.
     try:
@@ -1179,6 +1522,8 @@ def main() -> int:
     phase_play_linked()
     phase_save_sync()
     phase_flow_logic()
+    phase_exit_hook()
+    phase_autosave_close()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)
