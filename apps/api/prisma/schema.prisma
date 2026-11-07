@@ -15,11 +15,17 @@ model User {
   email        String        @unique
   passwordHash String
   displayName  String
+  /// Nick reservado: cleanName(displayName) en lowercase (strip códigos ^X).
+  /// Único case-insensitive → 409 NICK_TAKEN si otra cuenta lo usa.
+  /// Nullable solo por compatibilidad con filas previas a la migración;
+  /// register/PATCH SIEMPRE lo escriben (seed: npm run rebuild:identity).
+  displayNameNormalized String? @unique
   role         String        @default("USER") // USER | ADMIN (auto-grant vía ADMIN_EMAILS o script promote:admin)
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   accountLinks AccountLink[]
   linkAttempts LinkAttempt[]
+  identityAlerts IdentityAlert[]
 }
 
 /// Intento de vinculación cuenta↔GUID (POST /api/link/start)
@@ -52,11 +58,59 @@ model Player {
   bestStreak    Int         @default(0) // mejor racha de kills sin morir (aprox: solo eventos K almacenados)
   teamkills     Int         @default(0) // kills con ateam == vteam (fuente log)
   matchesPlayed Int         @default(0) // mapas distintos con actividad (eventos + sesiones, aprox)
+  /// true si el guid viene del rango dedicado a bots (0xb07…, mapeo de "botN").
+  /// Set por la ingesta del log; bootstrap: npm run rebuild:aliases.
+  isBot        Boolean     @default(false)
   firstConnection DateTime?
   lastConnection  DateTime?
   updatedAt       DateTime  @updatedAt
   accountLinks AccountLink[]
   sessions      Session[]
+  aliases       PlayerAlias[]
+}
+
+/// Alias histórico de nombres por GUID (PCs compartidas / renombres).
+/// Se puebla durante la ingesta del games_mp.log: cada línea J (guid+name) y
+/// cada K (atacante y víctima con guid; la víctima "world" no tiene guid → skip).
+/// @@unique([guid, name]) → una fila por par; occurrences cuenta apariciones.
+model PlayerAlias {
+  id          Int      @id @default(autoincrement())
+  guid        String
+  player      Player   @relation(fields: [guid], references: [guid], onDelete: Cascade)
+  name        String   // nombre EXACTO visto en el log (con códigos de color ^X)
+  firstSeenAt DateTime
+  lastSeenAt  DateTime
+  lastServer  String?  // etiqueta del server (GAME_SERVER_ADDRESS con fuente log)
+  occurrences Int      @default(0) // nº de apariciones (J + K) acumuladas
+
+  @@unique([guid, name])
+  @@index([guid])
+}
+
+/// Alerta de identidad (anti-impersonación de nick registrado): alguien — un
+/// guid NO vinculado al dueño — usó en el juego el displayName RESERVADO de una
+/// cuenta web. Se crea/actualiza en la ingesta del log (línea J, rama connect).
+/// Resolución MANUAL del admin (read/detect only en la ingesta):
+///  - LINK_TO_OWNER → crea AccountLink(owner, guid) y marca RESOLVED_OWNER.
+///  - DISMISS → marca DISMISSED (falso positivo o PC compartida declarada).
+///  - El "castigo al impostor" NO es endpoint propio: el frontend compone
+///    POST /api/admin/iam/penalty y luego resuelve con DISMISS.
+/// Dedupe: una sola fila OPEN por (guid, ownerUserId); resuelta, un nuevo uso
+/// del nick por el mismo guid crea una alerta nueva.
+model IdentityAlert {
+  id                       Int      @id @default(autoincrement())
+  guid                     String   // guid que USÓ el nombre reservado
+  name                     String   // nombre EXACTO visto en el log (última vez)
+  ownerUserId              Int
+  owner                    User     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  /// Snapshot (JSON array de guids) de los vínculos del dueño al detectarse.
+  ownerLinkedGuidsSnapshot String?
+  status                   String   @default("OPEN") // OPEN | RESOLVED_OWNER | RESOLVED_IMPOSTOR | DISMISSED
+  firstSeenAt              DateTime
+  lastSeenAt               DateTime
+  occurrences              Int      @default(0)
+
+  @@index([status, lastSeenAt])
 }
 
 /// Sesión de juego real: abre con J, cierra con Q (o ShutdownGame del mapa).

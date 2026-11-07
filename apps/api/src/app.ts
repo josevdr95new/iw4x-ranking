@@ -14,6 +14,10 @@ export function createApp(): express.Express {
       credentials: true,
     }),
   );
+  // Cloud save PUT: hasta 12 archivos × 256 KB base64 ≈ 3+ MB de JSON.
+  // Parser con límite mayor SOLO para /api/profile/save (body-parser salta la
+  // segunda pasada si el body ya fue parseado por req._body).
+  app.use('/api/profile/save', express.json({ limit: '12mb' }));
   app.use(express.json({ limit: '1mb' }));
 
   app.use('/api', apiRouter);

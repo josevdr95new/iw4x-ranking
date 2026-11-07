@@ -37,6 +37,8 @@ const envSchema = z.object({
   ADMIN_EMAILS: z.string().default(''),
   LINK_WINDOW_MINUTES: z.coerce.number().int().positive().default(10),
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
+  /** Raíz de almacenamiento del cloud save por cuenta (default: <repo>/apps/api/storage/profiles). */
+  PROFILE_STORAGE_DIR: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -85,6 +87,9 @@ export const env = {
   corsOrigins: raw.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0),
+  // Cloud save: rutas relativas se resuelven SIEMPRE contra la raíz del repo
+  // (determinista, independiente del cwd del proceso).
+  profileStorageDir: resolve(repoRoot, raw.PROFILE_STORAGE_DIR ?? resolve(repoRoot, 'apps', 'api', 'storage', 'profiles')),
 } as const;
 
 export type Env = typeof env;

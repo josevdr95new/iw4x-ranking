@@ -13,6 +13,10 @@ export interface SyncResult {
   durationMs: number;
   playersSynced: number;
   killEventsSynced: number;
+  /** Apariciones de alias (J + K) aplicadas a PlayerAlias por la fuente log. */
+  aliasesSynced: number;
+  /** Alertas de identidad (impersonación de nick) creadas/actualizadas por la fuente log. */
+  identityAlertsSynced: number;
   warnings: string[];
 }
 
@@ -76,6 +80,8 @@ export async function runSync(): Promise<SyncResult> {
   let ok = true;
   let playersSynced = 0;
   let killEventsSynced = 0;
+  let aliasesSynced = 0;
+  let identityAlertsSynced = 0;
   let syncError: unknown = null;
 
   const run = await prisma.syncRun.create({ data: { startedAt } });
@@ -212,6 +218,8 @@ export async function runSync(): Promise<SyncResult> {
         const logResult = await ingestGameLog(env.gameLogPath!, env.gameServerAddress ?? null);
         playersSynced += logResult.playersSynced;
         killEventsSynced += logResult.killEventsSynced;
+        aliasesSynced += logResult.aliasesUpserted;
+        identityAlertsSynced += logResult.identityAlertsUpserted;
         if (!logResult.ok) ok = false;
         if (logResult.linesIgnored > 0) {
           warnings.push(`[GameLog] ${logResult.linesIgnored} líneas no reconocidas (ignoradas).`);
@@ -265,6 +273,8 @@ export async function runSync(): Promise<SyncResult> {
     durationMs: Date.now() - startedAt.getTime(),
     playersSynced,
     killEventsSynced,
+    aliasesSynced,
+    identityAlertsSynced,
     warnings,
   };
 }

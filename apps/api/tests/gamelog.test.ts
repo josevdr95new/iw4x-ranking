@@ -154,6 +154,8 @@ describe('parseGameLogLine', () => {
       kind: 'kill',
       originGuid: BigInt('0xb94be6deca6c750c').toString(10),
       targetGuid: null,
+      originName: 'Mandango ProMax', // anti-confusión: nombre exacto del atacante para alias
+      targetName: null, // víctima world: vname vacío → null (sin alias de víctima)
       weapon: 'none',
       damage: 100,
       hitloc: 'none',

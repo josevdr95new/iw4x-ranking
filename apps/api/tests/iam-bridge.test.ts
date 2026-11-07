@@ -260,7 +260,7 @@ beforeAll(async () => {
     .send({ email: 'iam-admin@test.local', password: 'supersecret123', displayName: 'Iam Admin' });
   expect(admin.status).toBe(201);
   await prisma.user.update({ where: { email: 'iam-admin@test.local' }, data: { role: 'ADMIN' } });
-  const login = await req().post('/api/auth/login').send({ email: 'iam-admin@test.local', password: 'supersecret123' });
+  const login = await req().post('/api/auth/login').send({ identifier: 'Iam Admin', password: 'supersecret123' });
   adminToken = (login.body as { token: string }).token;
 
   const plebLogin = await registerUser('iam-pleb@test.local');

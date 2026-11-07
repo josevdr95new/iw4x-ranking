@@ -43,6 +43,10 @@ Todo error (4xx/5xx) responde:
 | `IAM_CLIENT_NOT_FOUND`   | 404  | Bridge: `clientId` inexistente o nombre sin match exacto |
 | `IAM_PENALTIES_DB_NOT_CONFIGURED` | 503 | Bridge: falta `IW4MADMIN_PENALTIES_DB_PATH` |
 | `IAM_PENALTIES_DB_UNAVAILABLE` | 503 | Bridge: la SQLite de IW4MAdmin no se pudo abrir (read-only) |
+| `SHA_MISMATCH`           | 400  | Cloud save: el `sha256` declarado no coincide con el hash real del contenido (server recalcula) |
+| `SAVE_NOT_FOUND`         | 404  | Cloud save: la cuenta nunca subió un save |
+| `SAVE_VERSION_NOT_FOUND` | 404  | Cloud save: la `version` pedida no existe o fue podada (se conservan las últimas 10) |
+| `SAVE_FILE_NOT_FOUND`    | 404  | Cloud save: ese `path` no está en la versión pedida |
 | `INTERNAL`               | 500  | Error no controlado |
 
 ---
@@ -63,6 +67,8 @@ Todo error (4xx/5xx) responde:
 
 ### `POST /api/auth/register`
 
+> El `email` es SOLO para gestión de la cuenta (recuperación, promoción admin). **NO es credencial de acceso**: el login es exclusivamente por nick.
+
 Request:
 
 ```json
@@ -70,6 +76,8 @@ Request:
 ```
 
 Validación: `email` válido (se normaliza a minúsculas), `password` 8–72, `displayName` 3–32.
+
+**Nick reservado**: el `displayName` se registra como único case-insensitive (comparación sobre `cleanName` = sin códigos de color `^X`, trim, lowercase). Si OTRO usuario ya lo reservó → `409 NICK_TAKEN` ("Ese nick ya está reservado por otra cuenta"). El propio usuario puede conservar/re-reservar su mismo nick (con o sin `^X` o mayúsculas distintas) sin error. Espacios de los extremos se recortan antes de comparar.
 
 Response **201**:
 
@@ -86,13 +94,24 @@ Response **201**:
 }
 ```
 
-Errores: `400 VALIDATION_ERROR`, `409 EMAIL_TAKEN`.
+Errores: `400 VALIDATION_ERROR`, `409 EMAIL_TAKEN`, `409 NICK_TAKEN` (nick reservado por OTRA cuenta).
 
-### `POST /api/auth/login`
+### `POST /api/auth/login` (SOLO por nick)
 
-Request: `{ "email": "player@example.com", "password": "..." }`
+**El login es exclusivamente por displayName (nick).** El email NO es credencial de acceso: solo sirve para gestión/recuperación/admin.
+
+Request (campo nuevo `identifier`):
+
+```json
+{ "identifier": "MiTag", "password": "..." }
+```
+
+- La búsqueda es por `displayNameNormalized` EXACTO (misma normalización del nick reservado: sin `^X`, trim, lowercase → login case-insensitive y tolerante a códigos de color).
+- **Compat transitoria**: el campo legacy `email` se acepta con el MISMO tratamiento — debe contener un NICK. Un email en el campo simplemente no coincide con ningún nick → `401` genérico.
+- El rol sigue leyéndose fresco en login (auto-grant ADMIN para emails en `ADMIN_EMAILS`).
+
 Response **200**: igual que register (`{ user, token }`).
-Errores: `400 VALIDATION_ERROR`, `401 INVALID_CREDENTIALS` (mismo código para email inexistente o password incorrecta).
+Errores: `400 VALIDATION_ERROR` (sin `identifier`/`email`, o <3/>64 chars), `401 INVALID_CREDENTIALS` (mismo código genérico para nick inexistente o password incorrecta — no se revela si el nick existe).
 
 ### `GET /api/auth/me` 🔒
 
@@ -136,7 +155,9 @@ Request (uno o ambos campos):
 
 Response **200**: `{ "user": { ...PublicUser } }` (misma forma que GET /me).
 
-Errores: `400 VALIDATION_ERROR` (displayName <3 chars, password <8, password sin `currentPassword`, body vacío), `401 INVALID_CREDENTIALS` si `currentPassword` no coincide.
+El nuevo `displayName` respeta la reserva de nick: si OTRO user ya lo tiene (case-insensitive, sin `^X`) → `409 NICK_TAKEN`; conservar el propio nunca choca.
+
+Errores: `400 VALIDATION_ERROR` (displayName <3 chars, password <8, password sin `currentPassword`, body vacío), `401 INVALID_CREDENTIALS` si `currentPassword` no coincide, `409 NICK_TAKEN`.
 ## Vinculación cuenta ↔ GUID (login juego→web)
 
 Flujo sin plugins: el usuario debe **jugar unos minutos** y luego, desde la web, buscar candidatos y confirmar cuál es su GUID.
@@ -231,6 +252,99 @@ Si ninguna entrada marca `isDefault`, la primera lo recibe. `source` ∈ `env | 
 
 ---
 
+## Cloud save de progresión (`/api/profile/*`) 🔒
+
+> Todas las rutas exigen JWT normal (`401` sin token). **Cada usuario solo accede a SU save**: el userId sale SIEMPRE del token, nunca del request. Es el mecanismo para que un jugador recupere su nivel/armas/clases en cualquier PC.
+
+**Qué se sincroniza** (paths whitelisted, el binario es data opaca del juego — la API solo valida ruta/tamaño/hash, NUNCA el contenido interno):
+
+| path relativo | Contenido |
+| ------------- | --------- |
+| `iw4x.stat` | Progresión (nivel/armas/clases, ~8.2 KB) |
+| `iw4x_config.cfg` | Preferencias + name (~14 KB) |
+| `mods/<mod>/iw4x.stat` | Progresión por mod (`<mod>` = `[A-Za-z0-9_-]+`) |
+
+**Reglas del contrato:**
+
+- El flush del `.stat` ocurre al FIN DE RONDA: **el PUT solo es válido con el juego CERRADO**. Verificarlo es responsabilidad del launcher (esperar muerte del proceso `iw4x.exe` antes de subir).
+- Cada archivo viaja con su `sha256`; el server **recalcula** el hash y rechaza con `400 SHA_MISMATCH` si no coincide.
+- Caps por PUT: 256 KB (string base64) por archivo, máximo 12 archivos, máximo 1 snapshot por ruta (sin duplicados).
+- Snapshots versionados por timestamp (`version` = ms epoch). Se conservan las **últimas 10 versiones** por cuenta (poda automática en cada PUT).
+- Si el PUT tiene exactamente los mismos archivos (todos los sha256 iguales) que la versión latest → `200 {saved:false, reason:"unchanged"}`, NO se crea versión nueva.
+- Storage en servidor: `PROFILE_STORAGE_DIR` (default `<repo>/apps/api/storage/profiles`), layout `<dir>/<userId>/<version>-<combinedSha256>/...` + `latest.json`. Escritura atómica (tmp+rename).
+
+### `GET /api/profile/save` 🔒 — manifiesto del último save
+
+Si la cuenta **nunca subió**, responde `200 { "exists": false }` (NO 404: para el launcher "primera vez en este PC" es un caso normal del flujo pre-launch).
+
+Response **200** (con save):
+
+```json
+{
+  "exists": true,
+  "version": 1770000000000,
+  "updatedAt": "2026-11-07T12:00:00.000Z",
+  "build": "iw4x-r4783",
+  "files": [
+    { "path": "iw4x.stat", "sha256": "<64 hex>", "size": 8388, "updatedAt": "2026-11-07T12:00:00.000Z" },
+    { "path": "iw4x_config.cfg", "sha256": "<64 hex>", "size": 14340, "updatedAt": "2026-11-07T12:00:00.000Z" },
+    { "path": "mods/mpu_iw4x/iw4x.stat", "sha256": "<64 hex>", "size": 8388, "updatedAt": "2026-11-07T12:00:00.000Z" }
+  ]
+}
+```
+
+### `PUT /api/profile/save` 🔒 — subir snapshot (juego cerrado)
+
+Request:
+
+```json
+{
+  "build": "iw4x-r4783",
+  "files": [
+    { "path": "iw4x.stat", "dataBase64": "<base64 ≤ 256KB>", "sha256": "<64 hex del contenido decodificado>" },
+    { "path": "iw4x_config.cfg", "dataBase64": "...", "sha256": "..." }
+  ]
+}
+```
+
+Errores: `400 VALIDATION_ERROR` (path fuera de whitelist — incluye todo intento de traversal `../`, absolutos y backslashes —, >12 archivos, base64 >256KB, ruta duplicada), `400 SHA_MISMATCH` (hash declarado ≠ contenido real).
+
+Response **200** (nuevo snapshot):
+
+```json
+{ "saved": true, "version": 1770000000000, "updatedAt": "2026-11-07T12:00:00.000Z", "files": [{ "path": "iw4x.stat", "sha256": "...", "size": 8388, "updatedAt": "..." }], "pruned": 1 }
+```
+
+Response **200** (idéntico al latest, no crea versión): `{ "saved": false, "reason": "unchanged", "version": ..., "updatedAt": ..., "files": [...], "pruned": 0 }`
+
+### `GET /api/profile/save/file?path=iw4x.stat&version=<ts opcional>` 🔒 — bajar binario
+
+- Sin `version` → la latest. Con `version` → esa versión exacta (rollback/diagnóstico).
+- `path` debe estar en la whitelist (mismo regex que el PUT).
+- Respuesta: **binario** (`Content-Type: application/octet-stream`) con headers `X-Save-Sha256` (hash del body) y `X-Save-Version`.
+- Errores: `400 VALIDATION_ERROR` (path inválido), `404 SAVE_NOT_FOUND` (nunca subió), `404 SAVE_VERSION_NOT_FOUND` (versión podada/inexistente), `404 SAVE_FILE_NOT_FOUND` (ese path no está en esa versión).
+
+### `GET /api/profile/save/versions` 🔒 — historial de versiones (diagnóstico)
+
+Response **200** (nueva primero; máximo 10):
+
+```json
+{
+  "versions": [
+    { "version": 1770000000000, "updatedAt": "2026-11-07T12:00:00.000Z", "build": "iw4x-r4783", "files": [{ "path": "iw4x.stat", "sha256": "...", "size": 8388, "updatedAt": "..." }] }
+  ]
+}
+```
+
+### Flujo recomendado para el launcher
+
+1. **Pre-launch**: `GET /api/profile/save` → si `exists:true`, comparar con el save local (hash local vs `files[].sha256`). Si el server es MÁS NUEVO que el local (`updatedAt` del server > mtime del local) y los hashes difieren → **conflicto explícito**: preguntar al jugador "¿Descargar progreso del servidor (X) o subir tu progreso local (Y)?". Nunca sobrescribir silenciosamente.
+2. **Download**: `GET /api/profile/save/file?path=...` por cada archivo del manifiesto, verificar `X-Save-Sha256` contra el body recibido, escribir en `players\` (o `players\mods\<mod>\`) solo con el juego cerrado.
+3. **Post-sesión**: esperar que el proceso del juego muera (el flush del `.stat` es al fin de ronda), recalcular sha256 de cada archivo local, `PUT /api/profile/save`.
+4. Si el PUT responde `saved:false, reason:"unchanged"` → no pasó nada, normal.
+
+---
+
 ## Admin (requiere rol ADMIN)
 
 > Todas las rutas bajo `/api/admin/*` exigen JWT + `role=ADMIN` (`401` sin token, `403 FORBIDDEN` con USER). El rol se lee fresco de la DB en cada request.
@@ -317,6 +431,140 @@ Reinicia el proceso del server dedicado ejecutando `SERVER_RESTART_COMMAND` (chi
 
 Response **200**: `{ "restarted": true, "command": "taskkill /F /IM iw4x.exe & ..." }`
 
+### `GET /api/admin/alias-conflicts` 🔒 ADMIN
+
+**Anti-confusión de identidades (read-only, sin acciones automáticas).** Comunidad con varias personas compartiendo PCs: detecta los DOS tipos de conflicto entre GUIDs y displayName.
+
+1. **`nameCollisions`**: un mismo displayName (comparación case-insensitive sobre el nombre LIMPIO, sin códigos `^X`) usado por **≥2 GUIDs distintos**. Ordenado por gravedad: primero `severity: "high"` = grupos donde **≥2 guids están linked a cuentas DISTINTAS** (dos personas reales peleándose el mismo alias); dentro de cada nivel, más cuentas implicadas y más guids primero.
+2. **`sharedGuids`**: un mismo GUID con **≥2 alias históricos distintos ≠ nombre actual** (señal de perfil compartido o renombrado en la misma PC).
+
+Response **200**:
+
+```json
+{
+  "nameCollisions": [
+    {
+      "nameKey": "snake",
+      "displayName": "Snake",
+      "distinctAccounts": 2,
+      "severity": "high",
+      "guids": [
+        {
+          "guid": "13352019364823201036",
+          "name": "Snake",
+          "linked": true,
+          "linkedAccountId": 3,
+          "linkedEmail": "a@test.local",
+          "isBot": false,
+          "lastSeenAt": "2026-11-07T02:27:33.838Z",
+          "occurrences": 9
+        },
+        {
+          "guid": "794603859254181889",
+          "name": "Snake^7",
+          "linked": false,
+          "linkedAccountId": null,
+          "linkedEmail": null,
+          "isBot": true,
+          "lastSeenAt": "2026-11-06T22:00:00.000Z",
+          "occurrences": 4
+        }
+      ]
+    }
+  ],
+  "sharedGuids": [
+    {
+      "guid": "794603859254181893",
+      "name": "/dev/sr0",
+      "linked": true,
+      "isBot": true,
+      "aliasCount": 3,
+      "aliases": [
+        { "name": "/dev/../", "firstSeenAt": "...", "lastSeenAt": "...", "occurrences": 2 },
+        { "name": "Snake", "firstSeenAt": "...", "lastSeenAt": "...", "occurrences": 1 }
+      ]
+    }
+  ],
+  "generatedAt": "2026-11-07T02:50:28.429Z"
+}
+```
+
+Notas para el frontend (vista `/admin`):
+
+- `nameKey`: clave normalizada (`cleanName` sin `^X`, lowercase). `displayName`: nombre EXACTO más reciente del grupo (para pintar).
+- `guids[]` del collision: por guid, `name` exacto más reciente con esa clave, `occurrences` SUMA de todas las variantes del nombre para ese guid.
+- `linkedEmail` SOLO existe aquí (endpoint ADMIN). `linkedAccountId` = id numérico de la cuenta.
+- `isBot` es heurística por rango de GUID (`0xb07…`, 15 chars hex): los bots del server rotan nombres de una POOL cada partida → generan MUCHAS colisiones y multi-alias FALSOS (ruido esperado). Filtra/colapsa `isBot: true` detrás de un toggle para no ahogar los conflictos reales entre humanos.
+- `severity: "high"` requiere cuentas DISTINTAS (2 personas reales); la misma cuenta linked a 2 guids con el mismo nombre es `low` (PC compartida declarada, no es conflicto).
+- `sharedGuids.aliases`: máx 10, orden `lastSeenAt` desc; `aliasCount` cuenta claves limpias distintas (puede exceder 10).
+- Nombres sin identidad (`""`, `unknown`) nunca generan conflictos.
+
+Errores: `401` sin token, `403` sin rol ADMIN.
+
+#### Bootstrap del historial (`npm run rebuild:aliases`)
+
+La tabla `PlayerAlias` se llena EN VIVO durante la ingesta del games_mp.log (líneas `J` y `K`). Para datos ya existentes corre `npm run rebuild:aliases`:
+
+- **Pasada A**: siembra el nombre actual de cada `Player` (occurrences ≈ `connections`, fechas first/lastConnection) y fija `Player.isBot` según el rango de guids de bots.
+- **Pasada B**: si `GAME_LOG_PATH` es accesible, re-escanea el log CRUDO desde el byte 0 y recupera nombres HISTÓRICOS (renombres) que ya no son el nombre actual. Ni `KillEvent` ni `Session` guardan nombres (solo guids), así que el log crudo es la única fuente de historial.
+- Es **IDEMPOTENTE**: todas las escrituras son monótonas (max/min o set absoluto) → re-ejecutar no infla `occurrences` ni regresa fechas.
+
+### `GET /api/admin/identity-alerts?status=&limit=` 🔒 ADMIN
+
+**Alertas de identidad (anti-impersonación de nick registrado).** Cuando un GUID que NO está vinculado al dueño usa en el juego el displayName RESERVADO de una cuenta web, la ingesta del log (línea `J`) crea/actualiza una alerta. Read-only en la detección; resolución manual.
+
+**Regla exacta** (rama `connect` de la ingesta): SÍ alerta si (a) `cleanName(name)` coincide con el `displayNameNormalized` de UN user, (b) el guid NO está en los AccountLink de ESE user (sus PCs declaradas nunca alertan), y (c) el guid NO es bot (`0xb07…`; los bots re-usan la pool de nombres constantemente). Caso borde: guid linked a OTRO user ≠ owner → SÍ alerta (impersonación clásica). Dedupe: una sola fila `OPEN` por (guid, ownerUserId); si ya estaba RESOLVED/DISMISSED, un nuevo uso crea una alerta NUEVA.
+
+Query params: `status` opcional (`OPEN` | `RESOLVED_OWNER` | `RESOLVED_IMPOSTOR` | `DISMISSED`; sin él devuelve todas), `limit` 1–200 (default 100), orden `lastSeenAt` desc.
+
+Response **200**:
+
+```json
+{
+  "alerts": [
+    {
+      "id": 1,
+      "guid": "13352019364823201036",
+      "name": "MiTag",
+      "status": "OPEN",
+      "firstSeenAt": "2026-11-07T03:00:00.000Z",
+      "lastSeenAt": "2026-11-07T06:30:00.000Z",
+      "occurrences": 4,
+      "owner": {
+        "id": 2,
+        "email": "player@example.com",
+        "displayName": "MiTag",
+        "linkedGuids": ["263534314041025950"]
+      },
+      "ownerLinkedGuidsSnapshot": ["263534314041025950"]
+    }
+  ],
+  "counts": { "OPEN": 1, "RESOLVED_OWNER": 0, "RESOLVED_IMPOSTOR": 0, "DISMISSED": 0 },
+  "total": 1
+}
+```
+
+- `owner.linkedGuids`: guids vinculados ACTUALES del dueño (para decidir el resolve). `ownerLinkedGuidsSnapshot`: guids del dueño al momento de detectarse (histórico).
+- `RESOLVED_IMPOSTOR` existe como estado reservado; hoy no lo escribe ningún endpoint.
+
+Errores: `401`, `403`, `400 VALIDATION_ERROR` (status fuera del enum).
+
+### `POST /api/admin/identity-alerts/:id/resolve` 🔒 ADMIN
+
+Body: `{ "action": "LINK_TO_OWNER" | "DISMISS" }`
+
+- **`LINK_TO_OWNER`**: crea `AccountLink(owner, guid)` (si el guid está libre) y marca `RESOLVED_OWNER`. Si el guid ya está vinculado a OTRA cuenta → `409 GUID_ALREADY_LINKED` con explicación (resolver manualmente; revisa al imposter con `GET /api/admin/iam/clients`).
+- **`DISMISS`**: marca `DISMISSED` (falso positivo / PC compartida declarada). 
+- Re-resolver una alerta no-OPEN → `409 ALERT_ALREADY_RESOLVED`. Alerta inexistente → `404 NOT_FOUND`.
+
+**"Castigar al impostor" NO es un endpoint nuevo**: el frontend compone el castigo con `POST /api/admin/iam/penalty` (bridge IW4MAdmin existente) contra el clientId del imposter, y luego llama este resolve con `DISMISS` para cerrar la alerta.
+
+Errores: `400 VALIDATION_ERROR`, `401`, `403`, `404`, `409 GUID_ALREADY_LINKED` / `409 ALERT_ALREADY_RESOLVED`.
+
+#### Bootstrap de alertas (`npm run rebuild:identity`)
+
+Pipeline idempotente en orden: normaliza `User.displayNameNormalized` para usuarios existentes (colisiones históricas → sufijo `-2`/`-3` reportado, el displayName visible NO cambia) → `rebuildAliases` (alias + `isBot`) → siembra `IdentityAlert` históricas desde `PlayerAlias` con las mismas reglas de la ingesta. Re-ejecutar no duplica.
+
 ---
 
 ## Leaderboard (público)
@@ -333,6 +581,9 @@ Query params (todos opcionales):
 | `page`      | ≥ 1 (default 1)                            |
 | `pageSize`  | 1–100 (default 20)                         |
 | `minMatches`| filtra `connections >= N` (default 0 = sin filtro) |
+| `includeBots` | `true` \| `false` (default **false**: el ranking público es SOLO-humanos; los bots están marcados con `Player.isBot` y excluidos) |
+
+> Los bots (guids del rango `0xb07…`) quedan fuera del leaderboard por defecto en TODOS los sorts (incluido `sort=skill`). Con `includeBots=true` vuelven a aparecer. Si el frontend necesita una vista "con bots", pásale el param y rotúlalo.
 
 Ejemplo: `GET /api/leaderboard?sort=kills&order=desc&page=1&pageSize=2`
 
@@ -445,6 +696,13 @@ Notas para el frontend:
 - Campos nuevos (fuente log): `headshots`/`headshotPct` (hitloc `head`/`helmet` sobre kills), `damageDealt`/`damageTaken` (suma de daño de líneas K + D), `bestStreak` (mejor racha de kills sin muerte intercalada; aprox: solo eventos K almacenados), `teamkills` (ateam == vteam), `matchesPlayed` (mapas distintos con actividad), `favoriteWeapon`/`favoriteMap` (arma/mapa con más kills; `null` sin actividad).
 - `timePlayed` (fuente log) = suma de sesiones reales J→Q (las abiertas cuentan como en curso, cap 4h).
 - `linked`: si el GUID tiene cuenta web vinculada.
+- `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres: si el leaderboard muestra dos filas con el mismo displayName (son 2 entidades/GUIDs distintas, es verdad), el perfil con `aliases` desambigua quién es quién.
+
+```json
+"aliases": [
+  { "name": "AlphaOld", "firstSeenAt": "2026-11-06T21:00:00.000Z", "lastSeenAt": "2026-11-07T01:30:00.000Z", "occurrences": 4 }
+]
+```
 
 Errores: `400 VALIDATION_ERROR` (GUID no numérico), `404 PLAYER_NOT_FOUND`.
 
@@ -809,24 +1067,31 @@ Jugadores conectados AHORA (el log del juego no da esto): servers con `players[]
 | ------ | ------------------------- | ---- | ----------- |
 | GET    | `/api/health`             | —    | Estado del servicio |
 | POST   | `/api/auth/register`      | —    | Registro (devuelve JWT; role USER/ADMIN según ADMIN_EMAILS) |
-| POST   | `/api/auth/login`         | —    | Login (devuelve JWT; auto-grant ADMIN si email ∈ ADMIN_EMAILS) |
+| POST   | `/api/auth/login`         | —    | Login SOLO por nick (`identifier` = displayName; campo legacy `email` aceptado con el mismo tratamiento). El email NO es credencial |
 | GET    | `/api/auth/me`            | ✅   | Usuario + `role` + `linkedGuid` (legacy) + `linkedGuids[]` con metadatos |
 | PATCH  | `/api/auth/me`            | ✅   | Cambiar `displayName` y/o `password` (valida la actual) |
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
 | POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula (MULTI-GUID) |
 | DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
-| GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable |
-| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor |
+| GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable (SOLO-humanos por defecto; `includeBots=true` para ver bots) |
+| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor + `aliases` históricos |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |
 | GET    | `/api/players/:guid/maps`    | — | Desglose por mapa del jugador + favorito |
 | GET    | `/api/weapons`            | —    | Ranking global de armas (kills/damage/victims/headshots) |
 | GET    | `/api/servers`            | —    | Lista de servers conocidos (env `SERVERS` o derivada) |
+| GET    | `/api/profile/save`       | ✅   | Manifiesto del último cloud save (`{exists:false}` si nunca subió) |
+| PUT    | `/api/profile/save`       | ✅   | Subir snapshot del save (juego CERRADO; valida sha256, caps y whitelist; poda a 10 versiones) |
+| GET    | `/api/profile/save/file`  | ✅   | Bajar binario (`?path=` whitelist, `?version=` opcional; header `X-Save-Sha256`) |
+| GET    | `/api/profile/save/versions` | ✅ | Historial de versiones retenidas (máx 10) |
 | POST   | `/api/sync`               | ✅   | Dispara sincronización (combina IW4MAdmin y/o games_mp.log) |
 | GET    | `/api/sync/status`        | —    | `{lastSyncAt, configured, intervalMinutes, windowMinutes}` (público) |
 | GET    | `/api/admin/server-config` | ADMIN | Parsea el server.cfg real a estructura JSON |
 | PUT    | `/api/admin/server-config` | ADMIN | Regenera el cfg (backup + escritura atómica; restart opcional) |
 | POST   | `/api/admin/server/restart` | ADMIN | Reinicia el server (requiere ALLOW_SERVER_CONTROL=1) |
+| GET    | `/api/admin/alias-conflicts` | ADMIN | Anti-confusión: colisiones de nombre entre GUIDs + guids con múltiples alias (read-only) |
+| GET    | `/api/admin/identity-alerts` | ADMIN | Alertas de identidad: guid ajeno usando un nick registrado (filtro `?status=`, read-only) |
+| POST   | `/api/admin/identity-alerts/:id/resolve` | ADMIN | `LINK_TO_OWNER` (vincula el guid al dueño) o `DISMISS`; el castigo al impostor va por `/iam/penalty` |
 | GET    | `/api/admin/iam/status`    | ADMIN | Diag del bridge IW4MAdmin (config/reachability/servers) |
 | GET    | `/api/admin/iam/clients`   | ADMIN | Búsqueda de clientes con penalidades abiertas y nivel |
 | GET    | `/api/admin/iam/penalties` | ADMIN | Historial reciente de warn/kick/tempban/ban/unban |

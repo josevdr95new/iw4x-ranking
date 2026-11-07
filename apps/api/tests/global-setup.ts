@@ -9,6 +9,8 @@ const apiRoot = resolve(here, '..');
 const prismaDir = resolve(apiRoot, 'prisma');
 const testDbFile = resolve(prismaDir, 'test.db');
 const mockDbFile = resolve(here, 'data', 'mock-iw4madmin.sqlite');
+// Mismo path que PROFILE_STORAGE_DIR de vitest.config (env de tests).
+const profilesStorageDir = resolve(here, 'data', 'profiles-storage');
 
 /**
  * Prepara el entorno de tests:
@@ -28,4 +30,8 @@ export default function globalSetup(): void {
   mkdirSync(dirname(mockDbFile), { recursive: true });
   rmSync(mockDbFile, { force: true });
   generateMockDb(mockDbFile, { players: 12, killEvents: 300, servers: 4, seed: 7, recentCandidates: 3 });
+
+  // Storage de cloud save limpio en cada run (PROFILE_STORAGE_DIR de vitest.config).
+  rmSync(profilesStorageDir, { recursive: true, force: true });
+  mkdirSync(profilesStorageDir, { recursive: true });
 }

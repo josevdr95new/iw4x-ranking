@@ -2,6 +2,8 @@ import { open, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { prisma } from '../../lib/prisma.js';
 import { errMessage } from '../../lib/errors.js';
+import { isBotGuid, upsertPlayerAlias } from '../alias.service.js';
+import { reportIdentityAlert } from '../identity.service.js';
 
 /**
  * Lector del games_mp.log del servidor dedicado IW4x (formato clásico IW).
@@ -63,6 +65,8 @@ export interface GameLogKill {
   kind: 'kill';
   originGuid: string;
   targetGuid: string | null; // null = world (vguid vacío)
+  originName: string; // nombre EXACTO del atacante (para historial de alias)
+  targetName: string | null; // nombre de la víctima; null = world (vname vacío)
   weapon: string | null;
   damage: number;
   hitloc: string | null;
@@ -209,9 +213,11 @@ export function parseGameLogLine(rawLine: string): GameLogEvent | null | 'ignore
   const originGuid = guidHexToDecimal(fields[0] ?? '');
   if (originGuid === null) return 'ignored';
 
+  const originName = (fields[3] ?? '').trim();
   const targetRaw = (fields[4] ?? '').trim();
   const targetGuid = targetRaw === '' ? null : guidHexToDecimal(targetRaw);
   if (targetRaw !== '' && targetGuid === null) return 'ignored'; // GUID víctima corrupto
+  const targetName = (fields[7] ?? '').trim() || null;
 
   const damage = toInt(fields[9]);
   const originTeam = (fields[2] ?? '').trim();
@@ -226,6 +232,8 @@ export function parseGameLogLine(rawLine: string): GameLogEvent | null | 'ignore
     kind: 'kill',
     originGuid,
     targetGuid,
+    originName,
+    targetName,
     weapon: (fields[8] ?? '').trim() || null,
     damage,
     hitloc,
@@ -289,6 +297,8 @@ export interface GameLogIngestResult {
   ok: boolean;
   playersSynced: number; // upserts de Player (conexiones/kills/deaths/daño)
   killEventsSynced: number; // KillEvent insertados
+  aliasesUpserted: number; // apariciones de alias (J + K) aplicadas a PlayerAlias
+  identityAlertsUpserted: number; // alertas de identidad (impersonación de nick) creadas/actualizadas
   sessionsOpened: number;
   sessionsClosed: number;
   linesParsed: number;
@@ -318,6 +328,7 @@ async function applyConnect(
     name: ev.name || 'unknown',
     lastServer: server,
     lastConnection: now,
+    isBot: isBotGuid(ev.guid), // rango dedicado 0xb07… → bot (set absoluto, idempotente)
   };
   await prisma.player.upsert({
     where: { guid: ev.guid },
@@ -357,15 +368,17 @@ async function existingPlayer(guid: string) {
 
 /** Incrementa un campo numérico del Player, creándolo si no existe. */
 async function incrementPlayer(guid: string, data: Record<string, number | { increment: number }>, now: Date): Promise<void> {
+  const withBot = { ...data, isBot: isBotGuid(guid) } as never;
   const existing = await existingPlayer(guid);
   if (existing) {
-    await prisma.player.update({ where: { guid }, data });
+    await prisma.player.update({ where: { guid }, data: withBot });
     return;
   }
   const create: Record<string, unknown> = { guid, firstConnection: now };
   for (const [key, value] of Object.entries(data)) {
     create[key] = typeof value === 'number' ? value : 1; // { increment: n } en creación = n
   }
+  create.isBot = isBotGuid(guid);
   await prisma.player.create({ data: create as never });
 }
 
@@ -442,6 +455,8 @@ export async function ingestGameLog(path: string, server: string | null): Promis
     ok: false,
     playersSynced: 0,
     killEventsSynced: 0,
+    aliasesUpserted: 0,
+    identityAlertsUpserted: 0,
     sessionsOpened: 0,
     sessionsClosed: 0,
     linesParsed: 0,
@@ -508,6 +523,13 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         const { opened } = await applyConnect(event, server, currentMap, currentGametype, now);
         if (opened) result.sessionsOpened += 1;
         result.playersSynced += 1;
+        // Historial de alias: cada J cuenta una aparición del (guid, name).
+        if (await upsertPlayerAlias({ guid: event.guid, name: event.name, server, when: now })) {
+          result.aliasesUpserted += 1;
+        }
+        // Anti-impersonación: ¿el cleanName es un nick REGISTRADO de otro user?
+        const alert = await reportIdentityAlert({ guid: event.guid, name: event.name, when: now });
+        if (alert.outcome !== 'skipped') result.identityAlertsUpserted += 1;
         touched.add(event.guid);
       } else if (event.kind === 'disconnect') {
         await prisma.player.updateMany({
@@ -562,11 +584,23 @@ export async function ingestGameLog(path: string, server: string | null): Promis
             },
           });
           result.killEventsSynced += 1;
+          // Alias por K: atacante + víctima real (suicidio → victimGuid ya es null;
+          // world → sin guid de víctima → solo atacante).
+          if (await upsertPlayerAlias({ guid: event.originGuid, name: event.originName, server, when: now })) {
+            result.aliasesUpserted += 1;
+          }
+          if (victimGuid !== null && (await upsertPlayerAlias({ guid: victimGuid, name: event.targetName ?? '', server, when: now }))) {
+            result.aliasesUpserted += 1;
+          }
           touched.add(event.originGuid);
           touched.add(victimGuid);
         } else {
           // world / suicidio: el "atacante" es quien muere o se daña.
           await incrementPlayer(event.originGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
+          // Alias del "atacante" (es quien muere); la víctima world no tiene guid → skip.
+          if (await upsertPlayerAlias({ guid: event.originGuid, name: event.originName, server, when: now })) {
+            result.aliasesUpserted += 1;
+          }
           touched.add(event.originGuid);
         }
         result.playersSynced += victimGuid !== null ? 2 : 1;

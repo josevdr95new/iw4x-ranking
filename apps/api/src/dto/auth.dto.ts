@@ -12,10 +12,33 @@ export const registerSchema = z.object({
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 
-export const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email('Email inválido'),
-  password: z.string().min(1, 'La contraseña es obligatoria'),
-});
+/**
+ * LOGIN solo por NICK (displayName reservado). El frontend nuevo envía
+ * `identifier` con el nick; el campo legacy `email` se acepta durante la
+ * transición con el MISMO tratamiento. Un email en el campo NO es credencial:
+ * no coincide con ningún nick → 401 genérico.
+ */
+export const loginSchema = z
+  .object({
+    /** Nick (displayName). Es el único método de acceso; el email no es credencial. */
+    identifier: z
+      .string()
+      .trim()
+      .min(3, 'El identifier debe tener al menos 3 caracteres')
+      .max(64, 'El identifier no puede superar 64 caracteres')
+      .optional(),
+    /** DEPRECATED (transición): mismo tratamiento que identifier (se espera un nick). */
+    email: z
+      .string()
+      .trim()
+      .min(3, 'El identifier debe tener al menos 3 caracteres')
+      .max(64, 'El identifier no puede superar 64 caracteres')
+      .optional(),
+    password: z.string().min(1, 'La contraseña es obligatoria'),
+  })
+  .refine((data) => data.identifier !== undefined || data.email !== undefined, {
+    message: 'Debes enviar identifier (tu nick) y password.',
+  });
 
 export type LoginInput = z.infer<typeof loginSchema>;
 

@@ -30,6 +30,8 @@ export default defineConfig({
       LINK_WINDOW_MINUTES: '10',
       CORS_ORIGIN: 'http://localhost:5173',
       ADMIN_EMAILS: 'admin-roles@test.local',
+      // Cloud save: storage aislado bajo tests/data (gitignored, se limpia en global-setup).
+      PROFILE_STORAGE_DIR: resolve(here, 'tests', 'data', 'profiles-storage'),
     },
   },
 });

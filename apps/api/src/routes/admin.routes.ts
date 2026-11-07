@@ -10,12 +10,15 @@ import {
   getRecentPenalties,
   searchClients,
 } from '../services/iam.service.js';
+import { getAliasConflicts } from '../services/alias.service.js';
 import {
   iamClientsQuery,
   iamLiveQuery,
   iamPenaltiesQuery,
   iamPenaltyInput,
 } from '../dto/iam.dto.js';
+import { identityAlertsQuery, identityAlertResolveInput, identityAlertIdParam } from '../dto/identity.dto.js';
+import { getIdentityAlerts, resolveIdentityAlert } from '../services/identity.service.js';
 
 export const adminRouter: Router = Router();
 
@@ -40,6 +43,34 @@ adminRouter.post(
   '/server/restart',
   asyncHandler(async (_req, res) => {
     res.json(await restartServer());
+  }),
+);
+
+// Anti-confusión de identidades (read-only): colisiones de nombre entre GUIDs
+// y guids con múltiples alias históricos (PCs compartidas / renombres).
+adminRouter.get(
+  '/alias-conflicts',
+  asyncHandler(async (_req, res) => {
+    res.json(await getAliasConflicts());
+  }),
+);
+
+// ── Alertas de identidad (impersonación de nick registrado) ─────────────────
+
+adminRouter.get(
+  '/identity-alerts',
+  validate(identityAlertsQuery, 'query'),
+  asyncHandler(async (req, res) => {
+    res.json(await getIdentityAlerts(req.query as unknown as Parameters<typeof getIdentityAlerts>[0]));
+  }),
+);
+
+adminRouter.post(
+  '/identity-alerts/:id/resolve',
+  asyncHandler(async (req, res) => {
+    const { id } = parseWith(identityAlertIdParam, req.params);
+    const { action } = parseWith(identityAlertResolveInput, req.body ?? {});
+    res.json(await resolveIdentityAlert(id, action));
   }),
 );
 

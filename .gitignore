@@ -21,6 +21,10 @@ Database/
 
 # Tests temporales
 tests/data/
+apps/api/tests/data/
+
+# Cloud save storage (binarios de perfil subidos por usuarios — NUNCA al repo)
+apps/api/storage/
 
 # Logs
 *.log

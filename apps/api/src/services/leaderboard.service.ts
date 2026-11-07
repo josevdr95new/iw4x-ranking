@@ -36,6 +36,8 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
   const q = parseWith(leaderboardQuerySchema, query ?? {});
 
   const where: Prisma.PlayerWhereInput = {
+    // Por defecto el ranking público es SOLO-humanos; includeBots=true trae bots.
+    ...(q.includeBots ? {} : { isBot: false }),
     ...(q.minMatches > 0 ? { connections: { gte: q.minMatches } } : {}),
     // SQLite compila "contains" a LIKE: case-insensitive para ASCII.
     ...(q.search ? { name: { contains: q.search } } : {}),

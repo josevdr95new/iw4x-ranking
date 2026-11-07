@@ -12,6 +12,8 @@
     "db:studio": "prisma studio",
     "sync": "tsx src/scripts/run-sync.ts",
     "recompute:skill": "tsx src/scripts/recompute-skill.ts",
+    "rebuild:aliases": "tsx src/scripts/rebuild-aliases.ts",
+    "rebuild:identity": "tsx src/scripts/rebuild-identity.ts",
     "promote:admin": "tsx src/scripts/promote-admin.ts",
     "test": "vitest run",
     "postinstall": "prisma generate"

@@ -30,7 +30,7 @@ describe('Roles de admin (ADMIN_EMAILS + requireAdmin)', () => {
     // para la cuenta admin (role sigue ADMIN tras login).
     const login = await req()
       .post('/api/auth/login')
-      .send({ email: ADMIN_EMAIL, password: 'supersecret123' });
+      .send({ identifier: 'Boss', password: 'supersecret123' });
     expect(login.status).toBe(200);
     expect((login.body as { user: { role: string } }).user.role).toBe('ADMIN');
   });
@@ -51,7 +51,7 @@ describe('Roles de admin (ADMIN_EMAILS + requireAdmin)', () => {
   });
 
   it('token ADMIN pasa el gate de rol (llega al servicio; sin SERVER_CFG_PATH → 503 claro)', async () => {
-    const login = await req().post('/api/auth/login').send({ email: ADMIN_EMAIL, password: 'supersecret123' });
+    const login = await req().post('/api/auth/login').send({ identifier: 'Boss', password: 'supersecret123' });
     const token = (login.body as { token: string }).token;
 
     const savedPath = process.env.SERVER_CFG_PATH;
@@ -76,7 +76,7 @@ describe('Roles de admin (ADMIN_EMAILS + requireAdmin)', () => {
 
     const login = await req()
       .post('/api/auth/login')
-      .send({ email: 'promote-me@test.local', password: 'supersecret123' });
+      .send({ identifier: 'Promotable', password: 'supersecret123' });
     expect((login.body as { user: { role: string } }).user.role).toBe('ADMIN');
 
     execSync('npx tsx src/scripts/promote-admin.ts promote-me@test.local --demote', {
@@ -86,7 +86,7 @@ describe('Roles de admin (ADMIN_EMAILS + requireAdmin)', () => {
     });
     const login2 = await req()
       .post('/api/auth/login')
-      .send({ email: 'promote-me@test.local', password: 'supersecret123' });
+      .send({ identifier: 'Promotable', password: 'supersecret123' });
     expect((login2.body as { user: { role: string } }).user.role).toBe('USER');
   }, 30_000);
 });

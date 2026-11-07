@@ -12,6 +12,8 @@ export function req(): request.Test {
 export async function resetDb(): Promise<void> {
   await prisma.killEvent.deleteMany();
   await prisma.session.deleteMany();
+  await prisma.playerAlias.deleteMany();
+  await prisma.identityAlert.deleteMany();
   await prisma.accountLink.deleteMany();
   await prisma.linkAttempt.deleteMany();
   await prisma.player.deleteMany();
@@ -29,7 +31,9 @@ export interface TestUser {
 export async function registerUser(
   email: string,
   password = 'supersecret123',
-  displayName = 'Tester',
+  // El nick (displayName) es ÚNICO case-insensitive: por defecto se deriva del
+  // email (único por test) para que nunca choque el NICK_TAKEN entre helpers.
+  displayName = email.split('@')[0] ?? email,
 ): Promise<TestUser> {
   const res = await req()
     .post('/api/auth/register')

@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
 import { signToken } from '../lib/jwt.js';
+import { normalizeDisplayName } from './alias.service.js';
 import type { LoginInput, RegisterInput, UpdateProfileInput } from '../dto/auth.dto.js';
 
 const userInclude = {
@@ -58,12 +59,17 @@ async function applyAdminEmailGrant(user: UserWithLinks): Promise<UserWithLinks>
 
 export async function registerUser(input: RegisterInput): Promise<AuthResult> {
   const passwordHash = await hashPassword(input.password);
+  // Nick RESERVADO: cleanName(displayName) único case-insensitive entre cuentas.
+  const displayNameNormalized = normalizeDisplayName(input.displayName);
+  const nickClash = await prisma.user.findUnique({ where: { displayNameNormalized } });
+  if (nickClash) throw Errors.nickTaken();
   try {
     let user = await prisma.user.create({
       data: {
         email: input.email,
         passwordHash,
         displayName: input.displayName,
+        displayNameNormalized,
         // Auto-grant en el registro: los emails de ADMIN_EMAILS nacen ADMIN.
         role: env.adminEmails.includes(input.email.toLowerCase()) ? 'ADMIN' : 'USER',
       },
@@ -73,23 +79,37 @@ export async function registerUser(input: RegisterInput): Promise<AuthResult> {
     return { user: toPublicUser(user), token: signToken({ sub: user.id }) };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      // Carrera: decide el código según el índice que falló.
+      const target = String((err.meta as { target?: unknown } | null)?.target ?? '');
+      if (target.includes('displayNameNormalized')) throw Errors.nickTaken();
       throw Errors.emailTaken();
     }
     throw err;
   }
 }
 
+/**
+ * LOGIN SOLO POR NICK (displayName): `identifier` es SIEMPRE un displayName y
+ * se busca ÚNICAMENTE por `displayNameNormalized` (cleanName + lowercase). El
+ * email NO es credencial de acceso (solo gestión/recuperación/admin): si llega
+ * un email en el campo, normalizado no coincide con ningún nick → error
+ * genérico. El campo legacy `email` recibe el MISMO tratamiento (compat
+ * transitoria con frontend/launcher viejos). Errores SIEMPRE genéricos.
+ */
 export async function loginUser(input: LoginInput): Promise<AuthResult> {
-  let user = await prisma.user.findUnique({
-    where: { email: input.email },
+  const nick = (input.identifier ?? input.email ?? '').trim();
+  if (nick === '') throw Errors.invalidCredentials();
+
+  const user = await prisma.user.findUnique({
+    where: { displayNameNormalized: normalizeDisplayName(nick) },
     include: userInclude,
   });
   if (!user) throw Errors.invalidCredentials();
   const passwordOk = await verifyPassword(input.password, user.passwordHash);
   if (!passwordOk) throw Errors.invalidCredentials();
   // Auto-grant también en login: cubre cuentas creadas antes de configurar ADMIN_EMAILS.
-  user = await applyAdminEmailGrant(user);
-  return { user: toPublicUser(user), token: signToken({ sub: user.id }) };
+  const granted = await applyAdminEmailGrant(user);
+  return { user: toPublicUser(granted), token: signToken({ sub: granted.id }) };
 }
 
 export async function getUserPublic(userId: number): Promise<PublicUser> {
@@ -143,8 +163,15 @@ export async function updateProfile(userId: number, input: UpdateProfileInput): 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw Errors.userNotFound();
 
-  const data: { displayName?: string; passwordHash?: string } = {};
-  if (input.displayName !== undefined) data.displayName = input.displayName;
+  const data: { displayName?: string; displayNameNormalized?: string; passwordHash?: string } = {};
+  if (input.displayName !== undefined) {
+    // Nick reservado: si el nombre normalizado ya lo usa OTRO user → 409 (el propio no choca).
+    const displayNameNormalized = normalizeDisplayName(input.displayName);
+    const nickClash = await prisma.user.findUnique({ where: { displayNameNormalized } });
+    if (nickClash && nickClash.id !== userId) throw Errors.nickTaken();
+    data.displayName = input.displayName;
+    data.displayNameNormalized = displayNameNormalized;
+  }
   if (input.password !== undefined) {
     const currentOk = await verifyPassword(input.currentPassword ?? '', user.passwordHash);
     if (!currentOk) throw Errors.invalidCredentials('La contraseña actual no es correcta.');
@@ -154,6 +181,13 @@ export async function updateProfile(userId: number, input: UpdateProfileInput): 
     return toPublicUser(await prisma.user.findUniqueOrThrow({ where: { id: userId }, include: userInclude }));
   }
 
-  const updated = await prisma.user.update({ where: { id: userId }, data, include: userInclude });
-  return toPublicUser(updated);
+  try {
+    const updated = await prisma.user.update({ where: { id: userId }, data, include: userInclude });
+    return toPublicUser(updated);
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw Errors.nickTaken(); // carrera contra otra cuenta que reservó el nick
+    }
+    throw err;
+  }
 }

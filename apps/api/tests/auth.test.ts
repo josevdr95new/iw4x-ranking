@@ -57,32 +57,129 @@ describe('POST /api/auth/register', () => {
   });
 });
 
-describe('POST /api/auth/login', () => {
-  it('devuelve token con credenciales válidas', async () => {
+describe('Nick reservado (displayName único case-insensitive → 409 NICK_TAKEN)', () => {
+  it('rechaza registro con nick EXACTO ya reservado → 409 NICK_TAKEN', async () => {
+    const res = await req()
+      .post('/api/auth/register')
+      .send({ email: 'otro@test.local', password: 'supersecret123', displayName: 'Player One' });
+
+    expect(res.status).toBe(409);
+    const body = res.body as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('NICK_TAKEN');
+    expect(body.error.message).toContain('reservado');
+  });
+
+  it('rechaza el nick con CASE distinto y con códigos de color ^X (misma clave limpia)', async () => {
+    const caseDiff = await req()
+      .post('/api/auth/register')
+      .send({ email: 'case@test.local', password: 'supersecret123', displayName: 'PLAYER ONE' });
+    expect(caseDiff.status).toBe(409);
+    expect((caseDiff.body as { error: { code: string } }).error.code).toBe('NICK_TAKEN');
+
+    const withCodes = await req()
+      .post('/api/auth/register')
+      .send({ email: 'codes@test.local', password: 'supersecret123', displayName: 'Player One^7' });
+    expect(withCodes.status).toBe(409);
+  });
+
+  it('trim: espacios alrededor no evitan la colisión (y el nombre se guarda trimado)', async () => {
+    const trimmed = await req()
+      .post('/api/auth/register')
+      .send({ email: 'trim@test.local', password: 'supersecret123', displayName: '  Trim Test  ' });
+    expect(trimmed.status).toBe(201);
+    expect((trimmed.body as { user: { displayName: string } }).user.displayName).toBe('Trim Test');
+
+    const clash = await req()
+      .post('/api/auth/register')
+      .send({ email: 'trim2@test.local', password: 'supersecret123', displayName: '  trim test ' });
+    expect(clash.status).toBe(409);
+    expect((clash.body as { error: { code: string } }).error.code).toBe('NICK_TAKEN');
+  });
+
+  it('PATCH: cambiar al nick de OTRO user → 409; conservar el propio → 200', async () => {
+    const mine = await registerUser('nick-own@test.local', 'supersecret123', 'My Own Nick');
+
+    const taken = await req()
+      .patch('/api/auth/me')
+      .set('Authorization', `Bearer ${mine.token}`)
+      .send({ displayName: 'Player One' });
+    expect(taken.status).toBe(409);
+    expect((taken.body as { error: { code: string } }).error.code).toBe('NICK_TAKEN');
+
+    const self = await req()
+      .patch('/api/auth/me')
+      .set('Authorization', `Bearer ${mine.token}`)
+      .send({ displayName: 'My Own Nick' }); // el propio no choca consigo
+    expect(self.status).toBe(200);
+    expect((self.body as { user: { displayName: string } }).user.displayName).toBe('My Own Nick');
+
+    // Con códigos de color alrededor también es "el propio" (misma clave limpia).
+    const selfCodes = await req()
+      .patch('/api/auth/me')
+      .set('Authorization', `Bearer ${mine.token}`)
+      .send({ displayName: 'My^7 Own^3 Nick^1' });
+    expect(selfCodes.status).toBe(200);
+  });
+});
+
+describe('POST /api/auth/login (SOLO por nick: el email NO es credencial)', () => {
+  it('devuelve token con nick + password correctos (identifier)', async () => {
     const res = await req()
       .post('/api/auth/login')
-      .send({ email: 'player1@test.local', password: 'supersecret123' });
+      .send({ identifier: 'Player One', password: 'supersecret123' });
 
     expect(res.status).toBe(200);
     expect(typeof (res.body as { token: string }).token).toBe('string');
   });
 
+  it('login por nick es case-insensitive (normalización cleanName+lower)', async () => {
+    const res = await req()
+      .post('/api/auth/login')
+      .send({ identifier: 'player ONE', password: 'supersecret123' });
+    expect(res.status).toBe(200);
+
+    const withCodes = await req()
+      .post('/api/auth/login')
+      .send({ identifier: 'Player One^7', password: 'supersecret123' }); // códigos ^X se limpian
+    expect(withCodes.status).toBe(200);
+  });
+
+  it('campo legacy `email` con un NICK sigue funcionando (compat transitoria)', async () => {
+    const res = await req()
+      .post('/api/auth/login')
+      .send({ email: 'Player One', password: 'supersecret123' });
+    expect(res.status).toBe(200);
+  });
+
+  it('un EMAIL en el campo NO es credencial → 401 genérico (solo gestiona, no accede)', async () => {
+    const res = await req()
+      .post('/api/auth/login')
+      .send({ identifier: 'player1@test.local', password: 'supersecret123' });
+    expect(res.status).toBe(401);
+    expect((res.body as { error: { code: string } }).error.code).toBe('INVALID_CREDENTIALS');
+  });
+
   it('rechaza password incorrecta con 401 INVALID_CREDENTIALS', async () => {
     const res = await req()
       .post('/api/auth/login')
-      .send({ email: 'player1@test.local', password: 'incorrecta-123' });
+      .send({ identifier: 'Player One', password: 'incorrecta-123' });
 
     expect(res.status).toBe(401);
     expect((res.body as { error: { code: string } }).error.code).toBe('INVALID_CREDENTIALS');
   });
 
-  it('rechaza email inexistente con 401 (sin filtrar existencia)', async () => {
+  it('rechaza nick inexistente con 401 (sin filtrar existencia)', async () => {
     const res = await req()
       .post('/api/auth/login')
-      .send({ email: 'fantasma@test.local', password: 'supersecret123' });
+      .send({ identifier: 'Fantasma Que No Existe', password: 'supersecret123' });
 
     expect(res.status).toBe(401);
     expect((res.body as { error: { code: string } }).error.code).toBe('INVALID_CREDENTIALS');
+  });
+
+  it('rechaza body sin identifier con 400', async () => {
+    const res = await req().post('/api/auth/login').send({ password: 'supersecret123' });
+    expect(res.status).toBe(400);
   });
 });
 
@@ -132,10 +229,10 @@ describe('PATCH /api/auth/me (perfil de usuario)', () => {
     const ok = await req().patch('/api/auth/me').set('Authorization', `Bearer ${token}`).send({ currentPassword: 'supersecret123', password: 'nuevapassword1' });
     expect(ok.status).toBe(200);
 
-    // La vieja ya no sirve; la nueva sí.
-    const oldLogin = await req().post('/api/auth/login').send({ email: 'pwchange@test.local', password: 'supersecret123' });
+    // La vieja ya no sirve; la nueva sí (login por NICK 'PW Change').
+    const oldLogin = await req().post('/api/auth/login').send({ identifier: 'PW Change', password: 'supersecret123' });
     expect(oldLogin.status).toBe(401);
-    const newLogin = await req().post('/api/auth/login').send({ email: 'pwchange@test.local', password: 'nuevapassword1' });
+    const newLogin = await req().post('/api/auth/login').send({ identifier: 'PW Change', password: 'nuevapassword1' });
     expect(newLogin.status).toBe(200);
   });
 

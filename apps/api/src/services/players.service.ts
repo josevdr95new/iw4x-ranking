@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { clampInt, GUID_PATTERN } from '../lib/validation.js';
 import { computeDefaultRank } from './ranking.service.js';
+import { getPlayerAliases, type PlayerAliasDto } from './alias.service.js';
 
 type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true } } } }>;
 
@@ -60,6 +61,11 @@ export interface PlayerProfileDto {
   rank: number | null;
   recentEvents: KillEventDto[];
   byServer: Array<{ server: string; kills: number; deaths: number }>;
+  /**
+   * Anti-confusión: nombres HISTÓRICOS vistos para este GUID (excluye el nombre
+   * actual, último visto primero, máx 10). Detecta PCs compartidas / renombres.
+   */
+  aliases: PlayerAliasDto[];
 }
 
 export interface PlayerHistoryDto {
@@ -127,7 +133,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   });
 
   // Favoritos del resumen (arma/mapa con más kills, empate por daño).
-  const [weaponRows, mapRows] = await Promise.all([
+  const [weaponRows, mapRows, aliases] = await Promise.all([
     prisma.killEvent.groupBy({
       by: ['weapon'],
       where: { originGuid: guid, isKill: true, weapon: { not: null } },
@@ -140,6 +146,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
       _count: { _all: true },
       _sum: { damage: true },
     }),
+    getPlayerAliases(guid, player.name),
   ]);
   const favoriteWeapon =
     weaponRows
@@ -194,6 +201,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     rank,
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),
+    aliases,
   };
 }
 
