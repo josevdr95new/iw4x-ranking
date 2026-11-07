@@ -1,7 +1,13 @@
-"""Prueba de humo del launcher contra la API real.
+"""Prueba de humo del launcher contra la API real (E2E / GUI).
 
 Uso:
-    py apps\\launcher\\test_smoke.py
+    py apps\\launcher\\tests\\test_smoke.py
+
+NOTA de reparto: este archivo contiene SOLO checks híbridos/E2E (con red o
+GUI). Las funciones puras sin redes viven en tests/test_units.py — se
+extrajeron sin cambiar nada semánticamente: candidate_matches,
+pick_candidate, save_sync (mapeo/hashes/decisión/caps/detect_build),
+build_game_args y los defaults/merge de app_config.
 
 Requisitos: la API debe estar corriendo (por defecto http://localhost:3000).
 
@@ -19,7 +25,11 @@ Qué verifica:
   7. (lógica)   GameFlow con API simulada: match de nick → auto-confirm
                 (desambiguado por recencia); sin match → timeout con copy
                 de nick; 409 ya verificada → éxito; API caída → retry.
-  8. (lógica)   pick_candidate: normalización ^X, recencia, vacío.
+  8. (lógica)   pick_candidate: se testea EN UNITS (tests/test_units.py).
+
+Híbridos que quedan aquí (con red/GUI o estado): pipeline stub de
+cloud-sync, todas las fases GUI, fases headless contra la API real y los
+flujos GameFlow con StubApi.
 
 Cuenta de prueba: launcher-test@test.local / LauncherTest2026
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
@@ -35,20 +45,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 import customtkinter as ctk
 
-# Importa los módulos del launcher (mismo directorio).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Importa los módulos del launcher (directorio padre del paquete tests/).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from api_client import ApiClient, ApiError, NetworkError, user_is_linked  # noqa: E402
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
 from game_flow import GameFlow, build_game_args, candidate_matches, pick_candidate  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
 import save_sync as ss  # noqa: E402
-from save_sync import (  # noqa: E402
-    build_upload_files,
-    decide_sync,
-    local_save_files,
-    sha256_of,
-)
+from save_sync import decide_sync  # noqa: E402
 from ui.main_window import App  # noqa: E402
 from user_store import UserStore  # noqa: E402
 
@@ -826,121 +831,15 @@ def flow_once(stub: StubApi, poll_interval: float = 0.4, poll_max: float = 1.2,
 
 
 def phase_save_sync() -> None:
-    """Fase cloud-sync: puras (mapeo/hashes/decisión/caps), stub pipeline y
-    E2E contra la API real (PUT → manifest → download → upload post-sesión)."""
-    print("\n=== Fase cloud-sync (puras + stub + API real) ===")
+    """Fase cloud-sync HÍBRIDA: pipeline stub + E2E contra la API real
+    (PUT → manifest → download → upload post-sesión).
+    Las puras (mapeo/hashes/decisión/caps/detect_build) están en test_units.py."""
+    print("\n=== Fase cloud-sync (stub + API real) ===")
     import base64
     import hashlib
     import tempfile
 
-    # --- Puras: mapeo de paths con mods dinámicos ---------------------------
     tmp = Path(tempfile.mkdtemp(prefix="iw4x-sync-"))
-    game_dir = tmp / "game"
-    (game_dir / "players" / "mods" / "m1").mkdir(parents=True)
-    (game_dir / "players" / "iw4x.stat").write_bytes(b"local")
-    guid_path = str(tmp / "localapp" / "iw4x" / "guid.dat")
-    m = local_save_files(str(game_dir), guid_path=guid_path)
-    check("mapeo: guid.dat + 2 base + stat y config de mods dinámicos",
-          set(m) == {"guid.dat", "iw4x.stat", "iw4x_config.cfg",
-                     "mods/m1/iw4x.stat", "mods/m1/iw4x_config.cfg"},
-          str(set(m)))
-    check("mapeo: guid.dat apunta a la ruta inyectada",
-          m["guid.dat"] == guid_path, m["guid.dat"])
-    m2 = local_save_files(str(game_dir), mods=["m2"], guid_path=guid_path)
-    check("mapeo: mods inyectados (stat y config, solo los pedidos)",
-          "mods/m2/iw4x.stat" in m2 and "mods/m2/iw4x_config.cfg" in m2
-          and "mods/m1/iw4x.stat" not in m2, str(set(m2)))
-    m3 = local_save_files(str(tmp / "vacio"))
-    check("mapeo: sin carpeta mods → guid + 2 base",
-          set(m3) == {"guid.dat", "iw4x.stat", "iw4x_config.cfg"}, str(set(m3)))
-    from save_sync import default_guid_path
-    check("mapeo: guid por defecto vive en %LOCALAPPDATA%\\iw4x\\guid.dat",
-          default_guid_path().lower().endswith("iw4x\\guid.dat"),
-          default_guid_path())
-
-    # --- Puras: hashes -------------------------------------------------------
-    f = tmp / "f.bin"
-    f.write_bytes(b"abc")
-    check("sha256_of contenido conocido",
-          sha256_of(str(f)) == hashlib.sha256(b"abc").hexdigest())
-    check("sha256_of inexistente → None",
-          sha256_of(str(tmp / "nope")) is None)
-
-    # --- Puras: matriz de decisión -------------------------------------------
-    full = {"exists": True, "version": 5,
-            "updatedAt": "2026-11-07T10:00:00.000Z",
-            "files": [{"path": "iw4x.stat", "sha256": "AAA"},
-                      {"path": "iw4x_config.cfg", "sha256": "BBB"}]}
-    a, _ = decide_sync(full, {})
-    check("decide: local vacío + server → download", a == "download", a)
-    a, _ = decide_sync(None, {"iw4x.stat": "AAA"})
-    check("decide: server sin save + local → upload", a == "upload", a)
-    a, _ = decide_sync({"exists": False}, {"iw4x.stat": "AAA"})
-    check("decide: exists:false + local → upload", a == "upload", a)
-    a, _ = decide_sync(full, {"iw4x.stat": "AAA", "iw4x_config.cfg": "BBB"})
-    check("decide: hashes idénticos en TODOS → noop", a == "noop", a)
-    # Difieren → gana el más reciente (epochs derivados del ISO del server).
-    server_epoch = ss._iso_to_epoch("2026-11-07T10:00:00.000Z")
-    differing = {"iw4x.stat": "ZZZ", "iw4x_config.cfg": "BBB"}
-    a, _ = decide_sync(full, differing, local_mtime=server_epoch + 3600)
-    check("decide: difieren + local más nuevo → upload", a == "upload", a)
-    a, _ = decide_sync(full, differing, local_mtime=server_epoch - 3600)
-    check("decide: difieren + server más nuevo → download", a == "download", a)
-
-    # Empate EXACTO: usamos el mismo epoch que deriva el módulo del ISO del
-    # server (10:00 UTC), sin conversiones locales ambiguas.
-    tie = server_epoch
-    a, _ = decide_sync(full, {"iw4x.stat": "ZZZ", "iw4x_config.cfg": "BBB"},
-                       local_mtime=tie)
-    check("decide: empate de fechas → noop por seguridad", a == "noop", a)
-
-    # --- Puras: caps (guid.dat SIEMPRE tiene prioridad en la capa) -------------
-    cap_dir = tmp / "caps"
-    cap_dir.mkdir(parents=True)
-    Path(guid_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(guid_path).write_bytes(b"GUID")
-    (cap_dir / "iw4x.stat").write_bytes(b"s-base")
-    (cap_dir / "iw4x_config.cfg").write_bytes(b"c-base")
-    many = {"guid.dat": guid_path,
-            "iw4x.stat": str(cap_dir / "iw4x.stat"),
-            "iw4x_config.cfg": str(cap_dir / "iw4x_config.cfg")}
-    for i in range(14):
-        p = cap_dir / f"mod{i}.stat"
-        p.write_bytes(b"s%d" % i)
-        many[f"mods/m{i}/iw4x.stat"] = str(p)
-    accepted, skipped = build_upload_files(many, max_files=24, max_size=256 * 1024)
-    check("caps: 17 archivos (guid primero) entran en la capa de 24",
-          len(accepted) == 17 and skipped == []
-          and accepted[0]["path"] == "guid.dat", f"{len(accepted)}/{len(skipped)}")
-    many2 = dict(many)
-    for i in range(16):  # +16 mods → 33 archivos > 24: se recortan mods
-        p = cap_dir / f"x{i}.stat"
-        p.write_bytes(b"x")
-        many2[f"mods/x{i}/iw4x.stat"] = str(p)
-    accepted, skipped = build_upload_files(many2, max_files=24, max_size=256 * 1024)
-    check("caps: >24 archivos → guid.dat y base nunca se recortan",
-          len(accepted) == 24
-          and {"guid.dat", "iw4x.stat", "iw4x_config.cfg"}
-          <= {a["path"] for a in accepted}
-          and all(s.startswith("mods/x") for s in skipped),
-          f"{len(accepted)} aceptados, {len(skipped)} omitidos")
-    big = tmp / "grande.stat"
-    big.write_bytes(b"x" * (256 * 1024 + 1))
-    accepted, skipped = build_upload_files({"iw4x.stat": str(big)})
-    check("caps: archivo >256KB → omitido",
-          accepted == [] and skipped == ["iw4x.stat"], f"{accepted} {skipped}")
-
-    # --- detect_build (opcional, barato) ---------------------------------------
-    gd_build = tmp / "conbuild"
-    gd_build.mkdir()
-    (gd_build / "version.txt").write_text("IW4x build 0.9.5\n", encoding="utf-8")
-    check("detect_build: lee version.txt",
-          ss.detect_build(str(gd_build)) == "IW4x build 0.9.5",
-          str(ss.detect_build(str(gd_build))))
-    gd_nob = tmp / "nobuild"
-    gd_nob.mkdir()
-    check("detect_build: sin archivo → None (PUT omite el campo)",
-          ss.detect_build(str(gd_nob)) is None)
 
     # --- Stub pipeline: download con backup, upload post-sesión, noop ---------
     gd = tmp / "gd1"
@@ -1080,34 +979,9 @@ def phase_save_sync() -> None:
 
 
 def phase_flow_logic() -> None:
-    print("\n=== Fase lógica: GameFlow con API simulada ===")
-
-    # --- Comparación de nicks (función pura, sin red) -----------------------
-    check("match exacto de nick", candidate_matches("El Tester", "El Tester"))
-    check("match trim + lower", candidate_matches("  el tester ", "EL TESTER"))
-    check("códigos ^X del server se stripean",
-          candidate_matches("^7El^1 Tester", "El Tester"))
-    check("nick distinto → False",
-          not candidate_matches("ZombieSlayer69", "El Tester"))
-    check("displayName vacío → False",
-          not candidate_matches("Alguien", ""))
-
-    # pick_candidate (pura): filtrado por nick + desambiguación por recencia.
-    bots = [{"guid": str(100 + i), "name": f"Bot_{i}",
-             "lastConnection": "2026-11-06T09:00:00.000Z"} for i in range(14)]
-    bots.append({"guid": "777", "name": "^7El^1 Tester",
-                 "lastConnection": "2026-11-06T10:00:00.000Z"})
-    picked = pick_candidate(bots, "El Tester")
-    check("pick_candidate: encuentra el único match entre bots",
-          picked is not None and picked["guid"] == "777", str(picked))
-    check("pick_candidate: sin match → None", pick_candidate(bots, "Nadie") is None)
-    check("pick_candidate: display vacío → None", pick_candidate(bots, "") is None)
-    two = [{"guid": "A", "name": "el tester",
-            "lastConnection": "2026-11-06T09:00:00.000Z"},
-           {"guid": "B", "name": "^7El^1 Tester",
-            "lastConnection": "2026-11-06T11:30:00.000Z"}]
-    check("pick_candidate: recencia gana con nick duplicado",
-          (pick_candidate(two, "El Tester") or {}).get("guid") == "B")
+    print("\n=== Fase lógica: GameFlow con API simulada (StubApi, sin red real) ===")
+    # Las comparaciones de nick PICK/CANDIDATE_MATCHES (puras) están en
+    # test_units.py — aquí solo quedan checks híbridos con el flujo completo.
 
     # 1 candidato CON match de nick → auto-confirmación.
     stub = StubApi(candidate_pages=[{"candidates": [
@@ -1257,30 +1131,8 @@ def phase_flow_logic() -> None:
           not any("SIMULACIÓN: comando" in e.get("msg", "")
                   for e in evs if e.get("t") == "log"),
           str(evs)[:300])
-
-
-def phase_command_args() -> None:
-    """Fase lógica: armado del comando (nick SIEMPRE forzado, sin abrir juego)."""
-    print("\n=== Fase lógica: comando de arranque (+set name siempre) ===")
-
-    args = build_game_args(r"D:\Games\Call of Duty 6\iw4x.exe",
-                           "192.168.2.251:28960", "Mandango ProMax")
-    check("comando: exe primero, +connect último",
-          args[0] == r"D:\Games\Call of Duty 6\iw4x.exe"
-          and args[-1] == "192.168.2.251:28960", str(args))
-    check("comando: +set name <nick> (con espacios) ANTES de +connect",
-          args[1:5] == ["+set", "name", "Mandango ProMax", "+connect"], str(args))
-    check("comando: lista plana de 6 argumentos (sin shell)",
-          len(args) == 6 and all(isinstance(a, str) for a in args), str(args))
-
-    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "  Spam Bot  ")
-    check("nick con espacios en extremos se recorta",
-          args == ["iw4x.exe", "+set", "name", "Spam Bot", "+connect",
-                   "1.2.3.4:28960"], str(args))
-
-    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "")
-    check("sin nick la función no emite +set (GameFlow bloquea antes)",
-          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
+    # El armado puro del comando (+set name SIEMPRE) vive en test_units.py
+    # (tests/test_units.py::phase_command_args).
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1171,6 @@ def main() -> int:
     phase_play_linked()
     phase_save_sync()
     phase_flow_logic()
-    phase_command_args()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

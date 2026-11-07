@@ -16,7 +16,7 @@ if errorlevel 1 (
 )
 
 echo Compilando...
-py -m PyInstaller --noconfirm --onefile --windowed --clean --name IW4xLauncher main.py
+py -m PyInstaller --noconfirm --onefile --windowed --clean --name IW4xLauncher --icon "assets\logo-icon.ico" --add-data "assets\logo-icon.ico;assets" --add-data "assets\logo-icon.png;assets" --add-data "assets\logo-banner.png;assets" main.py
 if errorlevel 1 goto :error
 
 echo.

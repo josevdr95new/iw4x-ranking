@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import threading
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import customtkinter as ctk
@@ -20,7 +21,7 @@ from game_flow import GameFlow
 from ui.home import HomeFrame
 from ui.login import LoginFrame
 from ui.settings import SettingsFrame
-from ui.theme import COLORS
+from ui.theme import COLORS, asset_path
 from user_store import UserStore
 
 log = logging.getLogger("app")
@@ -59,6 +60,7 @@ class App(ctk.CTk):
         self.minsize(800, 620)
         self.configure(fg_color=COLORS["bg"])
         self._center()
+        self._set_window_icon()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # --- Pantallas (se crean una vez) -------------------------------------
@@ -76,6 +78,32 @@ class App(ctk.CTk):
     def post(self, fn: Callable[[], None]) -> None:
         """Encola un callable para ejecutarlo en el hilo de la UI."""
         self._tasks.put(fn)
+
+    def _set_window_icon(self) -> None:
+        """Logo programático como icono de ventana (assets/logo-icon.ico/.png).
+
+        En Windows prefiere ``iconbitmap`` con el .ico multi-resolución (nítido
+        en titlebar + taskbar + alt-tab); fallback a ``iconphoto`` con el PNG
+        (que además propaga el icono a futuros Toplevels). Solo decorativo: si
+        el asset no existe (deploy sin assets/) o Tk no acepta el icono, se
+        ignora en silencio — NUNCA impide abrir la app.
+        """
+        try:
+            import tkinter as tk
+
+            if os.name == "nt":
+                ico_path = asset_path("logo-icon.ico")
+                if ico_path.is_file():
+                    self.iconbitmap(str(ico_path))
+                    return
+            png_path = asset_path("logo-icon.png")
+            if not png_path.is_file():
+                return
+            img = tk.PhotoImage(file=str(png_path))
+            self.iconphoto(True, img)
+            self._icon_ref = img  # referencia viva: Tk/GC no la puede recolectar
+        except Exception:
+            log.debug("Icono de ventana no disponible", exc_info=True)
 
     def _drain_tasks(self) -> None:
         """Ejecuta las tareas pendientes y reprograma el drenaje."""

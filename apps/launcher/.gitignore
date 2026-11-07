@@ -1,0 +1,4 @@
+# PyInstaller (artefactos de build.bat — nunca al repo)
+build/
+dist/
+*.spec

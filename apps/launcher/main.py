@@ -22,6 +22,16 @@ def main() -> None:
     log_path = setup_logging()
     logging.getLogger("main").info("Launcher iniciado (log: %s)", log_path)
 
+    # Taskbar propia en Windows: agrupa el launcher bajo su propio AppUserModelID
+    # en vez de heredar el de Python. DEBE ejecutarse ANTES de crear la Tk root.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "iw4xranking.launcher")
+    except Exception:
+        logging.getLogger("main").debug(
+            "AppUserModelID no disponible (¿no Windows?)", exc_info=True)
+
     cfg = load_config()
 
     # Tema oscuro moderno.

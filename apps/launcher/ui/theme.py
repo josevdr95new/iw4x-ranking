@@ -10,6 +10,9 @@ Dirección (brief del dueño + disciplina de docs/DESIGN.md):
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import customtkinter as ctk
 
 # --- Paleta (única fuente de color del launcher) --------------------------
@@ -80,3 +83,18 @@ def tracked(text: str) -> str:
 def section_text(text: str) -> str:
     """Marcador de sección estilo militar: '// SECCIÓN //'."""
     return f"// {text.upper()} //"
+
+
+# --- Assets (iconos, imágenes) ----------------------------------------------
+
+def asset_path(name: str) -> Path:
+    """Ruta absoluta a un asset (p.ej. ``logo-icon.png``), congelado o en dev.
+
+    En el exe de PyInstaller los datos van a ``sys._MEIPASS`` (--add-data):
+    resolvemos ahí; en dev, al assets/ real del proyecto. El archivo puede no
+    existir — el llamador decide (los assets son siempre decorativos).
+    """
+    base = Path(__file__).resolve().parent.parent
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)
+    return base / "assets" / name

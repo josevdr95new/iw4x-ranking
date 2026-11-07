@@ -54,7 +54,7 @@ class LoginFrame(ctk.CTkFrame):
 
         # Campos: NICK siempre visible (credencial de entrada); el EMAIL solo
         # existe al CREAR la cuenta (gestión), en su propia caja oculta.
-        self.nick = self._make_entry(body, "pollacaballo")
+        self.nick = self._make_entry(body, "jose")
         self._field(body, "NICK", self.nick, 0)
         self.password = self._make_entry(body, "••••••••", show="•")
         self._field(body, "CONTRASEÑA", self.password, 1)

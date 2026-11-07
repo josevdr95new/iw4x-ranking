@@ -19,7 +19,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "game_path": "D:\\Call of Duty 6\\iw4x.exe",
     "servers": [
         {"name": "LAN Server", "address": "192.168.2.251:28960"},
-        {"name": "Test Local", "address": "127.0.0.1:28961"},
+        {"name": "Test Local", "address": "127.0.0.1:5174"},
     ],
     "default_server": 0,
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo

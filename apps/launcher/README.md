@@ -75,11 +75,20 @@ defaults si no existe:
    iw4x.exe sube el progreso de la sesión. Los errores de sync NUNCA impiden
    jugar.
 
-## Prueba de humo
-
-`test_smoke.py` verifica en vivo contra la API real (registro, login,
-auto-login, flujo JUGAR simulado, rutas 409 y diálogo multi-candidato):
+## Tests
 
 ```bat
-py apps\launcher\test_smoke.py
+py apps\launcher\tests\run_all.py      # suite completa (units → smoke)
+py apps\launcher\tests\test_units.py   # solo funciones puras (sin red, sin GUI)
+py apps\launcher\tests\test_smoke.py   # solo E2E/GUI (requiere API :3000)
 ```
+
+| Archivo              | Qué cubre |
+| -------------------- | --------- |
+| `tests/run_all.py`   | Runner: ejecuta **units primero** y **smoke después**; resumen por archivo (checks OK/fallidos, tiempo, exit del proceso) y exit != 0 si algo falla. |
+| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: `candidate_matches` / `pick_candidate` (nicks ^X, recencia), puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), `build_game_args` (+set name SIEMPRE) y defaults/merge de `app_config`. |
+| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR + `+set name`, guard de nick, verificación de identidad automática, stats en vivo, cloud-sync (pipeline stub + E2E contra la API), 409s (`GUID_ALREADY_LINKED` / `USER_ALREADY_LINKED`) y regresión visual del formulario. |
+
+Cuenta de prueba: `launcher-test@test.local` / `LauncherTest2026` (la crea el
+propio smoke si la DB está limpia). NO es pytest: scripts secuenciales que
+imprimen `[OK]/[FALLO]` por paso.
