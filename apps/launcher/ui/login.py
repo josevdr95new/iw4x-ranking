@@ -43,7 +43,7 @@ class LoginFrame(ctk.CTkFrame):
             fill="x", padx=120, pady=(SP["m"], SP["s"])
         )
         ctk.CTkLabel(
-            self, text="Inicia sesión para jugar y vincular tu GUID",
+            self, text="Entra con tu nick de jugador para jugar y vincular tu GUID",
             font=font(12), text_color=COLORS["text_dim"],
         ).pack(pady=(0, SP["xl"]))
 
@@ -52,29 +52,27 @@ class LoginFrame(ctk.CTkFrame):
         card.pack(padx=SP["xl"], pady=SP["s"])
         body = card.inner
 
-        # Campos con caption mono (label de form, estilo HUD).
-        self.email = self._make_entry(body, "jugador@ejemplo.com")
-        self._field(body, "EMAIL", self.email, 0)
+        # Campos: NICK siempre visible (credencial de entrada); el EMAIL solo
+        # existe al CREAR la cuenta (gestión), en su propia caja oculta.
+        self.nick = self._make_entry(body, "pollacaballo")
+        self._field(body, "NICK", self.nick, 0)
         self.password = self._make_entry(body, "••••••••", show="•")
         self._field(body, "CONTRASEÑA", self.password, 1)
-        # El campo de nombre va en su propia caja para ocultarlo/mostrarlo
-        # (CTk no tiene pack_after: recolocamos la caja con pack -after).
-        self.display_box = ctk.CTkFrame(body, fg_color="transparent")
-        self.display_name = self._make_entry(self.display_box, "TuTag")
-        self._field(self.display_box, "NOMBRE VISIBLE (TU TAG)",
-                    self.display_name, 0)
-        self.display_box.tk.call(
-            "pack", "configure", self.display_box,
-            "-after", self.password, "-fill", "x",
-        )
-        self.display_box.pack_forget()  # solo visible en modo registro
 
-        # Estado (errores de validación/red).
+        # Estado (errores de validación/red) — va justo tras los campos.
         self.status = ctk.CTkLabel(
             body, text="", font=font(11), text_color=COLORS["danger"],
             wraplength=FIELD_W, justify="left", anchor="w",
         )
         self.status.pack(fill="x", padx=SP["l"], pady=(0, 0))
+
+        self.email_box = ctk.CTkFrame(body, fg_color="transparent")
+        self.email = self._make_entry(self.email_box, "jugador@ejemplo.com")
+        self._field(self.email_box, "EMAIL", self.email, 0)
+        # NOTA: pack(after=...) deja widgets gestionados pero sin mapear en
+        # este árbol; 'before=status' es la posición determinista que sí mapea.
+        self.email_box.pack(fill="x", before=self.status)
+        self.email_box.pack_forget()  # visible solo en modo CREAR CUENTA
 
         self.action_btn = primary_button(
             body, "ENTRAR", self._on_submit, width=FIELD_W, height=44
@@ -97,7 +95,7 @@ class LoginFrame(ctk.CTkFrame):
         self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["m"]))
 
         # Enter = enviar.
-        for entry in (self.email, self.password, self.display_name):
+        for entry in (self.nick, self.password, self.email):
             entry.bind("<Return>", lambda _e: self._on_submit())
 
     # --- Constructores de campo (entry HUD) ---------------------------------
@@ -123,42 +121,40 @@ class LoginFrame(ctk.CTkFrame):
 
     # --- Comportamiento (idéntico al previo) --------------------------------
     def _toggle_mode(self) -> None:
-        """Alterna entre login y creación de cuenta."""
+        """Alterna entre login (solo NICK) y creación (EMAIL + NICK + clave)."""
         self._register_mode = not self._register_mode
         if self._register_mode:
             self.action_btn.configure(text="CREAR CUENTA")
             self.toggle_link.configure(text="Ya tengo cuenta: entrar")
-            # Recoloca la caja del nombre justo tras la contraseña.
-            self.display_box.tk.call(
-                "pack", "configure", self.display_box,
-                "-after", self.password, "-fill", "x",
-            )
+            # El email reaparece justo antes de la línea de estado.
+            self.email_box.pack(fill="x", before=self.status)
         else:
             self.action_btn.configure(text="ENTRAR")
             self.toggle_link.configure(text="¿No tienes cuenta? Crear cuenta")
-            self.display_box.pack_forget()
+            self.email_box.pack_forget()
         self.status.configure(text="")
 
     def _on_submit(self) -> None:
         """Valida el formulario y delega en App (petición en hilo de fondo)."""
-        email = self.email.get().strip()
+        nick = self.nick.get().strip()
         password = self.password.get()
         if self._register_mode:
-            display = self.display_name.get().strip()
-            if not email or not password or not display:
+            email = self.email.get().strip()
+            # En el registro el nick ES el nombre visible de la cuenta.
+            if not email or not nick or not password:
                 self.status.configure(
-                    text="Rellena email, contraseña y nombre visible.",
+                    text="Rellena email, nick y contraseña.",
                     text_color=COLORS["warn"],
                 )
                 return
-            self.app.register(email, password, display, self._on_result)
+            self.app.register(email, password, nick, self._on_result)
         else:
-            if not email or not password:
+            if not nick or not password:
                 self.status.configure(
-                    text="Introduce tu email y contraseña.", text_color=COLORS["warn"]
+                    text="Introduce tu nick y contraseña.", text_color=COLORS["warn"]
                 )
                 return
-            self.app.login(email, password, self._on_result)
+            self.app.login(nick, password, self._on_result)
 
         self.action_btn.configure(state="disabled", text="Conectando…")
         self.status.configure(text="")

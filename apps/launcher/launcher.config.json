@@ -1,5 +1,5 @@
 {
-  "api_url": "http://192.168.3.99:3000",
+  "api_url": "http://localhost:5173",
   "game_path": "D:\\Call of Duty 6\\iw4x.exe",
   "servers": [
     {
@@ -11,7 +11,7 @@
       "address": "127.0.0.1:28961"
     }
   ],
-  "default_server": 0,
+  "default_server": 1,
   "simulate_game": false,
   "link_poll_interval": 10,
   "link_poll_max_seconds": 180

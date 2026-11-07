@@ -109,7 +109,12 @@ class BracketCard(ctk.CTkFrame):
             self, highlightthickness=0, bd=0, bg=fill, insertwidth=0
         )
         self._canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+        # Contenido dentro de la tarjeta: pack con inset para que los
+        # brackets de esquina (brazos de ~12px) no tapen el primer widget.
+        # SIN este pack el contenido queda en un contenedor jamás mapeado
+        # (bug: tarjeta visible pero sin formulario).
         self._inner = ctk.CTkFrame(self, fg_color="transparent")
+        self._inner.pack(fill="both", expand=True, padx=10, pady=10)
         self.bind("<Configure>", lambda _e: self._draw_brackets())
         self._draw_brackets()
 

@@ -115,3 +115,16 @@ export function initialsOf(name: string): string {
 export function formatGuid(guid: string): string {
   return guid.replace(/(\d{4})(?=\d)/g, "$1 ");
 }
+
+/**
+ * Heurística oficial de bots (docs/API.md §alias-conflicts): GUID del rango 0xB07… con
+ * 15 caracteres hex. Se usa como fallback cuando la fila del leaderboard no trae `isBot`.
+ */
+export function isBotGuid(guid: string): boolean {
+  try {
+    const hex = BigInt(guid).toString(16);
+    return hex.length === 15 && hex.startsWith("b07");
+  } catch {
+    return false;
+  }
+}

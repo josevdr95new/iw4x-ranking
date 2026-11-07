@@ -10,6 +10,7 @@ import { Input } from "../components/ui/Input";
 export type AuthMode = "login" | "register";
 
 interface FieldErrors {
+  nick?: string;
   email?: string;
   password?: string;
   displayName?: string;
@@ -55,6 +56,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const [nick, setNick] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -103,7 +105,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
 
   const validate = (): FieldErrors => {
     const next: FieldErrors = {};
-    if (!email.trim()) next.email = "Escribe tu email o usuario.";
+    if (mode === "login") {
+      if (!nick.trim()) next.nick = "Escribe tu nick de jugador.";
+    } else {
+      if (!email.trim()) next.email = "Escribe tu email.";
+    }
     if (password.length < MIN_PASSWORD_LENGTH) {
       next.password = "La contraseña debe tener al menos 8 caracteres.";
     }
@@ -130,7 +136,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     setSubmitting(true);
     try {
       if (mode === "login") {
-        await login(email.trim(), password);
+        await login(nick.trim(), password);
         navigate(from ?? "/", { replace: true });
       } else {
         await register({ email: email.trim(), password, displayName: displayName.trim() });
@@ -140,14 +146,26 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       if (error instanceof ApiError) {
         const fieldErrors = error.fieldErrors();
         const next: FieldErrors = {};
-        if (fieldErrors.email) next.email = fieldErrors.email;
+        if (mode === "login") {
+          if (fieldErrors.identifier) next.nick = fieldErrors.identifier;
+          // Fallback legacy: el reintento usa `email`; su error de validación pertenece al campo nick.
+          if (fieldErrors.email) next.nick = fieldErrors.email;
+        } else {
+          if (fieldErrors.email) next.email = fieldErrors.email;
+          if (fieldErrors.displayName) next.displayName = fieldErrors.displayName;
+        }
         if (fieldErrors.password) next.password = fieldErrors.password;
-        if (fieldErrors.displayName) next.displayName = fieldErrors.displayName;
         if (error.code === "INVALID_CREDENTIALS") {
-          next.password = "Esa contraseña no es correcta.";
+          next.nick = "Ese nick no existe o la contraseña no es correcta.";
+        }
+        if (error.code === "NICK_TAKEN") {
+          next.displayName =
+            error.message.trim().length > 0
+              ? error.message
+              : "Ese nick ya está reservado por otra cuenta.";
         }
         if (error.code === "EMAIL_TAKEN") {
-          next.email = "Ese usuario ya está registrado.";
+          next.email = "Ese email ya está registrado.";
         }
         if (Object.keys(next).length === 0) {
           next.form = "Revisa los campos marcados.";
@@ -181,7 +199,19 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             </p>
           )}
 
-          {mode === "register" && (
+          {mode === "login" ? (
+            <Input
+              label="Nick"
+              name="identifier"
+              autoComplete="username"
+              placeholder="pollacaballo"
+              value={nick}
+              onChange={(event) => setNick(event.target.value)}
+              error={errors.nick}
+              maxLength={32}
+              spellCheck={false}
+            />
+          ) : (
             <Input
               label="Nombre de jugador"
               name="displayName"
@@ -194,16 +224,23 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             />
           )}
 
-          <Input
-            label="Email o usuario"
-            name="email"
-            type="email"
-            autoComplete="email"
-            placeholder="tu@email.com"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            error={errors.email}
-          />
+          {mode === "register" && (
+            <>
+              <Input
+                label="Email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                placeholder="tu@email.com"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                error={errors.email}
+              />
+              <p className="type-caption -mt-2 text-text-2">
+                El email solo es para gestionar tu cuenta; para entrar se usa tu nick.
+              </p>
+            </>
+          )}
 
           <Input
             label="Contraseña"
@@ -257,11 +294,17 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         <div className="my-5 border-t border-border" aria-hidden="true" />
 
         <div className="text-center">
-          <p className="text-[13px] text-text-2">¿Juegas en nuestros servers?</p>
-          <p className="text-[13px] text-text-2">
-            La vinculación de tu cuenta con tu GUID se hace desde el launcher de escritorio: inicia
-            sesión y dale JUGAR.
-          </p>
+          {mode === "login" ? (
+            <p className="text-[13px] text-text-2">Entra con tu nick de jugador.</p>
+          ) : (
+            <>
+              <p className="text-[13px] text-text-2">¿Juegas en nuestros servers?</p>
+              <p className="text-[13px] text-text-2">
+                La vinculación de tu cuenta con tu GUID se hace desde el launcher de escritorio:
+                inicia sesión y dale JUGAR.
+              </p>
+            </>
+          )}
         </div>
       </div>
     </div>

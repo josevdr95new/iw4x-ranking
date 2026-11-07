@@ -103,9 +103,14 @@ class ApiClient:
         if not resp.content:
             return {}
         try:
-            return resp.json()
+            data = resp.json()
         except ValueError:
             raise NetworkError("La API devolvió una respuesta no válida (no JSON).")
+        if not isinstance(data, dict):
+            # 2xx con cuerpo no-objeto = server en estado raro (migraciones):
+            # se trata como problema de transporte para reintentar arriba.
+            raise NetworkError("La API devolvió una respuesta no válida.")
+        return data
 
     # --- Health / diagnóstico ---------------------------------------------
     def health(self) -> Dict[str, Any]:
@@ -125,10 +130,35 @@ class ApiClient:
             json_body={"email": email, "password": password, "displayName": display_name},
         )
 
-    def login(self, email: str, password: str) -> Dict[str, Any]:
-        """POST /api/auth/login → {user, token}."""
+    def login(self, identifier: str, password: str) -> Dict[str, Any]:
+        """POST /api/auth/login — NICK o EMAIL en ``identifier``.
+
+        Contrato destino (login por nick): ``{"identifier", "password"}`` —
+        sin ramas ni deducción local ('@' o no da igual: el server resuelve).
+        El transporte legacy ``_login_legacy(email, …)`` queda SOLO para el
+        bootstrap de pruebas mientras el backend termina la migración.
+        """
         return self._request(
-            "POST", "/auth/login", json_body={"email": email, "password": password}
+            "POST",
+            "/auth/login",
+            json_body={"identifier": identifier, "password": password},
+        )
+
+    def _login_legacy(self, email: str, password: str) -> Dict[str, Any]:
+        """Transporte interno legacy ``{"email", "password"}`` (solo pruebas)."""
+        return self._request(
+            "POST",
+            "/auth/login",
+            json_body={"email": email, "password": password},
+        )
+
+    def _login_legacy(self, identifier: str, password: str) -> Dict[str, Any]:
+        """Login con el campo legacy ``email`` (migra el backend a identifier)."""
+        self._login_mode = "legacy_email"
+        return self._request(
+            "POST",
+            "/auth/login",
+            json_body={"email": identifier, "password": password},
         )
 
     def me(self, token: str) -> Dict[str, Any]:

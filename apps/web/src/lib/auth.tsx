@@ -14,7 +14,7 @@ interface AuthState {
   user: User | null;
   /** true mientras se comprueba el token almacenado al arrancar. */
   initializing: boolean;
-  login: (email: string, password: string) => Promise<User>;
+  login: (identifier: string, password: string) => Promise<User>;
   register: (input: { email: string; password: string; displayName: string }) => Promise<User>;
   logout: () => void;
   /** Relee /auth/me (p. ej. tras vincular el GUID). */
@@ -55,8 +55,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const login = useCallback(
-    async (email: string, password: string): Promise<User> => {
-      const { user: loggedUser, token } = await api.login({ email, password });
+    async (identifier: string, password: string): Promise<User> => {
+      const { user: loggedUser, token } = await api.login({ identifier, password });
       setToken(token);
       setUser(loggedUser);
       return loggedUser;

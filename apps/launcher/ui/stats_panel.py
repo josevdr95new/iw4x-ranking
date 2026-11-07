@@ -151,7 +151,7 @@ class StatsPanel(ctk.CTkFrame):
         self._last_ok = None
         self.age_label.configure(text="")
         self.status_label.configure(
-            text="Dale JUGAR para vincular tu cuenta — tus stats aparecerán aquí",
+            text="Dale JUGAR para verificar tu identidad — tus stats aparecerán aquí",
             text_color=COLORS["accent"],
         )
         self._reset_values()

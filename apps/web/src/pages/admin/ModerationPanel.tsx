@@ -12,7 +12,6 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import { ApiError, api } from "../../lib/api";
 import type {
   IamLiveResponse,
@@ -22,38 +21,24 @@ import type {
   IamPenaltyType,
   IamStatusResponse,
 } from "../../lib/api";
+import { PenaltyModal, PENALTY_TYPE_LABEL, stripColorCodes } from "../../components/PenaltyModal";
+import type { PenaltyTarget } from "../../components/PenaltyModal";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Input } from "../../components/ui/Input";
+import { Panel } from "../../components/ui/Panel";
 import { Skeleton, Spinner } from "../../components/ui/Spinner";
 import { formatInt, formatRelative } from "../../lib/format";
 
-const REASON_MIN = 3;
-const REASON_MAX = 200;
 const LIVE_POLL_MS = 15000;
 const CLIENT_SEARCH_DEBOUNCE_MS = 400;
 
-const SERVER_NAME_COLOR_CODES = /\^[0-9a-zA-Z]/g;
-
-/** Los nombres del upstream traen códigos de color del juego (^1…): se limpian para el UI (API.md §Moderación). */
-function stripColorCodes(value: string | null): string {
-  return (value ?? "").replace(SERVER_NAME_COLOR_CODES, "").trim() || "—";
-}
-
-const PENALTY_TYPE_LABEL: Record<IamPenaltyRecordType, string> = {
-  warn: "WARN",
-  kick: "KICK",
-  tempban: "TEMPBAN",
-  ban: "BAN",
-  unban: "UNBAN",
-};
-
-const PENALTY_LABEL_TO_TYPE: Array<{ type: IamPenaltyType; label: string; action: string }> = [
-  { type: "warn", label: "WARN", action: "Emitir warn" },
-  { type: "kick", label: "KICK", action: "Expulsar" },
-  { type: "tempban", label: "TEMPBAN", action: "Aplicar tempban" },
-  { type: "ban", label: "BAN", action: "Confirmar ban permanente" },
+const PENALTY_LABEL_TO_TYPE: Array<{ type: IamPenaltyType; label: string }> = [
+  { type: "warn", label: "WARN" },
+  { type: "kick", label: "KICK" },
+  { type: "tempban", label: "TEMPBAN" },
+  { type: "ban", label: "BAN" },
 ];
 
 /** Badge de color por tipo de penalidad: warn avisa, kick neutral, bans peligro, unban éxito. */
@@ -68,207 +53,6 @@ function PenaltyTypeBadge({ type }: { type: IamPenaltyRecordType }) {
           : "danger";
   return <Badge variant={variant}>{PENALTY_TYPE_LABEL[type]}</Badge>;
 }
-
-function Panel({
-  title,
-  caption,
-  action,
-  children,
-}: {
-  title: string;
-  caption?: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="rounded-md border border-border bg-surface">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-3">
-        <div>
-          <h2 className="type-display-m text-text">{title}</h2>
-          {caption && <p className="type-caption mt-0.5 text-text-2">{caption}</p>}
-        </div>
-        {action && <div className="shrink-0">{action}</div>}
-      </header>
-      <div className="p-5">{children}</div>
-    </section>
-  );
-}
-
-/* --- Modal de penalidad --- */
-
-interface PenaltyTarget {
-  clientId: number;
-  name: string;
-}
-
-const TEMPBAN_PRESETS = [
-  { label: "1 h", minutes: 60 },
-  { label: "24 h", minutes: 1440 },
-  { label: "7 d", minutes: 10080 },
-] as const;
-
-/** Modal único por acción: motivo SIEMPRE obligatorio (≥3 chars); tempban pide preset; ban marca PERMANENTE en rojo. */
-function PenaltyModal({
-  target,
-  type,
-  onClose,
-  onDone,
-}: {
-  target: PenaltyTarget;
-  type: IamPenaltyType;
-  onClose: () => void;
-  onDone: (response: IamPenaltyResponse) => void;
-}) {
-  const [reason, setReason] = useState("");
-  const [durationMinutes, setDurationMinutes] = useState<number>(TEMPBAN_PRESETS[0].minutes);
-  const [submitting, setSubmitting] = useState(false);
-  const [errorText, setErrorText] = useState<string | null>(null);
-  const meta = PENALTY_LABEL_TO_TYPE.find((entry) => entry.type === type);
-
-  const cleanReason = reason.trim();
-  const reasonError =
-    cleanReason.length > 0 && (cleanReason.length < REASON_MIN || cleanReason.length > REASON_MAX)
-      ? `El motivo debe tener entre ${REASON_MIN} y ${REASON_MAX} caracteres.`
-      : null;
-  const canSubmit = !submitting && !reasonError && cleanReason.length >= REASON_MIN;
-
-  const handleSubmit = async () => {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    setErrorText(null);
-    try {
-      const response = await api.iamPenalty({
-        type,
-        reason: cleanReason,
-        clientId: target.clientId,
-        ...(type === "tempban" ? { durationMinutes } : {}),
-      });
-      onDone(response);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        const fieldIssues = error.details?.issues ?? [];
-        const issueText = fieldIssues.map((issue) => issue.message).join(" ");
-        setErrorText(issueText || error.message);
-      } else {
-        setErrorText("No se pudo emitir la penalidad. Inténtalo de nuevo.");
-      }
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div
-        aria-hidden="true"
-        className="absolute inset-0 bg-[rgba(11,12,9,0.7)]"
-        onClick={onClose}
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="penalty-modal-title"
-        className="relative w-full max-w-[460px] rounded-lg border border-border bg-surface p-5 shadow-modal"
-      >
-        <div className="flex items-start justify-between gap-3">
-          <h2 id="penalty-modal-title" className="type-display-m text-text">
-            <span className="sr-only">{PENALTY_TYPE_LABEL[type]} para </span>
-            {PENALTY_TYPE_LABEL[type]} · {stripColorCodes(target.name)}
-          </h2>
-        </div>
-
-        {type === "ban" && (
-          <div className="mt-3 flex items-start gap-2 rounded-sm border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger-hover">
-            <AlertCircle size={16} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0" />
-            <p>
-              Este ban es <strong className="font-semibold text-danger">permanente</strong>. No se
-              puede deshacer desde este panel.
-            </p>
-          </div>
-        )}
-
-        <div className="mt-4 flex flex-col gap-1.5">
-          <label htmlFor="penalty-reason" className="type-label text-text-2">
-            Motivo <span className="text-danger">*</span>
-          </label>
-          <textarea
-            id="penalty-reason"
-            value={reason}
-            rows={3}
-            maxLength={REASON_MAX}
-            aria-invalid={reasonError ? true : undefined}
-            autoFocus
-            placeholder={`Ej.: ${type === "warn" ? "lenguaje ofensivo en chat" : "uso de cheat detectado"}`}
-            onChange={(event) => setReason(event.target.value)}
-            className={`min-h-[72px] w-full rounded-sm border bg-surface-2 px-3 py-2 text-text transition-colors duration-150 ease-out focus:border-accent focus:shadow-[0_0_0_1px_#8FD429] focus:outline-none ${
-              reasonError ? "border-danger" : "border-border"
-            }`}
-          />
-          {reasonError && (
-            <p role="alert" className="flex items-start gap-1.5 text-[13px] text-danger-hover">
-              <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0" />
-              {reasonError}
-            </p>
-          )}
-          <p className="type-caption text-text-2">
-            El motivo viaja al juego y queda registrado en la base de penalidades.
-          </p>
-        </div>
-
-        {type === "tempban" && (
-          <div className="mt-4">
-            <span className="type-label text-text-2">Duración</span>
-            <div className="mt-1.5 flex" role="group" aria-label="Duración del tempban">
-              {TEMPBAN_PRESETS.map((preset) => {
-                const active = durationMinutes === preset.minutes;
-                return (
-                  <button
-                    key={preset.minutes}
-                    type="button"
-                    onClick={() => setDurationMinutes(preset.minutes)}
-                    aria-pressed={active}
-                    className={`type-button h-9 flex-1 rounded-sm px-3 transition-colors duration-150 ease-out ${
-                      active
-                        ? "border border-accent-border bg-accent-subtle text-accent"
-                        : "text-text-2 hover:text-text"
-                    }`}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {errorText && (
-          <div
-            role="alert"
-            className="mt-4 flex items-start gap-2 rounded-sm border border-danger/40 bg-danger/10 px-3 py-2 text-[13px] text-danger-hover"
-          >
-            <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0" />
-            <span className="min-w-0 break-words">{errorText}</span>
-          </div>
-        )}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose} disabled={submitting}>
-            Volver
-          </Button>
-          <Button
-            variant={type === "warn" ? "primary" : "danger"}
-            onClick={() => void handleSubmit()}
-            disabled={!canSubmit}
-            loading={submitting}
-          >
-            {submitting ? "Enviando…" : meta?.action}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* --- Filas / celdas compartidas --- */
 
 /* --- Panel principal --- */
 

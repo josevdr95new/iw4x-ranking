@@ -16,7 +16,6 @@ import customtkinter as ctk
 from api_client import ApiClient, ApiError, NetworkError, user_is_linked
 from app_config import AppConfig
 from game_flow import GameFlow
-from ui.dialogs import CandidateDialog
 from ui.home import HomeFrame
 from ui.login import LoginFrame
 from ui.settings import SettingsFrame
@@ -439,15 +438,6 @@ class App(ctk.CTk):
 
         if kind == "log":
             home.log_line(str(event.get("msg", "")))
-
-        elif kind == "ask":
-            candidates = event.get("candidates") or []
-
-            def on_choice(guid: Optional[str]) -> None:
-                if self.flow is not None:
-                    self.flow.respond_choice(guid)
-
-            CandidateDialog(self, candidates, on_choice).focus()
 
         elif kind == "success":
             msg = str(event.get("msg", ""))

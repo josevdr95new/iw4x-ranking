@@ -126,11 +126,20 @@ export function AccountPage() {
       setProfileSaved(true);
     } catch (error) {
       if (error instanceof ApiError) {
-        const fieldErrors = error.fieldErrors();
-        if (fieldErrors.displayName) {
-          setProfileErrors({ displayName: fieldErrors.displayName });
+        if (error.code === "NICK_TAKEN") {
+          setProfileErrors({
+            displayName:
+              error.message.trim().length > 0
+                ? error.message
+                : "Ese nick ya está reservado por otra cuenta.",
+          });
         } else {
-          setProfileErrors({ form: "No se pudo guardar. Inténtalo de nuevo." });
+          const fieldErrors = error.fieldErrors();
+          if (fieldErrors.displayName) {
+            setProfileErrors({ displayName: fieldErrors.displayName });
+          } else {
+            setProfileErrors({ form: "No se pudo guardar. Inténtalo de nuevo." });
+          }
         }
       } else {
         setProfileErrors({ form: "No se pudo guardar. Inténtalo de nuevo." });

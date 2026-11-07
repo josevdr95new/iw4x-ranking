@@ -1,18 +1,24 @@
 import { useSearchParams } from "react-router-dom";
 import { ServerConfigPanel } from "./admin/ServerConfigPanel";
 import { ModerationPanel } from "./admin/ModerationPanel";
+import { IdentityPanel } from "./admin/IdentityPanel";
 
-export type AdminTab = "config" | "moderacion";
+export type AdminTab = "config" | "identidad" | "moderacion";
 
 const TABS: Array<{ id: AdminTab; label: string }> = [
   { id: "config", label: "Server config" },
+  { id: "identidad", label: "Identidad" },
   { id: "moderacion", label: "Moderación" },
 ] as const;
 
-/** Shell de /admin: subnav de dos pestañas; ?tab=moderacion es compartible por URL. */
+function parseTab(raw: string | null): AdminTab {
+  return raw === "identidad" || raw === "moderacion" ? raw : "config";
+}
+
+/** Shell de /admin: subnav de pestañas compartibles por URL (?tab=moderacion). */
 export function AdminPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab: AdminTab = searchParams.get("tab") === "moderacion" ? "moderacion" : "config";
+  const tab = parseTab(searchParams.get("tab"));
 
   const setTab = (next: AdminTab) => {
     setSearchParams(
@@ -30,7 +36,7 @@ export function AdminPage() {
     <div>
       <h1 className="type-display-xl text-text">Administración</h1>
       <p className="type-caption mt-2 text-text-2">
-        Config del server dedicado y moderación de la comunidad vía IW4MAdmin.
+        Config del server dedicado, identidad de la comunidad y moderación vía IW4MAdmin.
       </p>
 
       <div className="mb-4 mt-4 border-b border-border" aria-hidden="true" />
@@ -65,7 +71,13 @@ export function AdminPage() {
         aria-labelledby={`admin-tab-${tab}`}
         className="mt-4"
       >
-        {tab === "config" ? <ServerConfigPanel /> : <ModerationPanel />}
+        {tab === "config" ? (
+          <ServerConfigPanel />
+        ) : tab === "identidad" ? (
+          <IdentityPanel />
+        ) : (
+          <ModerationPanel />
+        )}
       </div>
     </div>
   );

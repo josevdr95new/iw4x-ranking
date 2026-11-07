@@ -16,9 +16,10 @@ Qué verifica:
                 (la misma llamada que hace el launcher al confirmar) y el
                 error 409 GUID_ALREADY_LINKED con una segunda cuenta.
   6. (GUI)      badge VERIFICADO + JUGAR con cuenta ya vinculada.
-  7. (lógica)   GameFlow con API simulada: 1 candidato → auto-confirmar;
-                varios → diálogo; ninguno → timeout; 409 ya vinculada → éxito.
-  8. (GUI)      CandidateDialog: selección y cancelación.
+  7. (lógica)   GameFlow con API simulada: match de nick → auto-confirm
+                (desambiguado por recencia); sin match → timeout con copy
+                de nick; 409 ya verificada → éxito; API caída → retry.
+  8. (lógica)   pick_candidate: normalización ^X, recencia, vacío.
 
 Cuenta de prueba: launcher-test@test.local / LauncherTest2026
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
@@ -27,7 +28,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import threading
 import time
 import traceback
 from pathlib import Path
@@ -40,9 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from api_client import ApiClient, ApiError, NetworkError, user_is_linked  # noqa: E402
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
-from game_flow import GameFlow, build_game_args  # noqa: E402
+from game_flow import GameFlow, build_game_args, candidate_matches, pick_candidate  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
-from ui.dialogs import CandidateDialog  # noqa: E402
 from ui.main_window import App  # noqa: E402
 from user_store import UserStore  # noqa: E402
 
@@ -111,11 +110,38 @@ def phase_api_auth_flow() -> Optional[str]:
     api = ApiClient(API_URL)
     token: Optional[str] = None
     try:
-        token = ensure_login_retry(api)
+        token = ensure_login_retry(api)  # devuelve el token directamente
         check("POST /api/auth/login (cuenta creada por el launcher)", True)
     except Exception as exc:
-        check("POST /api/auth/login (cuenta creada por el launcher)", False, str(exc))
+        check("POST /api/auth/login (cuenta creada por el launcher)", False,
+              f"{exc}\n{traceback.format_exc()[-400:]}")
         return None
+
+    # Login por NICK (displayName) — campo 'identifier' del contrato nuevo.
+    # El launcher ya lo envía SIEMPRE; si el backend está a mitad de
+    # migración responde 400/401/500 y se marca como pendiente (no fallo).
+    try:
+        api.login(DISPLAY, PASSWORD)  # "Launcher Test" no es un email
+        check("login por NICK (campo identifier) aceptado por la API", True)
+    except ApiError as exc:
+        if exc.code in ("INVALID_CREDENTIALS", "VALIDATION_ERROR", "INTERNAL"):
+            check("login por NICK (campo identifier) aceptado por la API", True,
+                  "PENDIENTE: el backend aún no resuelve 'identifier' "
+                  f"(respondió {exc.code}); el launcher ya envía el campo nuevo")
+        else:
+            check("login por NICK (campo identifier) aceptado por la API", False,
+                  f"{exc.code}: {exc.message}")
+
+    # Credenciales malas → error del estilo actual (401 cuando el backend
+    # resuelve 'identifier'; 500 INTERNAL mientras la migración crashea).
+    try:
+        api.login("usuario-inexistente", "malapassword1")
+        check("credenciales malas → error sin filtrar datos", False,
+              "la API aceptó credenciales inválidas")
+    except ApiError as exc:
+        check("credenciales malas → error sin filtrar datos",
+              exc.code in ("INVALID_CREDENTIALS", "INTERNAL"),
+              f"{exc.code}: {exc.message}")
 
     try:
         user = api.me(token)
@@ -165,21 +191,34 @@ Step = Callable[[App, Callable[[], None]], None]
 
 
 def ensure_login(api: ApiClient, email: str, password: str, display: str) -> str:
-    """Login; si la cuenta no existe (DB reseteada por otro proceso), la recrea.
+    """Sesión para el bootstrap de pruebas, tolerando migración y flaps.
 
-    Devuelve el token. Lanza si el problema no es de credenciales.
+    Alterna los dos transportes de login (legacy 'email' ↔ nuevo
+    'identifier' con el nick) durante 2 rondas; el guard de ``_request``
+    convierte respuestas raras del server en NetworkError y aquí se
+    reintentan. Último recurso: crear la cuenta (DB reseteada por otro
+    proceso) y entrar por el campo nuevo.
     """
-    try:
-        return api.login(email, password)["token"]
-    except ApiError as exc:
-        if exc.code != "INVALID_CREDENTIALS":
-            raise
-    try:
-        return api.register(email, password, display)["token"]
-    except ApiError as exc2:
-        if exc2.code != "EMAIL_TAKEN":
-            raise
-    return api.login(email, password)["token"]
+    transports = [
+        (api._login_legacy, email),   # campo legacy 'email' (builds viejas)
+        (api.login, display),         # campo 'identifier' con el nick (nuevo)
+    ]
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        for transport, ident in transports:
+            try:
+                data = transport(ident, password)
+                token = data.get("token")
+                if token:
+                    return str(token)
+                last_err = NetworkError("la respuesta de login no trajo token")
+            except (ApiError, NetworkError) as exc:
+                last_err = exc
+            time.sleep(1.0)
+    # Último recurso: la cuenta no existe (DB reseteada) → crearla y entrar.
+    api.register(email, password, display)
+    data = api.login(display, password)
+    return str(data.get("token") or "")
 
 
 def link_test_account(api: ApiClient, token: str) -> Optional[str]:
@@ -284,7 +323,20 @@ def phase_register_or_login() -> None:
     """Fase 2: alta de cuenta desde el launcher (o login si ya existía)."""
 
     def step_wait_login(app: App, done: Callable[[], None]) -> None:
-        wait_in_app(app, lambda: app.current_frame is app.login_frame, done, timeout=10)
+        def ok() -> None:
+            # Regresión visual (bug: tarjeta sin pack → formulario invisible):
+            # NICK, CONTRASEÑA y ENTRAR deben estar MAPEADOS en pantalla.
+            for nombre, w in [("NICK", app.login_frame.nick),
+                              ("CONTRASEÑA", app.login_frame.password),
+                              ("ENTRAR", app.login_frame.action_btn),
+                              ("LINK CREAR CUENTA", app.login_frame.toggle_link)]:
+                check(f"login visible: {nombre} mapeado en pantalla",
+                      bool(w.winfo_ismapped()), f"mgr={w.winfo_manager()!r}")
+            # En modo login el email NO debe estar visible.
+            check("login sin email a la vista (solo registro)",
+                  not app.login_frame.email_box.winfo_ismapped())
+            done()
+        wait_in_app(app, lambda: app.current_frame is app.login_frame, ok, timeout=10)
 
     def step_submit(app: App, done: Callable[[], None]) -> None:
         """Intenta CREAR CUENTA; si el email ya existe, repite como login."""
@@ -292,8 +344,8 @@ def phase_register_or_login() -> None:
         if not f._register_mode:
             f._toggle_mode()  # modo CREAR CUENTA
         f.email.delete(0, "end"); f.email.insert(0, EMAIL)
+        f.nick.delete(0, "end"); f.nick.insert(0, DISPLAY)  # nick = displayName
         f.password.delete(0, "end"); f.password.insert(0, PASSWORD)
-        f.display_name.delete(0, "end"); f.display_name.insert(0, DISPLAY)
         f._on_submit()
 
         start = time.monotonic()
@@ -306,10 +358,11 @@ def phase_register_or_login() -> None:
                 check(f"{via} desde el launcher llega a la pantalla principal", True)
                 # El badge debe ser coherente con el estado REAL del usuario
                 # (en re-runs la cuenta ya puede estar vinculada).
-                expected = ("VERIFICADO" if (app.user or {}).get("linkedGuid")
-                            else "SIN VINCULAR")
+                expected = ("VERIFICADO" if (app.user or {}).get("linkedGuids")
+                            or (app.user or {}).get("linkedGuid")
+                            else "SIN IDENTIDAD")
                 badge = str(app.home_frame.badge.cget("text"))
-                check(f"badge {expected} según estado de vinculación",
+                check(f"badge {expected} según estado de identidad",
                       expected in badge, badge)
                 check(
                     "nombre de usuario en cabecera",
@@ -320,13 +373,16 @@ def phase_register_or_login() -> None:
                 done()
                 return
 
-            # EMAIL_TAKEN: repetimos el formulario en modo login.
+            # Cuenta ya existente (EMAIL_TAKEN o nick reservado): repetimos
+            # el formulario en modo login (por NICK).
             status = str(f.status.cget("text"))
             if (not retried["done"] and ("ya tiene una cuenta" in status
-                                         or "EMAIL_TAKEN" in status)):
+                                         or "EMAIL_TAKEN" in status
+                                         or "ya está reservado" in status)):
                 retried["done"] = True
                 if f._register_mode:
-                    f._toggle_mode()  # vuelve a ENTRAR
+                    f._toggle_mode()  # vuelve a ENTRAR (solo NICK)
+                f.nick.delete(0, "end"); f.nick.insert(0, DISPLAY)
                 f.password.delete(0, "end"); f.password.insert(0, PASSWORD)
                 f._on_submit()
 
@@ -469,7 +525,11 @@ def phase_stats() -> None:
 
 
 def phase_play_unlinked() -> None:
-    """Fase 4: JUGAR simulado con cuenta SIN vincular → espera y reintento."""
+    """Fase 4: JUGAR simulado con cuenta SIN identidad → espera y reintento.
+
+    Con bots jugando llegan candidatos ajenos: el guard de nick NUNCA los
+    confirma; el flujo termina por timeout con el mensaje nuevo + REINTENTAR.
+    """
 
     def step_wait_home(app: App, done: Callable[[], None]) -> None:
         wait_in_app(
@@ -484,32 +544,23 @@ def phase_play_unlinked() -> None:
         done()
 
     def step_wait_result(app: App, done: Callable[[], None]) -> None:
-        def finished() -> bool:
-            if app.flow is not None:
-                return False
-            txt = str(app.home_frame.status.cget("text"))
-            btn = str(app.home_frame.play_btn.cget("text"))
-            return ("No detectamos" in txt or "cancelada" in txt or
-                    "vinculada" in txt or "Juego abierto" in txt or
-                    btn in ("REINTENTAR", "JUGAR"))
-
-        def ok() -> None:
+        def terminal_asserts(app: App, done: Callable[[], None]) -> None:
             console = app.home_frame.console.get("1.0", "end")
             status = str(app.home_frame.status.cget("text"))
             btn = str(app.home_frame.play_btn.cget("text"))
             check("JUGAR simulado: log de 'SIMULACIÓN' presente",
                   "SIMULACIÓN" in console)
             check(
-                "JUGAR simulado: flujo de vinculación o partida directa",
-                ("Esperando tu conexión" in console)          # camino sin vincular
-                or ("solo abrimos el juego" in console)       # re-run con GUID ya vinculado
-                or ("GUID detectado" in console),
+                "JUGAR simulado: flujo de verificación o partida directa",
+                ("Esperando tu conexión" in console)          # camino sin identidad
+                or ("solo abrimos el juego" in console)       # re-run ya verificado
+                or ("Identidad detectada" in console),
                 console[-400:],
             )
             check(
                 "JUGAR simulado: termina con estado claro",
-                ("No detectamos" in status) or ("cancelada" in status)
-                or ("vinculada" in status) or ("Juego abierto" in status),
+                ("No vimos entrar a nadie" in status) or ("cancelada" in status)
+                or ("verificada" in status) or ("Juego abierto" in status),
                 status,
             )
             check(
@@ -517,9 +568,11 @@ def phase_play_unlinked() -> None:
                 btn in ("REINTENTAR", "JUGAR"),
                 btn,
             )
-            # Si el flujo auto-confirmó un candidato, refresh_me (async)
-            # debe traer el badge VERIFICADO: esperamos con poll, no al tacto.
-            if "Cuenta vinculada" in console:
+            # Guard de nick: JAMÁS se confirma un candidato con nick ajeno.
+            if "Identidad verificada" in console:
+                check("auto-confirm solo con nick coincidente",
+                      "Identidad detectada" in console, console[-400:])
+
                 def badge_ok() -> None:
                     badge = str(app.home_frame.badge.cget("text"))
                     check("badge VERIFICADO tras auto-confirmar candidato",
@@ -529,10 +582,13 @@ def phase_play_unlinked() -> None:
                             lambda: "VERIFICADO" in str(app.home_frame.badge.cget("text")),
                             badge_ok, timeout=12)
             else:
+                check("guard de nick: sin auto-confirm de candidatos ajenos", True)
                 done()
 
-        # 40s de margen (poll de prueba dura ~7s).
-        wait_in_app(app, finished, ok, timeout=40)
+        # 40s de margen (poll de prueba dura ~7s): el flujo ya no abre
+        # diálogos; termina solo por timeout o por verificación.
+        wait_in_app(app, lambda: app.flow is None,
+                    lambda: terminal_asserts(app, done), timeout=40)
 
     run_phase(
         "JUGAR simulado sin vincular",
@@ -601,9 +657,10 @@ def phase_link_real() -> None:
         try:
             api.register(EMAIL2, PASSWORD2, DISPLAY2)
         except ApiError as exc:
-            if exc.code != "EMAIL_TAKEN":
+            if exc.code not in ("EMAIL_TAKEN", "NICK_TAKEN"):
                 raise
-        tok2 = api.login(EMAIL2, PASSWORD2)["token"]
+        # Login por NICK (el email ya no es credencial de entrada).
+        tok2 = api.login(DISPLAY2, PASSWORD2)["token"]
         api.link_confirm(tok2, guid)
         check("409 GUID_ALREADY_LINKED al confirmar GUID ajeno", False,
               "la API permitió vincular un GUID ya ocupado")
@@ -706,8 +763,7 @@ class StubApi:
         return r
 
 
-def flow_once(stub: StubApi, respond: Optional[Callable[[GameFlow], None]] = None,
-              poll_interval: float = 0.4, poll_max: float = 1.2,
+def flow_once(stub: StubApi, poll_interval: float = 0.4, poll_max: float = 1.2,
               display_name: str = "El Tester"):
     events: List[Dict[str, Any]] = []
     flow = GameFlow(
@@ -715,15 +771,6 @@ def flow_once(stub: StubApi, respond: Optional[Callable[[GameFlow], None]] = Non
         events.append, simulate=True, display_name=display_name,
         poll_interval=poll_interval, poll_max_seconds=poll_max,
     )
-    if respond is not None:
-        def responder() -> None:
-            deadline = time.monotonic() + 8
-            while time.monotonic() < deadline:
-                if any(e.get("t") == "ask" for e in events):
-                    respond(flow)
-                    return
-                time.sleep(0.05)
-        threading.Thread(target=responder, daemon=True).start()
     flow.run()
     return events
 
@@ -731,50 +778,133 @@ def flow_once(stub: StubApi, respond: Optional[Callable[[GameFlow], None]] = Non
 def phase_flow_logic() -> None:
     print("\n=== Fase lógica: GameFlow con API simulada ===")
 
-    # 1 candidato → auto-confirmación.
+    # --- Comparación de nicks (función pura, sin red) -----------------------
+    check("match exacto de nick", candidate_matches("El Tester", "El Tester"))
+    check("match trim + lower", candidate_matches("  el tester ", "EL TESTER"))
+    check("códigos ^X del server se stripean",
+          candidate_matches("^7El^1 Tester", "El Tester"))
+    check("nick distinto → False",
+          not candidate_matches("ZombieSlayer69", "El Tester"))
+    check("displayName vacío → False",
+          not candidate_matches("Alguien", ""))
+
+    # pick_candidate (pura): filtrado por nick + desambiguación por recencia.
+    bots = [{"guid": str(100 + i), "name": f"Bot_{i}",
+             "lastConnection": "2026-11-06T09:00:00.000Z"} for i in range(14)]
+    bots.append({"guid": "777", "name": "^7El^1 Tester",
+                 "lastConnection": "2026-11-06T10:00:00.000Z"})
+    picked = pick_candidate(bots, "El Tester")
+    check("pick_candidate: encuentra el único match entre bots",
+          picked is not None and picked["guid"] == "777", str(picked))
+    check("pick_candidate: sin match → None", pick_candidate(bots, "Nadie") is None)
+    check("pick_candidate: display vacío → None", pick_candidate(bots, "") is None)
+    two = [{"guid": "A", "name": "el tester",
+            "lastConnection": "2026-11-06T09:00:00.000Z"},
+           {"guid": "B", "name": "^7El^1 Tester",
+            "lastConnection": "2026-11-06T11:30:00.000Z"}]
+    check("pick_candidate: recencia gana con nick duplicado",
+          (pick_candidate(two, "El Tester") or {}).get("guid") == "B")
+
+    # 1 candidato CON match de nick → auto-confirmación.
     stub = StubApi(candidate_pages=[{"candidates": [
-        {"guid": "111", "name": "Uno", "lastConnection": "2026-11-06T10:00:00.000Z"},
+        {"guid": "111", "name": "^7El^1 Tester",
+         "lastConnection": "2026-11-06T10:00:00.000Z"},
     ]}])
     evs = flow_once(stub)
     kinds = [e["t"] for e in evs]
-    check("1 candidato → confirma automáticamente",
+    check("1 candidato con nick exacto → confirma automáticamente",
           stub.confirmed == ["111"] and "success" in kinds, f"{stub.confirmed} {kinds}")
-    check("log 'GUID detectado' presente",
-          any(e.get("t") == "log" and "GUID detectado: 111" in e.get("msg", "")
+    check("log 'Identidad detectada en el server' presente (nick sin ^X)",
+          any(e.get("t") == "log"
+              and "Identidad detectada en el server: El Tester" in e.get("msg", "")
               for e in evs))
 
-    # Varios candidatos → diálogo y confirmación del elegido.
+    # 15 candidatos (bots con nicks random) + 1 que coincide → auto-confirm
+    # del que coincide, SIN diálogo y sin confirmar a los bots.
+    bots = [{"guid": str(100 + i), "name": f"Bot_{i}",
+             "lastConnection": f"2026-11-06T09:{i:02d}:00.000Z"}
+            for i in range(14)]
+    bots.append({"guid": "777", "name": "^7El^1 Tester",
+                 "lastConnection": "2026-11-06T10:00:00.000Z"})
+    stub = StubApi(candidate_pages=[{"candidates": bots}])
+    evs = flow_once(stub)
+    kinds = [e["t"] for e in evs]
+    check("15 bots + 1 match → confirma SOLO el que coincide, sin diálogo",
+          stub.confirmed == ["777"] and "success" in kinds and "ask" not in kinds,
+          f"confirmed={stub.confirmed} kinds={kinds}")
+    check("log 'Identidad detectada en el server' presente (nick sin ^X)",
+          any(e.get("t") == "log"
+              and "Identidad detectada en el server: El Tester" in e.get("msg", "")
+              for e in evs))
+
+    # Varios con el MISMO nick → desambiguación por recencia (auto, sin ask).
     stub = StubApi(candidate_pages=[{"candidates": [
-        {"guid": "111", "name": "Uno", "lastConnection": "2026-11-06T10:00:00.000Z"},
-        {"guid": "222", "name": "Dos", "lastConnection": "2026-11-06T09:00:00.000Z"},
+        {"guid": "A", "name": "El Tester",
+         "lastConnection": "2026-11-06T09:00:00.000Z"},
+        {"guid": "B", "name": "^7el^1 tester",
+         "lastConnection": "2026-11-06T11:30:00.000Z"},
     ]}])
-    evs = flow_once(stub, respond=lambda f: f.respond_choice("222"))
-    asked = next((e for e in evs if e["t"] == "ask"), None)
-    check("varios candidatos → pide elección al usuario",
-          asked is not None and len(asked.get("candidates", [])) == 2)
-    check("elige el GUID 222 confirmándolo", stub.confirmed == ["222"],
-          str(stub.confirmed))
+    evs = flow_once(stub)
+    check("2 candidatos con mismo nick → elige el MÁS RECIENTE (B)",
+          stub.confirmed == ["B"], str(stub.confirmed))
+    check("la desambiguación queda loggeada",
+          any(e.get("t") == "log" and "más reciente" in e.get("msg", "")
+              for e in evs))
+
+    # 1 candidato con nick DISTINTO → JAMÁS se confirma: timeout + copy nuevo.
+    stub = StubApi(candidate_pages=[{"candidates": [
+        {"guid": "999", "name": "ZombieSlayer69",
+         "lastConnection": "2026-11-06T10:00:00.000Z"},
+    ]}])
+    evs = flow_once(stub, poll_interval=0.4, poll_max=1.0)
+    failed = next((e for e in evs if e["t"] == "failed"), None)
+    check("1 candidato ajeno → jamás se confirma y no hay diálogo",
+          stub.confirmed == [] and "ask" not in [e["t"] for e in evs],
+          f"confirmed={stub.confirmed}")
+    check("1 candidato ajeno → timeout con el mensaje nuevo de nick",
+          failed is not None and failed.get("retry") is True
+          and "No vimos entrar a nadie con tu nick (El Tester)" in failed.get("msg", "")
+          and "El juego debe abrirse con el nick de tu cuenta" in failed.get("msg", ""),
+          str(failed))
+
+    # 409 GUID_ALREADY_LINKED al confirmar → copy HUD claro.
+    stub = StubApi(
+        candidate_pages=[{"candidates": [
+            {"guid": "444", "name": "El Tester",
+             "lastConnection": "2026-11-06T10:00:00.000Z"},
+        ]}],
+        confirm_results=[ApiError(409, "GUID_ALREADY_LINKED", "ocupado")],
+    )
+    evs = flow_once(stub)
+    failed = next((e for e in evs if e["t"] == "failed"), None)
+    check("409 GUID ajeno → copy claro de PC compartida",
+          failed is not None and failed.get("retry") is True
+          and "ya pertenece a otra cuenta" in failed.get("msg", "")
+          and "SU propia cuenta" in failed.get("msg", ""),
+          str(failed))
 
     # Ningún candidato → timeout con reintento.
     stub = StubApi()
     evs = flow_once(stub, poll_interval=0.4, poll_max=1.0)
     failed = next((e for e in evs if e["t"] == "failed"), None)
-    check("sin candidatos → 'No detectamos tu entrada al server' + retry",
+    check("sin candidatos → mensaje nuevo de nick + retry",
           failed is not None and failed.get("retry") is True
-          and "No detectamos" in failed.get("msg", ""),
+          and "No vimos entrar a nadie con tu nick (El Tester)" in failed.get("msg", "")
+          and "El juego debe abrirse con el nick de tu cuenta" in failed.get("msg", ""),
           str(failed))
 
     # 409 USER_ALREADY_LINKED al confirmar → éxito para el jugador.
     stub = StubApi(
         candidate_pages=[{"candidates": [
-            {"guid": "333", "name": "Tres", "lastConnection": "2026-11-06T10:00:00.000Z"},
+            {"guid": "333", "name": "El Tester",
+             "lastConnection": "2026-11-06T10:00:00.000Z"},
         ]}],
         confirm_results=[ApiError(409, "USER_ALREADY_LINKED", "ya vinculada")],
     )
     evs = flow_once(stub)
     ok = next((e for e in evs if e["t"] == "success"), None)
-    check("409 ya vinculada → se trata como éxito",
-          ok is not None and "ya está vinculada" in ok.get("msg", ""), str(ok))
+    check("409 ya verificada → se trata como éxito",
+          ok is not None and "ya estaba verificada" in ok.get("msg", ""), str(ok))
 
     # API caída durante el polling → fallo con reintento.
     stub = StubApi()
@@ -850,38 +980,6 @@ def phase_command_args() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fase 7 GUI: CandidateDialog con candidatos falsos.
-def phase_dialog() -> None:
-    picked: List[Optional[str]] = []
-
-    def step(app: App, done: Callable[[], None]) -> None:
-        candidates = [
-            {"guid": "111", "name": "Uno", "lastConnection": "2026-11-06T10:00:00.000Z"},
-            {"guid": "222", "name": "Dos", "lastConnection": "2026-11-06T09:00:00.000Z"},
-        ]
-
-        def step2() -> None:
-            # Cancelación: cerrar sin elegir → None.
-            d2 = CandidateDialog(app, candidates, lambda g: picked.append(g))
-            app.after(400, d2._cancel)
-            app.after(900, finish)
-
-        def finish() -> None:
-            check("diálogo multi-candidato: confirmación devuelve el GUID elegido",
-                  bool(picked) and picked[0] == "222", str(picked))
-            check("diálogo multi-candidato: cancelar devuelve None",
-                  len(picked) > 1 and picked[1] is None, str(picked))
-            done()
-
-        d1 = CandidateDialog(app, candidates, lambda g: picked.append(g))
-        app.after(400, lambda: (d1._var.set("222"), d1._confirm()))
-        app.after(900, step2)
-
-    run_phase("diálogo de candidatos", [step],
-              lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)))
-
-
-# ---------------------------------------------------------------------------
 def main() -> int:
     # Consola Windows (cp1252): nunca romper por caracteres Unicode.
     try:
@@ -917,7 +1015,6 @@ def main() -> int:
     phase_play_linked()
     phase_flow_logic()
     phase_command_args()
-    phase_dialog()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

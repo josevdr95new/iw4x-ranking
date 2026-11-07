@@ -106,6 +106,8 @@ export interface LeaderboardParams {
   search?: string;
   page?: number;
   pageSize?: number;
+  /** true → incluye bots del server (heurística GUID 0xB07…). Default: solo humanos. */
+  includeBots?: boolean;
 }
 
 export interface LeaderboardPlayer {
@@ -121,6 +123,8 @@ export interface LeaderboardPlayer {
   lastConnection: string;
   /** true si el GUID tiene una cuenta web vinculada (API v0.2). */
   linked: boolean;
+  /** true si el GUID es un bot del server. Opcional: si la API aún no lo envía, el UI usa la heurística del rango 0xB07. */
+  isBot?: boolean;
 }
 
 export interface LeaderboardResponse {
@@ -160,12 +164,22 @@ export interface PlayerProfile {
   linked: boolean;
 }
 
+/** Alias histórico del GUID (docs/API.md §Perfil — anti-confusión de identidades). */
+export interface PlayerAlias {
+  name: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+}
+
 export interface PlayerDetail {
   player: PlayerProfile;
   /** Posición global (sort=kills desc); null si el jugador no clasifica (API v0.2). */
   rank: number | null;
   recentEvents: KillEvent[];
   byServer: Array<{ server: string; kills: number; deaths: number }>;
+  /** Nombres históricos ≠ nombre actual, lastSeenAt desc, máx 10. Vacío → siempre usó el mismo nombre. */
+  aliases?: PlayerAlias[];
 }
 
 export interface AuthResponse {
@@ -362,6 +376,84 @@ export interface IamPenaltyResponse {
   output: string[];
 }
 
+/* Identidad (docs/API.md §Admin: identity-alerts + alias-conflicts) */
+
+/** Colisión de nombre: un mismo displayName usado por ≥2 GUIDs distintos. */
+export interface AliasConflictGuid {
+  guid: string;
+  /** Nombre EXACTO más reciente del guid para esa clave. */
+  name: string;
+  linked: boolean;
+  linkedAccountId: number | null;
+  /** Solo en este endpoint ADMIN. */
+  linkedEmail: string | null;
+  isBot: boolean;
+  lastSeenAt: string;
+  /** Suma de todas las variantes del nombre para ese guid. */
+  occurrences: number;
+}
+
+export interface NameCollision {
+  /** Clave normalizada (nombre limpio sin ^X, lowercase). */
+  nameKey: string;
+  /** Nombre exacto más reciente del grupo, para pintar. */
+  displayName: string;
+  distinctAccounts: number;
+  /** high = ≥2 guids linked a cuentas DISTINTAS. */
+  severity: "high" | "low";
+  guids: AliasConflictGuid[];
+}
+
+export interface SharedGuid {
+  guid: string;
+  name: string;
+  linked: boolean;
+  isBot: boolean;
+  /** Claves limpias distintas (puede exceder aliases.length). */
+  aliasCount: number;
+  /** Máx 10, lastSeenAt desc. */
+  aliases: PlayerAlias[];
+}
+
+export interface AliasConflictsResponse {
+  nameCollisions: NameCollision[];
+  sharedGuids: SharedGuid[];
+  generatedAt: string;
+}
+
+export type IdentityAlertAction = "LINK_TO_OWNER" | "DISMISS";
+
+export type IdentityAlertStatus = "OPEN" | "RESOLVED_OWNER" | "RESOLVED_IMPOSTOR" | "DISMISSED";
+
+export interface IdentityAlertOwner {
+  id: number;
+  email: string;
+  displayName: string;
+  /** GUIDs ya vinculados a la cuenta del dueño. */
+  linkedGuids: string[];
+}
+
+/** Alerta de identidad: alguien usa en el juego el nick reservado de una cuenta web. */
+export interface IdentityAlert {
+  id: number;
+  /** Nick reclamado (nombre visto en el server; puede traer códigos ^X). */
+  name: string;
+  guid: string;
+  status: IdentityAlertStatus;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+  owner: IdentityAlertOwner;
+  /** GUIDs del dueño al momento de crear la alerta (null si no tenía ninguno). */
+  ownerLinkedGuidsSnapshot: string[] | null;
+}
+
+export interface IdentityAlertsResponse {
+  alerts: IdentityAlert[];
+  counts: Record<IdentityAlertStatus, number>;
+  total: number;
+}
+
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
@@ -413,8 +505,25 @@ export const api = {
     return request<AuthResponse>("/auth/register", { method: "POST", body: input });
   },
 
-  login(input: { email: string; password: string }) {
-    return request<AuthResponse>("/auth/login", { method: "POST", body: input });
+  /**
+   * Login con nick O email (`identifier`). Fallback legacy: si el backend aún no acepta
+   * `identifier` (VALIDATION_ERROR por clave desconocida), reintenta con el campo `email`.
+   */
+  async login(input: { identifier: string; password: string }) {
+    try {
+      return await request<AuthResponse>("/auth/login", {
+        method: "POST",
+        body: { identifier: input.identifier, password: input.password },
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "VALIDATION_ERROR") {
+        return request<AuthResponse>("/auth/login", {
+          method: "POST",
+          body: { email: input.identifier, password: input.password },
+        });
+      }
+      throw error;
+    }
   },
 
   me() {
@@ -433,6 +542,8 @@ export const api = {
     if (params.search) qs.set("search", params.search);
     if (params.page !== undefined) qs.set("page", String(params.page));
     if (params.pageSize !== undefined) qs.set("pageSize", String(params.pageSize));
+    // Siempre explícito: el server rotó includeBots entre opcional y requerido durante el deploy.
+    qs.set("includeBots", params.includeBots ? "true" : "false");
     const query = qs.toString();
     return request<LeaderboardResponse>(`/leaderboard${query ? `?${query}` : ""}`);
   },
@@ -493,5 +604,27 @@ export const api = {
       body: input,
       auth: true,
     });
+  },
+
+  /* Identidad — ADMIN (docs/API.md §Admin). */
+
+  /** Alertas de identidad. `status` opcional: sin param = todas. 404 si el backend aún no lo despliega. */
+  identityAlerts(status?: string) {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : "";
+    return request<IdentityAlertsResponse>(`/admin/identity-alerts${suffix}`, { auth: true });
+  },
+
+  /** Resuelve una alerta: LINK_TO_OWNER (nick→dueño) o DISMISS (descartar/castigado). Devuelve la alerta actualizada. */
+  resolveIdentityAlert(id: number | string, action: IdentityAlertAction) {
+    return request<IdentityAlert>(`/admin/identity-alerts/${encodeURIComponent(String(id))}/resolve`, {
+      method: "POST",
+      body: { action },
+      auth: true,
+    });
+  },
+
+  /** Conflictos de alias (read-only): colisiones de nombre + guids multi-alias. */
+  aliasConflicts() {
+    return request<AliasConflictsResponse>("/admin/alias-conflicts", { auth: true });
   },
 };

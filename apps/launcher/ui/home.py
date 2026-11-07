@@ -158,7 +158,7 @@ class HomeFrame(ctk.CTkFrame):
             )
         else:
             self.badge.configure(
-                text="  SIN VINCULAR  ",
+                text="  SIN IDENTIDAD  ",
                 fg_color=COLORS["accent_subtle"], text_color=COLORS["accent"],
             )
 

@@ -231,6 +231,18 @@ export function PlayerPage() {
           <div className="min-w-0 flex-1">
             <h1 className="type-display-xl text-text">{player.name}</h1>
             <p className="type-mono mt-1 text-text-2">GUID: {player.guid}</p>
+            {detail.aliases && detail.aliases.length > 0 && (
+              <p className="type-mono mt-1 max-w-[68ch] text-[12px] text-text-2">
+                También visto como:{" "}
+                {detail.aliases.map((alias, index) => (
+                  <span key={alias.name}>
+                    {index > 0 && ", "}
+                    {alias.name} ({formatInt(alias.occurrences)}{" "}
+                    {alias.occurrences === 1 ? "vez" : "veces"}, {formatRelative(alias.lastSeenAt)})
+                  </span>
+                ))}
+              </p>
+            )}
             <p className="type-caption mt-1 text-text-2">
               Miembro desde {formatMemberSince(player.firstConnection)}
             </p>
