@@ -129,6 +129,92 @@ describe('PUT + GET roundtrip binario fiel', () => {
   });
 });
 
+describe('guid.dat y mods/<mod>/iw4x_config.cfg (identidad + config por mod)', () => {
+  const GUID_PATH = 'guid.dat';
+  const MOD_CFG_PATH = 'mods/mpu_iw4x/iw4x_config.cfg';
+
+  it('guid.dat roundtrip byte-exacto con X-Save-Sha256', async () => {
+    const user = await registerUser('cloudsave-guid@test.local', 'supersecret123', 'CloudTester Guid');
+    const guidBlob = binaryBlob(91, 152); // clave ECC real ~<4KB; dummy aquí
+
+    const put = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(GUID_PATH, guidBlob)] });
+    expect(put.status).toBe(200);
+    expect((put.body as { saved: boolean }).saved).toBe(true);
+
+    const res = await req().get('/api/profile/save/file').query({ path: GUID_PATH }).set('Authorization', `Bearer ${user.token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-save-sha256']).toBe(sha256(guidBlob));
+    expect(Buffer.isBuffer(res.body)).toBe(true);
+    expect(res.body.equals(guidBlob)).toBe(true);
+
+    const manifest = await req().get('/api/profile/save').set('Authorization', `Bearer ${user.token}`);
+    const files = (manifest.body as { files: Array<{ path: string }> }).files;
+    expect(files.map((f) => f.path)).toContain(GUID_PATH);
+  });
+
+  it('mods/<mod>/iw4x_config.cfg roundtrip byte-exacto', async () => {
+    const user = await registerUser('cloudsave-modcfg@test.local', 'supersecret123', 'CloudTester ModCfg');
+    const cfgContent = Buffer.from('seta name "clan|player"\nseta clan "CLAN"\n', 'utf8');
+
+    const put = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(MOD_CFG_PATH, cfgContent)] });
+    expect(put.status).toBe(200);
+
+    const res = await req().get('/api/profile/save/file').query({ path: MOD_CFG_PATH }).set('Authorization', `Bearer ${user.token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-save-sha256']).toBe(sha256(cfgContent));
+    expect(res.body.equals(cfgContent)).toBe(true);
+  });
+
+  it('dedupe unchanged considera guid.dat y mod config (mismo contenido → saved:false; cambia uno → saved:true)', async () => {
+    const user = await registerUser('cloudsave-dedupe@test.local', 'supersecret123', 'CloudTester Dedupe');
+    const stat = binaryBlob(101, 100);
+    const guid = binaryBlob(102, 120);
+    const modCfg = Buffer.from('seta name "x"', 'utf8');
+
+    const put1 = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, stat), fileEntry(GUID_PATH, guid), fileEntry(MOD_CFG_PATH, modCfg)] });
+    expect((put1.body as { saved: boolean }).saved).toBe(true);
+    const version1 = (put1.body as { version: number }).version;
+
+    // Idéntico → unchanged
+    const putSame = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, stat), fileEntry(GUID_PATH, guid), fileEntry(MOD_CFG_PATH, modCfg)] });
+    expect(putSame.status).toBe(200);
+    expect((putSame.body as { saved: boolean; reason?: string }).saved).toBe(false);
+    expect((putSame.body as { reason?: string }).reason).toBe('unchanged');
+
+    // Cambia SOLO guid.dat → versión nueva
+    const guid2 = binaryBlob(103, 120);
+    const put2 = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, stat), fileEntry(GUID_PATH, guid2), fileEntry(MOD_CFG_PATH, modCfg)] });
+    expect((put2.body as { saved: boolean }).saved).toBe(true);
+    expect((put2.body as { version: number }).version).toBeGreaterThan(version1);
+  });
+
+  it('traversal sigue cerrado para los paths nuevos → 400', async () => {
+    for (const badPath of ['guid.dat/../iw4x.stat', '../guid.dat', 'guid\\dat', 'mods/mpu/iw4x_config.cfg/../../guid.dat', 'guid.dat.txt', 'GUID.DAT', 'mods/mpu/iw4x_config.cfg.bak']) {
+      const res = await req()
+        .put('/api/profile/save')
+        .set('Authorization', `Bearer ${userA.token}`)
+        .send({ files: [{ path: badPath, dataBase64: Buffer.from('x').toString('base64'), sha256: sha256(Buffer.from('x')) }] });
+      expect(res.status).toBe(400);
+      expect((res.body as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    }
+  });
+});
+
 describe('PUT validación (sha, paths, caps)', () => {
   it('sha256 declarado ≠ contenido → 400 SHA_MISMATCH', async () => {
     const entry = fileEntry(STAT_PATH, binaryBlob(41, 100));
@@ -166,12 +252,26 @@ describe('PUT validación (sha, paths, caps)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('más de 12 archivos → 400', async () => {
+  it('más de 24 archivos → 400', async () => {
     const files: SaveFileBody[] = [];
-    for (let i = 1; i <= 13; i++) files.push(fileEntry(`mods/mod_${i}/iw4x.stat`, binaryBlob(i, 32)));
+    for (let i = 1; i <= 25; i++) files.push(fileEntry(`mods/mod_${i}/iw4x.stat`, binaryBlob(i, 32)));
     const res = await req().put('/api/profile/save').set('Authorization', `Bearer ${userA.token}`).send({ files });
     expect(res.status).toBe(400);
     expect((res.body as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('exactamente 24 archivos → 200 (boundary del cap multi-mod)', async () => {
+    const user = await registerUser('cloudsave-caps24@test.local', 'supersecret123', 'CloudTester Caps24');
+    const files: SaveFileBody[] = [
+      fileEntry('guid.dat', binaryBlob(71, 96)),
+      fileEntry(STAT_PATH, binaryBlob(72, 96)),
+      fileEntry(CFG_PATH, binaryBlob(73, 96)),
+    ];
+    for (let i = 1; i <= 21; i++) files.push(fileEntry(`mods/cap_mod_${i}/iw4x.stat`, binaryBlob(80 + i, 32)));
+    const res = await req().put('/api/profile/save').set('Authorization', `Bearer ${user.token}`).send({ files });
+    expect(res.status).toBe(200);
+    expect((res.body as { saved: boolean }).saved).toBe(true);
+    expect((res.body as { files: unknown[] }).files).toHaveLength(24);
   });
 
   it('dataBase64 > 256KB → 400', async () => {

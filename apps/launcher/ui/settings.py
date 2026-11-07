@@ -93,7 +93,15 @@ class SettingsFrame(ctk.CTkFrame):
             text="El juego siempre usa el nombre de tu cuenta del ranking.",
             font=font(11), text_color=COLORS["text_dim"], anchor="w",
             justify="left", wraplength=520,
-        ).pack(fill="x", pady=(0, SP["m"]))
+        ).pack(fill="x", pady=(0, SP["s"]))
+        self.cloud_save_check = ctk.CTkCheckBox(
+            inner, text="Sincronizar mi progreso (nivel/armas) con mi cuenta",
+            font=font(12), fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            checkmark_color=COLORS["on_accent"], text_color=COLORS["text"],
+            border_color=COLORS["border_strong"], corner_radius=2,
+        )
+        self.cloud_save_check.pack(anchor="w", pady=(0, SP["m"]))
 
         # --- Acciones ---------------------------------------------------------
         hairline(inner).pack(fill="x", pady=(0, SP["m"]))
@@ -129,6 +137,10 @@ class SettingsFrame(ctk.CTkFrame):
         idx = min(max(cfg.default_server, 0), len(labels) - 1) if labels else 0
         if labels:
             self.server_menu.set(labels[idx])
+        if cfg.cloud_save:
+            self.cloud_save_check.select()
+        else:
+            self.cloud_save_check.deselect()
         self.feedback.configure(text="", text_color=COLORS["text_dim"])
 
     # --- Acciones ------------------------------------------------------------
@@ -194,6 +206,7 @@ class SettingsFrame(ctk.CTkFrame):
         cfg.set("api_url", base)
         cfg.set("game_path", self.game_path.get().strip())
         cfg.set("default_server", idx)
+        cfg.set("cloud_save", bool(self.cloud_save_check.get()))
         cfg.save()
 
         # Aplicar en caliente: nuevo cliente con la URL actualizada.

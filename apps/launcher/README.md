@@ -43,6 +43,7 @@ defaults si no existe:
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
+| `cloud_save`            | **true** por defecto: sincroniza el progreso (`players\iw4x.stat`, `iw4x_config.cfg`, `mods\<mod>\iw4x.stat`) con la cuenta antes de abrir el juego y al cerrarlo (backup automático previo en `%APPDATA%\iw4x-ranking-launcher\save-backups\`). Editable en Ajustes. |
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el polling de vinculación contra la API). |
 | `link_poll_interval`    | Segundos entre consultas de candidatos (default 10).          |
 | `link_poll_max_seconds` | Tiempo máximo de espera de conexión (default 180 = 3 min).    |
@@ -62,10 +63,17 @@ defaults si no existe:
    al nick guardado en el config del juego, sin tocar archivos. Si la
    cuenta no tiene displayName, el juego **no se lanza** y se pide
    actualizarlo en Mi Cuenta (web).
-3. `POST /api/link/complete` (poll): 1 candidato → confirmación automática;
-   varios → diálogo para elegir el tuyo; ninguno → espera y reintento hasta
-   3 min. Un `409 USER_ALREADY_LINKED` se trata como éxito.
-4. Al vincular: mensaje "Cuenta vinculada ✓" y refresco de `/auth/me`.
+3. Polling de `POST /link/complete` (poll): se confirma automáticamente el
+   candidato cuyo nick coincide con la cuenta (`pick_candidate` normaliza los
+   códigos ^X y desambigua por recencia); si nadie coincide → espera y
+   reintento hasta 3 min con aviso final por nick. Un `409 USER_ALREADY_LINKED`
+   se trata como éxito; `GUID_ALREADY_LINKED` avisa de PC compartida.
+4. Al confirmar: mensaje "Identidad verificada ✓" y refresco de `/auth/me`.
+5. Cloud-sync del progreso (`cloud_save`, activado por defecto): antes de
+   abrir el juego baja (o sube, si tu PC tiene lo más nuevo) `players\iw4x.stat`,
+   `iw4x_config.cfg` y `mods\<mod>\iw4x.stat` con backup automático; al cerrar
+   iw4x.exe sube el progreso de la sesión. Los errores de sync NUNCA impiden
+   jugar.
 
 ## Prueba de humo
 

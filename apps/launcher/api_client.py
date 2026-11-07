@@ -6,8 +6,9 @@ claros en español para mostrarlos directamente en la UI.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -165,6 +166,74 @@ class ApiClient:
         """GET /api/auth/me → {user:{..., linkedGuid, linkedGuids[], role}}."""
         data = self._request("GET", "/auth/me", token=token)
         return data.get("user") or {}
+
+    # --- Cloud-sync del progreso (profile/save) ----------------------------
+    def save_manifest(self, token: str) -> Dict[str, Any]:
+        """GET /api/profile/save → {exists, version, updatedAt, files[...]}."""
+        return self._request("GET", "/profile/save", token=token)
+
+    def save_download(self, token: str, path: str,
+                      version: Optional[str] = None) -> bytes:
+        """GET /api/profile/save/file → BINARIO validando X-Save-Sha256.
+
+        Lanza ApiError(SHA_MISMATCH) si el body no coincide con el header.
+        """
+        headers = {"Accept": "application/octet-stream"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        params: Dict[str, Any] = {"path": path}
+        if version:
+            params["version"] = version
+        try:
+            resp = requests.request(
+                "GET", self._url("/profile/save/file"),
+                headers=headers, params=params, timeout=self.timeout,
+            )
+        except requests.exceptions.ConnectionError:
+            raise NetworkError(
+                "No se pudo conectar con la API. ¿Está corriendo? "
+                "Revisa la dirección en Ajustes."
+            )
+        except requests.exceptions.Timeout:
+            raise NetworkError("La API tardó demasiado en responder (timeout).")
+        except requests.exceptions.RequestException as exc:
+            raise NetworkError(f"Error de red inesperado: {exc.__class__.__name__}")
+
+        if resp.status_code >= 400:
+            code, message = "ERROR", f"La API respondió {resp.status_code}."
+            try:
+                err = resp.json().get("error") or {}
+                code = str(err.get("code") or code)
+                message = str(err.get("message") or message)
+            except ValueError:
+                pass
+            raise ApiError(resp.status_code, code, message)
+
+        expected = resp.headers.get("X-Save-Sha256")
+        digest = hashlib.sha256(resp.content).hexdigest()
+        if expected and expected.lower() != digest:
+            raise ApiError(
+                resp.status_code, "SHA_MISMATCH",
+                "El archivo descargado no coincide con su hash (corrupción).",
+            )
+        return resp.content
+
+    def save_upload(self, token: str, files: List[Dict[str, Any]],
+                    build: Optional[str] = None) -> Dict[str, Any]:
+        """PUT /api/profile/save → {saved, version, files, pruned} o unchanged.
+
+        ``files``: [{path, dataBase64, sha256}] (ver contrato, caps del
+        server). ``build`` es opcional (versión del juego, si se detecta).
+        """
+        body: Dict[str, Any] = {"files": files}
+        if build:
+            body["build"] = build
+        return self._request(
+            "PUT",
+            "/profile/save",
+            token=token,
+            json_body=body,
+        )
 
     def player(self, guid: str) -> Dict[str, Any]:
         """GET /api/players/:guid → {player:{kills,...}, rank, recentEvents,...}.

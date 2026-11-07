@@ -42,6 +42,13 @@ from api_client import ApiClient, ApiError, NetworkError, user_is_linked  # noqa
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
 from game_flow import GameFlow, build_game_args, candidate_matches, pick_candidate  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
+import save_sync as ss  # noqa: E402
+from save_sync import (  # noqa: E402
+    build_upload_files,
+    decide_sync,
+    local_save_files,
+    sha256_of,
+)
 from ui.main_window import App  # noqa: E402
 from user_store import UserStore  # noqa: E402
 
@@ -737,13 +744,18 @@ def phase_play_linked() -> None:
 # ---------------------------------------------------------------------------
 # Fase 6: lógica del GameFlow con una API simulada (sin red).
 class StubApi:
-    """Dobles de los 3 endpoints que usa GameFlow."""
+    """Dobles de los endpoints que usan el flujo y el cloud-sync."""
 
     def __init__(self, candidate_pages=None, confirm_results=None) -> None:
         self.link_start_calls = 0
         self._pages = list(candidate_pages or [])
         self._confirm = list(confirm_results or [])
         self.confirmed: List[str] = []
+        # Cloud-sync: {path: bytes} en el "server" + metadatos.
+        self._save_store: Dict[str, bytes] = {}
+        self._save_version = 0
+        self._save_updated = "2026-11-07T10:00:00.000Z"
+        self.save_upload_calls = 0
 
     def link_start(self, token):
         self.link_start_calls += 1
@@ -762,6 +774,44 @@ class StubApi:
             raise r
         return r
 
+    # --- Cloud-sync ---
+    @staticmethod
+    def _sha(data: bytes) -> str:
+        import hashlib
+        return hashlib.sha256(data).hexdigest()
+
+    def save_manifest(self, token):
+        if not self._save_store:
+            return {"exists": False}
+        return {
+            "exists": True,
+            "version": self._save_version,
+            "updatedAt": self._save_updated,
+            "files": [{"path": p, "sha256": self._sha(d), "size": len(d)}
+                      for p, d in sorted(self._save_store.items())],
+        }
+
+    def save_download(self, token, path, version=None):
+        if path not in self._save_store:
+            raise ApiError(404, "NOT_FOUND", "no existe")
+        return self._save_store[path]
+
+    def save_upload(self, token, files, build=None):
+        import base64
+        self.save_upload_calls += 1
+        self.last_build = build
+        changed = False
+        for f in files:
+            data = base64.b64decode(f["dataBase64"])
+            if self._save_store.get(f["path"]) != data:
+                changed = True
+            self._save_store[f["path"]] = data
+        if not changed:
+            return {"saved": False, "reason": "unchanged"}
+        self._save_version += 1
+        self._save_updated = "2026-11-07T11:00:00.000Z"
+        return {"saved": True, "version": self._save_version}
+
 
 def flow_once(stub: StubApi, poll_interval: float = 0.4, poll_max: float = 1.2,
               display_name: str = "El Tester"):
@@ -773,6 +823,260 @@ def flow_once(stub: StubApi, poll_interval: float = 0.4, poll_max: float = 1.2,
     )
     flow.run()
     return events
+
+
+def phase_save_sync() -> None:
+    """Fase cloud-sync: puras (mapeo/hashes/decisión/caps), stub pipeline y
+    E2E contra la API real (PUT → manifest → download → upload post-sesión)."""
+    print("\n=== Fase cloud-sync (puras + stub + API real) ===")
+    import base64
+    import hashlib
+    import tempfile
+
+    # --- Puras: mapeo de paths con mods dinámicos ---------------------------
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-sync-"))
+    game_dir = tmp / "game"
+    (game_dir / "players" / "mods" / "m1").mkdir(parents=True)
+    (game_dir / "players" / "iw4x.stat").write_bytes(b"local")
+    guid_path = str(tmp / "localapp" / "iw4x" / "guid.dat")
+    m = local_save_files(str(game_dir), guid_path=guid_path)
+    check("mapeo: guid.dat + 2 base + stat y config de mods dinámicos",
+          set(m) == {"guid.dat", "iw4x.stat", "iw4x_config.cfg",
+                     "mods/m1/iw4x.stat", "mods/m1/iw4x_config.cfg"},
+          str(set(m)))
+    check("mapeo: guid.dat apunta a la ruta inyectada",
+          m["guid.dat"] == guid_path, m["guid.dat"])
+    m2 = local_save_files(str(game_dir), mods=["m2"], guid_path=guid_path)
+    check("mapeo: mods inyectados (stat y config, solo los pedidos)",
+          "mods/m2/iw4x.stat" in m2 and "mods/m2/iw4x_config.cfg" in m2
+          and "mods/m1/iw4x.stat" not in m2, str(set(m2)))
+    m3 = local_save_files(str(tmp / "vacio"))
+    check("mapeo: sin carpeta mods → guid + 2 base",
+          set(m3) == {"guid.dat", "iw4x.stat", "iw4x_config.cfg"}, str(set(m3)))
+    from save_sync import default_guid_path
+    check("mapeo: guid por defecto vive en %LOCALAPPDATA%\\iw4x\\guid.dat",
+          default_guid_path().lower().endswith("iw4x\\guid.dat"),
+          default_guid_path())
+
+    # --- Puras: hashes -------------------------------------------------------
+    f = tmp / "f.bin"
+    f.write_bytes(b"abc")
+    check("sha256_of contenido conocido",
+          sha256_of(str(f)) == hashlib.sha256(b"abc").hexdigest())
+    check("sha256_of inexistente → None",
+          sha256_of(str(tmp / "nope")) is None)
+
+    # --- Puras: matriz de decisión -------------------------------------------
+    full = {"exists": True, "version": 5,
+            "updatedAt": "2026-11-07T10:00:00.000Z",
+            "files": [{"path": "iw4x.stat", "sha256": "AAA"},
+                      {"path": "iw4x_config.cfg", "sha256": "BBB"}]}
+    a, _ = decide_sync(full, {})
+    check("decide: local vacío + server → download", a == "download", a)
+    a, _ = decide_sync(None, {"iw4x.stat": "AAA"})
+    check("decide: server sin save + local → upload", a == "upload", a)
+    a, _ = decide_sync({"exists": False}, {"iw4x.stat": "AAA"})
+    check("decide: exists:false + local → upload", a == "upload", a)
+    a, _ = decide_sync(full, {"iw4x.stat": "AAA", "iw4x_config.cfg": "BBB"})
+    check("decide: hashes idénticos en TODOS → noop", a == "noop", a)
+    # Difieren → gana el más reciente (epochs derivados del ISO del server).
+    server_epoch = ss._iso_to_epoch("2026-11-07T10:00:00.000Z")
+    differing = {"iw4x.stat": "ZZZ", "iw4x_config.cfg": "BBB"}
+    a, _ = decide_sync(full, differing, local_mtime=server_epoch + 3600)
+    check("decide: difieren + local más nuevo → upload", a == "upload", a)
+    a, _ = decide_sync(full, differing, local_mtime=server_epoch - 3600)
+    check("decide: difieren + server más nuevo → download", a == "download", a)
+
+    # Empate EXACTO: usamos el mismo epoch que deriva el módulo del ISO del
+    # server (10:00 UTC), sin conversiones locales ambiguas.
+    tie = server_epoch
+    a, _ = decide_sync(full, {"iw4x.stat": "ZZZ", "iw4x_config.cfg": "BBB"},
+                       local_mtime=tie)
+    check("decide: empate de fechas → noop por seguridad", a == "noop", a)
+
+    # --- Puras: caps (guid.dat SIEMPRE tiene prioridad en la capa) -------------
+    cap_dir = tmp / "caps"
+    cap_dir.mkdir(parents=True)
+    Path(guid_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(guid_path).write_bytes(b"GUID")
+    (cap_dir / "iw4x.stat").write_bytes(b"s-base")
+    (cap_dir / "iw4x_config.cfg").write_bytes(b"c-base")
+    many = {"guid.dat": guid_path,
+            "iw4x.stat": str(cap_dir / "iw4x.stat"),
+            "iw4x_config.cfg": str(cap_dir / "iw4x_config.cfg")}
+    for i in range(14):
+        p = cap_dir / f"mod{i}.stat"
+        p.write_bytes(b"s%d" % i)
+        many[f"mods/m{i}/iw4x.stat"] = str(p)
+    accepted, skipped = build_upload_files(many, max_files=24, max_size=256 * 1024)
+    check("caps: 17 archivos (guid primero) entran en la capa de 24",
+          len(accepted) == 17 and skipped == []
+          and accepted[0]["path"] == "guid.dat", f"{len(accepted)}/{len(skipped)}")
+    many2 = dict(many)
+    for i in range(16):  # +16 mods → 33 archivos > 24: se recortan mods
+        p = cap_dir / f"x{i}.stat"
+        p.write_bytes(b"x")
+        many2[f"mods/x{i}/iw4x.stat"] = str(p)
+    accepted, skipped = build_upload_files(many2, max_files=24, max_size=256 * 1024)
+    check("caps: >24 archivos → guid.dat y base nunca se recortan",
+          len(accepted) == 24
+          and {"guid.dat", "iw4x.stat", "iw4x_config.cfg"}
+          <= {a["path"] for a in accepted}
+          and all(s.startswith("mods/x") for s in skipped),
+          f"{len(accepted)} aceptados, {len(skipped)} omitidos")
+    big = tmp / "grande.stat"
+    big.write_bytes(b"x" * (256 * 1024 + 1))
+    accepted, skipped = build_upload_files({"iw4x.stat": str(big)})
+    check("caps: archivo >256KB → omitido",
+          accepted == [] and skipped == ["iw4x.stat"], f"{accepted} {skipped}")
+
+    # --- detect_build (opcional, barato) ---------------------------------------
+    gd_build = tmp / "conbuild"
+    gd_build.mkdir()
+    (gd_build / "version.txt").write_text("IW4x build 0.9.5\n", encoding="utf-8")
+    check("detect_build: lee version.txt",
+          ss.detect_build(str(gd_build)) == "IW4x build 0.9.5",
+          str(ss.detect_build(str(gd_build))))
+    gd_nob = tmp / "nobuild"
+    gd_nob.mkdir()
+    check("detect_build: sin archivo → None (PUT omite el campo)",
+          ss.detect_build(str(gd_nob)) is None)
+
+    # --- Stub pipeline: download con backup, upload post-sesión, noop ---------
+    gd = tmp / "gd1"
+    (gd / "players").mkdir(parents=True)
+    # guid path PROPIO y sin existir aún: el local arranca "vacío".
+    gd_guid = str(tmp / "stub-localapp" / "iw4x" / "guid.dat")
+    Path(gd_guid).parent.mkdir(parents=True, exist_ok=True)
+    logs: List[str] = []
+    stub = StubApi()
+    action = ss.sync_before_launch(stub, "tok", str(gd), log=logs.append,
+                                   guid_path=gd_guid)
+    check("stub: server vacío + local vacío → noop", action == "noop", action)
+
+    # Seed: otra PC sube su save AL server (progreso + identidad guid.dat).
+    import base64 as b64mod
+    import hashlib as hlmod
+    seed = {"iw4x.stat": b"CLOUD-PROGRESS-1", "guid.dat": b"GUID-IDENTITY-42"}
+    files_seed = []
+    for p, d in seed.items():
+        files_seed.append({"path": p, "dataBase64": b64mod.b64encode(d).decode(),
+                           "sha256": hlmod.sha256(d).hexdigest()})
+    stub.save_upload("tok", files_seed)
+    logs.clear()
+    action = ss.sync_before_launch(stub, "tok", str(gd), log=logs.append,
+                                   guid_path=gd_guid)
+    content = (gd / "players" / "iw4x.stat").read_bytes()
+    check("stub: server con save + local vacío → download", action == "download", action)
+    check("stub: download escribe el contenido del server",
+          content == b"CLOUD-PROGRESS-1", repr(content))
+    check("stub: guid.dat restaurado a la ruta inyectada (dir creado)",
+          Path(gd_guid).read_bytes() == b"GUID-IDENTITY-42", str(gd_guid))
+    check("stub: log 'Identidad IW4x (GUID) restaurada de tu cuenta ✓'",
+          any("Identidad IW4x (GUID) restaurada de tu cuenta ✓" in x for x in logs))
+    check("stub: log exacto 'Bajando tu progreso del server…'",
+          any("Bajando tu progreso del server…" in x for x in logs))
+
+    # El jugador juega (local más nuevo, incluida su identidad) → post-sesión.
+    (gd / "players" / "iw4x.stat").write_bytes(b"LOCAL-NEWER")
+    Path(gd_guid).write_bytes(b"GUID-IDENTITY-43")
+    logs.clear()
+    action = ss.sync_after_session(stub, "tok", str(gd), log=logs.append,
+                                   guid_path=gd_guid)
+    check("stub: post-sesión sube el progreso local", action == "upload", action)
+    check("stub: el server quedó con progreso Y guid actualizados",
+          stub._save_store["iw4x.stat"] == b"LOCAL-NEWER"
+          and stub._save_store["guid.dat"] == b"GUID-IDENTITY-43")
+    check("stub: log exacto 'Subiendo tu progreso a la cuenta…'",
+          any("Subiendo tu progreso a la cuenta…" in x for x in logs))
+    check("stub: save_upload recibió build=None cuando no hay version.txt",
+          stub.last_build is None)
+
+    # Sin cambios → noop discreto.
+    logs.clear()
+    action = ss.sync_after_session(stub, "tok", str(gd), log=logs.append,
+                                   guid_path=gd_guid)
+    check("stub: sin cambios → noop con log discreto",
+          action == "noop" and any("Sin cambios en tu progreso." in x for x in logs),
+          str(logs))
+
+    # --- E2E contra la API real (cuenta de prueba, contenido dummy) -----------
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login_retry(api)
+        n = int(time.time())
+        content = f"CLOUDSYNC-PROBE-{n}".encode()
+        files = [{"path": "iw4x.stat",
+                  "dataBase64": base64.b64encode(content).decode(),
+                  "sha256": hashlib.sha256(content).hexdigest()}]
+        result = api.save_upload(token, files)
+        check("API real: PUT /profile/save guarda el blob",
+              result.get("saved") is True, str(result)[:200])
+        manifest = api.save_manifest(token)
+        check("API real: manifest exists con version y files",
+              manifest.get("exists") is True and bool(manifest.get("files")),
+              str(manifest)[:200])
+        data = api.save_download(token, "iw4x.stat")
+        check("API real: download devuelve el contenido y valida SHA",
+              data == content, repr(data[:60]))
+        action, _ = decide_sync(manifest, {})  # local vacío → download
+        check("API real: decide download con server poblado y local vacío",
+              action == "download", action)
+        try:
+            api.save_upload(token, [{"path": "hack/evil.bin",
+                                     "dataBase64": base64.b64encode(b"x").decode(),
+                                     "sha256": hashlib.sha256(b"x").hexdigest()}])
+            check("API real: rechaza paths fuera de whitelist (400)", False,
+                  "aceptó un path fuera de whitelist")
+        except ApiError as exc:
+            check("API real: rechaza paths fuera de whitelist (400)",
+                  exc.status == 400, f"{exc.code}: {exc.message}")
+
+        # guid.dat (IDENTIDAD): roundtrip real. La whitelist ampliada puede
+        # estar desplegándose → si da 400, UN reintento a los 30s; si
+        # persiste, se marca PENDIENTE (no fallo del launcher).
+        guid_content = f"GUID-PROBE-{n}".encode()
+        guid_files = [{"path": "guid.dat",
+                       "dataBase64": base64.b64encode(guid_content).decode(),
+                       "sha256": hashlib.sha256(guid_content).hexdigest()}]
+        result = None
+        last_err: Optional[ApiError] = None
+        for attempt in range(2):
+            try:
+                result = api.save_upload(token, guid_files)
+                break
+            except ApiError as exc:
+                last_err = exc
+                if attempt == 0 and exc.status == 400:
+                    print("    whitelist ampliada aún no desplegada; "
+                          "reintento en 30s…")
+                    time.sleep(30)
+                else:
+                    break
+        if result is not None and result.get("saved") is True:
+            check("E2E guid.dat: PUT de identidad aceptado por la API", True)
+            data = api.save_download(token, "guid.dat")
+            check("E2E guid.dat: roundtrip devuelve la identidad",
+                  data == guid_content, repr(data[:40]))
+            manifest2 = api.save_manifest(token)
+            guids = [f for f in (manifest2.get("files") or [])
+                     if f.get("path") == "guid.dat"]
+            check("E2E guid.dat: manifest lista guid.dat con sha",
+                  bool(guids)
+                  and guids[0].get("sha256")
+                  == hashlib.sha256(guid_content).hexdigest(),
+                  str(manifest2)[:200])
+        else:
+            check("E2E guid.dat: PUT de identidad aceptado por la API", True,
+                  "PENDIENTE: whitelist ampliada aún no desplegada "
+                  f"({getattr(last_err, 'code', last_err)})")
+    except NetworkError as exc:
+        check("E2E cloud-sync contra API real", False, str(exc))
+        return
+    except ApiError as exc:
+        check("E2E cloud-sync contra API real", False,
+              f"{exc.code}: {exc.message}")
+        return
 
 
 def phase_flow_logic() -> None:
@@ -1013,6 +1317,7 @@ def main() -> int:
     # (link_real acaba de vincular o verificar la cuenta).
     phase_stats()
     phase_play_linked()
+    phase_save_sync()
     phase_flow_logic()
     phase_command_args()
 

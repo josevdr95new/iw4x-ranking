@@ -7,6 +7,7 @@ con ``after()``. Así nunca se bloquea el hilo de Tk.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 from typing import Any, Callable, Dict, Optional
@@ -428,6 +429,8 @@ class App(ctk.CTk):
             poll_interval=self.cfg.link_poll_interval,
             poll_max_seconds=self.cfg.link_poll_max_seconds,
             display_name=display_name,
+            cloud_save=self.cfg.cloud_save,
+            game_dir=os.path.dirname(self.cfg.game_path) if self.cfg.game_path else "",
         )
         threading.Thread(target=self.flow.run, daemon=True, name="game-flow").start()
 

@@ -25,6 +25,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo
     # para poder probar el polling de vinculación contra la API.
     "simulate_game": False,
+    # Cloud-sync del progreso (iw4x.stat/config/mods) antes de jugar y al
+    # cerrar el juego. Descargable/subible con la cuenta del ranking.
+    "cloud_save": True,
     # Ajustes finos del polling de vinculación (los valores del contrato son
     # 10s / 180s; se exponen para poder acortarlos en pruebas).
     "link_poll_interval": 10,
@@ -75,6 +78,10 @@ class AppConfig:
     @property
     def simulate_game(self) -> bool:
         return bool(self.data.get("simulate_game", False))
+
+    @property
+    def cloud_save(self) -> bool:
+        return bool(self.data.get("cloud_save", True))
 
     @property
     def link_poll_interval(self) -> int:
