@@ -260,15 +260,19 @@ Si ninguna entrada marca `isDefault`, la primera lo recibe. `source` ∈ `env | 
 
 | path relativo | Contenido |
 | ------------- | --------- |
+| `guid.dat` | ⚠️ **IDENTIDAD**: clave ECC de la que IW4x deriva el GUID (`%LOCALAPPDATA%\iw4x\guid.dat`, <4 KB) |
 | `iw4x.stat` | Progresión (nivel/armas/clases, ~8.2 KB) |
 | `iw4x_config.cfg` | Preferencias + name (~14 KB) |
 | `mods/<mod>/iw4x.stat` | Progresión por mod (`<mod>` = `[A-Za-z0-9_-]+`) |
+| `mods/<mod>/iw4x_config.cfg` | Config por-mod (nombre/clan editados con el mod activo) |
+
+> **NOTA DE IDENTIDAD — `guid.dat`**: es la identidad IW4x del jugador (de la que deriva su GUID). El launcher la sincroniza **por cuenta**; restaurarla en una PC nueva hace que el jugador conserve SU MISMO GUID. **Nunca la sobrescribas con la de otra cuenta ni la compartas entre cuentas** (moverla entre cuentas = robo/sustitución de identidad de juego).
 
 **Reglas del contrato:**
 
 - El flush del `.stat` ocurre al FIN DE RONDA: **el PUT solo es válido con el juego CERRADO**. Verificarlo es responsabilidad del launcher (esperar muerte del proceso `iw4x.exe` antes de subir).
 - Cada archivo viaja con su `sha256`; el server **recalcula** el hash y rechaza con `400 SHA_MISMATCH` si no coincide.
-- Caps por PUT: 256 KB (string base64) por archivo, máximo 12 archivos, máximo 1 snapshot por ruta (sin duplicados).
+- Caps por PUT: 256 KB (string base64) por archivo, máximo 24 archivos, máximo 1 snapshot por ruta (sin duplicados).
 - Snapshots versionados por timestamp (`version` = ms epoch). Se conservan las **últimas 10 versiones** por cuenta (poda automática en cada PUT).
 - Si el PUT tiene exactamente los mismos archivos (todos los sha256 iguales) que la versión latest → `200 {saved:false, reason:"unchanged"}`, NO se crea versión nueva.
 - Storage en servidor: `PROFILE_STORAGE_DIR` (default `<repo>/apps/api/storage/profiles`), layout `<dir>/<userId>/<version>-<combinedSha256>/...` + `latest.json`. Escritura atómica (tmp+rename).
@@ -339,8 +343,11 @@ Response **200** (nueva primero; máximo 10):
 ### Flujo recomendado para el launcher
 
 1. **Pre-launch**: `GET /api/profile/save` → si `exists:true`, comparar con el save local (hash local vs `files[].sha256`). Si el server es MÁS NUEVO que el local (`updatedAt` del server > mtime del local) y los hashes difieren → **conflicto explícito**: preguntar al jugador "¿Descargar progreso del servidor (X) o subir tu progreso local (Y)?". Nunca sobrescribir silenciosamente.
-2. **Download**: `GET /api/profile/save/file?path=...` por cada archivo del manifiesto, verificar `X-Save-Sha256` contra el body recibido, escribir en `players\` (o `players\mods\<mod>\`) solo con el juego cerrado.
-3. **Post-sesión**: esperar que el proceso del juego muera (el flush del `.stat` es al fin de ronda), recalcular sha256 de cada archivo local, `PUT /api/profile/save`.
+2. **Download**: `GET /api/profile/save/file?path=...` por cada archivo del manifiesto, verificar `X-Save-Sha256` contra el body recibido, escribir SOLO con el juego cerrado. **Destino por path** (no todos viven en el mismo lugar):
+   - `guid.dat` → `%LOCALAPPDATA%\iw4x\guid.dat` (⚠️ identidad: solo se restaura si el jugador confirma; nunca mezclar entre cuentas).
+   - `iw4x.stat`, `iw4x_config.cfg` → `players\`.
+   - `mods/<mod>/...` → `players\mods\<mod>\`.
+3. **Post-sesión**: esperar que el proceso del juego muera (el flush del `.stat` es al fin de ronda), recalcular sha256 de cada archivo local (incluye `guid.dat` y `mods/<mod>/iw4x_config.cfg`), `PUT /api/profile/save`.
 4. Si el PUT responde `saved:false, reason:"unchanged"` → no pasó nada, normal.
 
 ---

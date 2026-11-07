@@ -83,13 +83,18 @@ async function main(): Promise<void> {
   record('GET /api/auth/me (con token) → 200', me.status === 200);
   record('GET /api/auth/me (sin token) → 401', (await call('GET', '/api/auth/me')).status === 401);
 
+  // Login SOLO por nick (el email no es credencial de acceso).
   const login = await call('POST', '/api/auth/login', {
-    body: { email, password: 'smoke-password-123' },
+    body: { identifier: 'Smoke Tester', password: 'smoke-password-123' },
   });
-  record('POST /api/auth/login → 200', login.status === 200);
+  record('POST /api/auth/login (por nick) → 200', login.status === 200);
   record(
     'POST /api/auth/login (password incorrecta) → 401',
-    (await call('POST', '/api/auth/login', { body: { email, password: 'incorrecta-123' } })).status === 401,
+    (await call('POST', '/api/auth/login', { body: { identifier: 'Smoke Tester', password: 'incorrecta-123' } })).status === 401,
+  );
+  record(
+    'POST /api/auth/login (email en el campo → NO es credencial) → 401',
+    (await call('POST', '/api/auth/login', { body: { identifier: email, password: 'smoke-password-123' } })).status === 401,
   );
 
   // ── Sync ────────────────────────────────────────────────────
