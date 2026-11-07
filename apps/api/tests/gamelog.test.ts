@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { guidHexToDecimal, ingestGameLog, parseGameLogLine } from '../src/services/sync/gamelog.reader.js';
 import { prisma } from '../src/lib/prisma.js';
-import { resetDb } from './helpers.js';
+import { req, resetDb } from './helpers.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -21,8 +21,11 @@ const DEC_C = BigInt(`0x${HEX_C}`).toString(10);
  * J (sesiones), D (daño no letal → damageDealt/Taken sin evento), K con headshot,
  * world kill, teamkill, suicidio y Q (cierre de sesión).
  *
- * Orden de campos K/D verificado contra muestra real:
- *   K;aguid;acid;ateam;aname;vguid;vcid;vteam;vname;weapon;dmg;mod;hitloc
+ * ⚠️ Orden de campos K/D de ESTA build (verificado con scoreboard en vivo):
+ *   K;vguid;vcid;vteam;vname;kguid;kcid;kteam;kname;weapon;dmg;mod;hitloc
+ * (PRIMER bloque = VÍCTIMA, SEGUNDO = KILLER; el stock IW4 es al revés).
+ * En las líneas de este fixture: Bravo mata a Alpha (headshot), Charlie cae por
+ * world, Charlie teamkill-ea a Bravo (mismo team axis) y Charlie se suicida.
  */
 const SYNTHETIC_LINES = [
   '  0:00 ------------------------------------------------------------',
@@ -30,10 +33,10 @@ const SYNTHETIC_LINES = [
   `  0:04 J;${HEX_A};0;Alpha^7`,
   `  0:05 J;${HEX_B};1;Bravo`,
   `  0:06 J;${HEX_C};2;Charlie`,
-  `  0:07 D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`, // daño no letal
-  `  0:10 K;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;120;MOD_RIFLE_BULLET;head`, // kill + HEADSHOT
-  `  0:12 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`, // world kill (muerte, sin evento)
-  `  0:14 K;${HEX_B};1;axis;Bravo;${HEX_C};2;axis;Charlie;ak74u;90;MOD_RIFLE_BULLET;torso_lower`, // TEAMKILL
+  `  0:07 D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`, // daño: Alpha RECIBE 50 de Bravo
+  `  0:10 K;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;120;MOD_RIFLE_BULLET;head`, // Bravo (2º bloque) mata a Alpha con HEADSHOT
+  `  0:12 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`, // world: Charlie (1º bloque) muere, sin evento
+  `  0:14 K;${HEX_B};1;axis;Bravo;${HEX_C};2;axis;Charlie;ak74u;90;MOD_RIFLE_BULLET;torso_lower`, // Charlie teamkill-ea a Bravo (axis/axis)
   `  0:16 K;${HEX_C};2;axis;Charlie;${HEX_C};2;axis;Charlie;semtex;300;MOD_GRENADE;none`, // suicidio (sin evento)
   '  0:17 línea-basura-no-reconocida',
   '  0:18 ExitLevel: executed',
@@ -115,11 +118,14 @@ describe('guidHexToDecimal: GUIDs de bots ("botN", spawnBot real de r5318)', () 
       clientNum: 15,
     });
     // K bot mata bot (hitloc head: el headshot se calcula en la ingesta, no en el parseo).
+    // ESTA build: bot5 (1er bloque) = VÍCTIMA, bot8 (2º bloque) = KILLER.
     const kill = parseGameLogLine('  0:20 K;bot5;15;axis;Laupetin;bot8;18;allies;OtroBot;ak47;120;MOD_RIFLE_BULLET;head');
     expect(kill).toMatchObject({
       kind: 'kill',
-      originGuid: BOT5,
-      targetGuid: BOT8,
+      victimGuid: BOT5,
+      killerGuid: BOT8,
+      victimName: 'Laupetin',
+      killerName: 'OtroBot',
       weapon: 'ak47',
       damage: 120,
       hitloc: 'head',
@@ -149,13 +155,15 @@ describe('parseGameLogLine', () => {
   });
 
   it('parsea K real de muestra (world kill con campos vacíos)', () => {
+    // ESTA build: la VÍCTIMA (Mandango) va en el PRIMER bloque y el killer
+    // world en el segundo (guid vacío, cid -1, team "world").
     const ev = parseGameLogLine('0:39 K;b94be6deca6c750c;4;axis;Mandango ProMax;;-1;world;;none;100;MOD_FALLING;none');
     expect(ev).toEqual({
       kind: 'kill',
-      originGuid: BigInt('0xb94be6deca6c750c').toString(10),
-      targetGuid: null,
-      originName: 'Mandango ProMax', // anti-confusión: nombre exacto del atacante para alias
-      targetName: null, // víctima world: vname vacío → null (sin alias de víctima)
+      victimGuid: BigInt('0xb94be6deca6c750c').toString(10),
+      killerGuid: null,
+      victimName: 'Mandango ProMax', // anti-confusión: nombre exacto de la víctima para alias
+      killerName: null, // killer world: nombre vacío → null (sin alias de killer)
       weapon: 'none',
       damage: 100,
       hitloc: 'none',
@@ -164,13 +172,26 @@ describe('parseGameLogLine', () => {
   });
 
   it('parsea K normal con hitloc y detecta teamkill', () => {
+    // ESTA build: Bravo (1er bloque) es la VÍCTIMA; Charlie (2º bloque) el KILLER.
+    // Mismo team (axis/axis) → teamkill del KILLER.
     const ev = parseGameLogLine(`K;${HEX_B};1;axis;Bravo;${HEX_C};2;axis;Charlie;ak74u;90;MOD_RIFLE_BULLET;torso_lower`);
-    expect(ev).toMatchObject({ kind: 'kill', targetGuid: DEC_C, weapon: 'ak74u', damage: 90, hitloc: 'torso_lower', isTeamkill: true });
+    expect(ev).toMatchObject({
+      kind: 'kill',
+      victimGuid: DEC_B,
+      killerGuid: DEC_C,
+      victimName: 'Bravo',
+      killerName: 'Charlie',
+      weapon: 'ak74u',
+      damage: 90,
+      hitloc: 'torso_lower',
+      isTeamkill: true,
+    });
   });
 
   it('parsea D como daño no letal y Q como desconexión', () => {
+    // ESTA build: Alpha (1er bloque) RECIBE el daño; Bravo (2º) lo INFLIGE.
     const dmg = parseGameLogLine(`D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`);
-    expect(dmg).toEqual({ kind: 'damage', originGuid: DEC_A, targetGuid: DEC_B, damage: 50 });
+    expect(dmg).toEqual({ kind: 'damage', receiverGuid: DEC_A, dealerGuid: DEC_B, damage: 50 });
     const q = parseGameLogLine(`Q;${HEX_B};1;Bravo`);
     expect(q).toEqual({ kind: 'disconnect', guid: DEC_B, name: 'Bravo', clientNum: 1 });
   });
@@ -190,7 +211,7 @@ describe('ingestGameLog (integración con Prisma)', () => {
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
 
     expect(result.ok).toBe(true);
-    expect(result.killEventsSynced).toBe(2); // A→B (head) y B→C (teamkill); world y suicidio no crean evento
+    expect(result.killEventsSynced).toBe(2); // Bravo→Alpha (head) y Charlie→Bravo (teamkill); world y suicidio no crean evento
     expect(result.linesParsed).toBe(10); // InitGame + 3 J + D + 4 K + Q
     expect(result.linesIgnored).toBe(3); // separador + basura + ExitLevel
     expect(result.sessionsOpened).toBe(3); // 3 J
@@ -199,44 +220,48 @@ describe('ingestGameLog (integración con Prisma)', () => {
     const bravo = await prisma.player.findUnique({ where: { guid: DEC_B } });
     const charlie = await prisma.player.findUnique({ where: { guid: DEC_C } });
 
-    // Alpha: 1 kill (headshot), 50+120 de daño hecho, 0 muertes, streak 1.
-    expect(alpha?.kills).toBe(1);
-    expect(alpha?.deaths).toBe(0);
-    expect(alpha?.headshots).toBe(1);
-    expect(alpha?.damageDealt).toBe(170); // 50 (D) + 120 (K)
-    expect(alpha?.damageTaken).toBe(0);
-    expect(alpha?.bestStreak).toBe(1);
+    // Alpha: 0 kills, 1 muerte (headshot de Bravo), daño SOLO recibido (50 D + 120 K).
+    expect(alpha?.kills).toBe(0);
+    expect(alpha?.deaths).toBe(1);
+    expect(alpha?.headshots).toBe(0);
+    expect(alpha?.damageDealt).toBe(0);
+    expect(alpha?.damageTaken).toBe(170); // 50 (D) + 120 (K)
+    expect(alpha?.bestStreak).toBe(0);
     expect(alpha?.teamkills).toBe(0);
-    expect(alpha?.kd).toBe(1);
+    expect(alpha?.kd).toBe(0);
     expect(alpha?.connections).toBe(1);
     expect(alpha?.matchesPlayed).toBe(1); // mp_rust (evento + sesión, dedup)
     expect(alpha?.lastServer).toBe(SERVER_LABEL);
     expect(alpha?.name).toBe('Alpha^7');
 
-    // Bravo: mató a Charlie (teamkill), murió 1 vez, daño hecho/recibido.
+    // Bravo: KILLER de Alpha (headshot, 2º bloque) y VÍCTIMA del teamkill de Charlie.
     expect(bravo?.kills).toBe(1);
-    expect(bravo?.deaths).toBe(1); // Alpha lo mató
-    expect(bravo?.teamkills).toBe(1); // B (axis) mató a C (axis)
-    expect(bravo?.damageDealt).toBe(90);
-    expect(bravo?.damageTaken).toBe(170); // 50 (D) + 120 (K)
-    expect(bravo?.headshots).toBe(0);
-    expect(bravo?.bestStreak).toBe(1); // murió (0:10) antes de matar (0:14)
+    expect(bravo?.deaths).toBe(1); // teamkill de Charlie (0:14)
+    expect(bravo?.teamkills).toBe(0); // el teamkill fue de Charlie
+    expect(bravo?.headshots).toBe(1); // headshot del kill sobre Alpha
+    expect(bravo?.damageDealt).toBe(170); // 50 (D) + 120 (K)
+    expect(bravo?.damageTaken).toBe(90); // teamkill recibido
+    expect(bravo?.bestStreak).toBe(1); // mató (0:10) ANTES de morir (0:14)
     expect(bravo?.matchesPlayed).toBe(1);
+    expect(bravo?.kd).toBe(1);
 
-    // Charlie: world + teamkill + suicidio = 3 muertes, 0 kills, daño recibido.
-    expect(charlie?.kills).toBe(0);
-    expect(charlie?.deaths).toBe(3);
-    expect(charlie?.damageTaken).toBe(490); // 100 world + 90 teamkill + 300 suicidio
-    expect(charlie?.damageDealt).toBe(0);
-    expect(charlie?.bestStreak).toBe(0);
-    expect(charlie?.teamkills).toBe(0);
+    // Charlie: world + suicidio = 2 muertes; teamkill sobre Bravo (kills+1 y teamkills+1).
+    expect(charlie?.kills).toBe(1); // teamkill (mismo team axis)
+    expect(charlie?.deaths).toBe(2); // world (0:12) + suicidio (0:16)
+    expect(charlie?.teamkills).toBe(1);
+    expect(charlie?.headshots).toBe(0);
+    expect(charlie?.damageTaken).toBe(400); // 100 world + 300 suicidio
+    expect(charlie?.damageDealt).toBe(90); // daño del teamkill
+    expect(charlie?.bestStreak).toBe(1); // el teamkill cuenta como kill almacenada
+    expect(charlie?.kd).toBe(0.5);
 
     // KillEvents con weapon/damage/hitloc/headshot/teamkill/map/gametype.
+    // La DB guarda semántica stock: originGuid = KILLER, targetGuid = VÍCTIMA.
     const events = await prisma.killEvent.findMany({ orderBy: [{ id: 'asc' }] });
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({
-      originGuid: DEC_A,
-      targetGuid: DEC_B,
+      originGuid: DEC_B, // Bravo (2º bloque) = killer
+      targetGuid: DEC_A, // Alpha (1er bloque) = víctima
       weapon: 'ak47',
       damage: 120,
       hitloc: 'head',
@@ -247,8 +272,8 @@ describe('ingestGameLog (integración con Prisma)', () => {
       server: SERVER_LABEL,
     });
     expect(events[1]).toMatchObject({
-      originGuid: DEC_B,
-      targetGuid: DEC_C,
+      originGuid: DEC_C, // Charlie (2º bloque) = killer (teamkiller)
+      targetGuid: DEC_B, // Bravo (1er bloque) = víctima
       weapon: 'ak74u',
       damage: 90,
       hitloc: 'torso_lower',
@@ -294,15 +319,19 @@ describe('ingestGameLog (integración con Prisma)', () => {
     expect(second.sessionsOpened).toBe(1); // Alpha reconecta en mp_terminal
     expect(second.killEventsSynced).toBe(1);
 
+    // ESTA build: Bravo (2º bloque) mata a Alpha (1º bloque) con headshot helmet.
+    const bravo = await prisma.player.findUnique({ where: { guid: DEC_B } });
+    expect(bravo?.kills).toBe(2); // 1 del primer mapa + 1 de mp_terminal
+    expect(bravo?.headshots).toBe(2); // head + helmet
+    expect(bravo?.damageDealt).toBe(257); // 170 + 87
+    expect(bravo?.matchesPlayed).toBe(2); // mp_rust + mp_terminal
     const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
-    expect(alpha?.kills).toBe(2);
-    expect(alpha?.headshots).toBe(2); // head + helmet
-    expect(alpha?.damageDealt).toBe(257); // 170 + 87
-    expect(alpha?.matchesPlayed).toBe(2); // mp_rust + mp_terminal
+    expect(alpha?.kills).toBe(0); // sigue sin matar: él es la víctima
+    expect(alpha?.deaths).toBe(2); // head (mp_rust) + helmet (mp_terminal)
 
     // El evento nuevo quedó etiquetado con el mapa/mode vigente tras InitGame.
     const terminalEvent = await prisma.killEvent.findFirst({ where: { map: 'mp_terminal' } });
-    expect(terminalEvent).toMatchObject({ weapon: 'm1014', headshot: true, gametype: 'war', originGuid: DEC_A });
+    expect(terminalEvent).toMatchObject({ weapon: 'm1014', headshot: true, gametype: 'war', originGuid: DEC_B, targetGuid: DEC_A });
 
     // Alpha: 2 sesiones, ambas cerradas (shutdown + Q).
     const alphaSessions = await prisma.session.findMany({ where: { guid: DEC_A }, orderBy: [{ start: 'asc' }] });
@@ -329,9 +358,9 @@ describe('ingestGameLog (integración con Prisma)', () => {
     expect(await prisma.killEvent.count()).toBe(eventsAfter);
     expect(await prisma.session.count()).toBe(sessionsAfter);
 
-    const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
-    expect(alpha?.kills).toBe(1); // sin doble conteo
-    expect(alpha?.damageDealt).toBe(170);
+    const bravo = await prisma.player.findUnique({ where: { guid: DEC_B } });
+    expect(bravo?.kills).toBe(1); // sin doble conteo
+    expect(bravo?.damageDealt).toBe(170);
   });
 
   it('tolera línea truncada a mitad de escritura y la completa en la siguiente pasada', async () => {
@@ -347,13 +376,17 @@ describe('ingestGameLog (integración con Prisma)', () => {
     const second = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(second.killEventsSynced).toBe(1);
 
+    // ESTA build: Alpha (1er bloque) es la VÍCTIMA; Bravo (2º) el killer con headshot.
+    const bravo = await prisma.player.findUnique({ where: { guid: DEC_B } });
+    expect(bravo?.kills).toBe(1);
+    expect(bravo?.headshots).toBe(1);
     const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
-    expect(alpha?.kills).toBe(1);
-    expect(alpha?.headshots).toBe(1);
+    expect(alpha?.deaths).toBe(1);
     const events = await prisma.killEvent.findMany();
     expect(events[0]?.weapon).toBe('m1014');
     expect(events[0]?.damage).toBe(87);
     expect(events[0]?.headshot).toBe(true);
+    expect(events[0]?.originGuid).toBe(DEC_B);
   });
 
   it('detecta truncado/rotación del archivo y reinicia el offset', async () => {
@@ -371,10 +404,12 @@ describe('ingestGameLog (integración con Prisma)', () => {
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(result.ok).toBe(true);
     expect(result.warnings.some((w) => w.includes('trunc'))).toBe(true);
-    // La partida nueva se ingesta: Alpha suma 1 kill más (total 2, sin duplicar la anterior).
+    // La partida nueva se ingesta: ESTA build → Bravo (2º bloque) suma 1 kill más (total 2).
+    const bravo = await prisma.player.findUnique({ where: { guid: DEC_B } });
+    expect(bravo?.kills).toBe(2);
     const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
-    expect(alpha?.kills).toBe(2);
-    expect(alpha?.deaths).toBe(0);
+    expect(alpha?.deaths).toBe(2); // 1 del primer log + 1 de la partida nueva
+    expect(alpha?.kills).toBe(0);
     // El estado InitGame persistido pasó de mp_terminal... a mp_strike.
     const state = await prisma.logIngestState.findUnique({ where: { source: `gamelog:${LOG_PATH}` } });
     expect(state?.currentMap).toBe('mp_strike');
@@ -418,9 +453,10 @@ describe('SyncState/cursor de log (LogIngestState)', () => {
 
 /**
  * BOTS REALES del server dedicado (`+spawnBot N`): el engine escribe guid
- * literal "botN". Fixture con líneas reales verificadas en campo (build
- * r5318, 14 bots jugando). Equipos: Laupetin(bot5)=axis, BotSix(bot6)=allies,
- * Alpha(humano)=axis.
+ * literal "botN" EN CUALQUIERA de los dos bloques de la línea K. Fixture con
+ * líneas reales verificadas en campo (build r5318, 14 bots jugando), con la
+ * semántica DE ESTA BUILD (1er bloque = víctima, 2º = killer).
+ * Equipos: Laupetin(bot5)=axis, BotSix(bot6)=allies, Alpha(humano)=axis.
  */
 const BOT5_DEC = BigInt('0xb07000000000005').toString(10);
 const BOT6_DEC = BigInt('0xb07000000000006').toString(10);
@@ -430,15 +466,15 @@ const BOT_LINES = [
   '  0:04 J;bot5;15;Laupetin',
   '  0:05 J;bot6;16;BotSix',
   `  0:06 J;${HEX_A};0;Alpha`,
-  // 1) BOT mata BOT (headshot, equipos distintos → kill normal).
+  // 1) BOT mata BOT (headshot, equipos distintos → kill normal): BotSix mata a Laupetin.
   '  0:10 K;bot5;15;axis;Laupetin;bot6;16;allies;BotSix;ak47;120;MOD_RIFLE_BULLET;head',
-  // 2) BOT mata HUMANO (kill normal).
+  // 2) HUMANO mata BOT: Alpha mata a BotSix.
   `  0:12 K;bot6;16;allies;BotSix;${HEX_A};0;axis;Alpha;mp5k;100;MOD_RIFLE_BULLET;torso_lower`,
-  // 3) HUMANO mata BOT (kill normal).
+  // 3) BOT mata HUMANO: BotSix mata a Alpha.
   `  0:14 K;${HEX_A};0;axis;Alpha;bot6;16;allies;BotSix;ak74u;90;MOD_RIFLE_BULLET;chest`,
   // 4) BOT muere por world (como el humano del fixture sintético).
   '  0:16 K;bot6;16;allies;BotSix;;-1;world;;none;100;MOD_FALLING;none',
-  // 5) SUICIDIO de bot (origin == target → solo death, sin evento).
+  // 5) SUICIDIO de bot (mismo guid en los dos bloques → solo death, sin evento).
   '  0:18 K;bot5;15;axis;Laupetin;bot5;15;axis;Laupetin;semtex;300;MOD_GRENADE;none',
   // 6) Q del bot: cierra su sesión.
   '  0:20 Q;bot5;15;Laupetin',
@@ -451,7 +487,7 @@ describe('ingesta con BOTS (guid literal "botN")', () => {
 
     expect(result.ok).toBe(true);
     expect(result.eventsSkipped).toBe(0); // ningún bot descartado por guid inválido
-    expect(result.killEventsSynced).toBe(3); // bot→bot, bot→humano, humano→bot
+    expect(result.killEventsSynced).toBe(3); // bot→bot, humano→bot, bot→humano
     expect(result.linesParsed).toBe(10); // InitGame + 3 J + 5 K + Q
     expect(result.sessionsOpened).toBe(3);
     expect(result.sessionsClosed).toBe(1); // Q de bot5
@@ -462,38 +498,39 @@ describe('ingesta con BOTS (guid literal "botN")', () => {
 
     // El J del bot creó el Player con SU nombre (guid mapeado, no 'unknown').
     expect(laupetin?.name).toBe('Laupetin');
-    // Laupetin: 1 kill (headshot), 1 death (suicidio), headshot 1.
-    expect(laupetin?.kills).toBe(1);
-    expect(laupetin?.deaths).toBe(1);
-    expect(laupetin?.headshots).toBe(1);
-    expect(laupetin?.damageDealt).toBe(120);
-    expect(laupetin?.damageTaken).toBe(300); // daño del suicidio
+    // Laupetin: 0 kills, 2 muertes (victima del headshot de BotSix + suicidio).
+    expect(laupetin?.kills).toBe(0);
+    expect(laupetin?.deaths).toBe(2);
+    expect(laupetin?.headshots).toBe(0);
+    expect(laupetin?.damageDealt).toBe(0);
+    expect(laupetin?.damageTaken).toBe(420); // 120 (headshot de BotSix) + 300 (suicidio)
     expect(laupetin?.connections).toBe(1);
     // Su sesión se cerró con Q.
     const laupetinSessions = await prisma.session.findMany({ where: { guid: BOT5_DEC } });
     expect(laupetinSessions).toHaveLength(1);
     expect(laupetinSessions[0]?.end).not.toBeNull();
 
-    // BotSix: mató a Alpha (1), murió 3 veces (Laupetin + Alpha + world).
+    // BotSix: killer en 2 líneas (headshot a Laupetin + kill a Alpha), murió 2 veces.
     expect(botsix?.name).toBe('BotSix');
-    expect(botsix?.kills).toBe(1);
-    expect(botsix?.deaths).toBe(3);
-    expect(botsix?.damageDealt).toBe(100);
-    expect(botsix?.damageTaken).toBe(310); // 120 (kill de Laupetin) + 90 (kill de Alpha) + 100 (world)
+    expect(botsix?.kills).toBe(2);
+    expect(botsix?.deaths).toBe(2); // Alpha lo mató (0:12) + world (0:16)
+    expect(botsix?.headshots).toBe(1); // headshot sobre Laupetin
+    expect(botsix?.damageDealt).toBe(210); // 120 (headshot) + 90 (kill de Alpha)
+    expect(botsix?.damageTaken).toBe(200); // 100 (kill de Alpha) + 100 (world)
 
     // HUMANO sin regresión: Alpha mató al bot y murió contra el bot, guid hex intacto.
     expect(alpha?.guid).toBe(DEC_A);
     expect(alpha?.kills).toBe(1);
     expect(alpha?.deaths).toBe(1);
-    expect(alpha?.damageDealt).toBe(90);
-    expect(alpha?.damageTaken).toBe(100);
+    expect(alpha?.damageDealt).toBe(100);
+    expect(alpha?.damageTaken).toBe(90);
 
-    // KillEvents: las 3 kills válidas, con guids mapeados y metadatos.
+    // KillEvents: las 3 kills válidas (semántica DB stock: origin=killer, target=víctima).
     const events = await prisma.killEvent.findMany({ orderBy: [{ id: 'asc' }] });
     expect(events).toHaveLength(3);
-    expect(events[0]).toMatchObject({ originGuid: BOT5_DEC, targetGuid: BOT6_DEC, headshot: true, damage: 120, weapon: 'ak47', map: 'mp_rust', gametype: 'war' });
-    expect(events[1]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: DEC_A, headshot: false, damage: 100, weapon: 'mp5k' });
-    expect(events[2]).toMatchObject({ originGuid: DEC_A, targetGuid: BOT6_DEC, headshot: false, damage: 90, weapon: 'ak74u' });
+    expect(events[0]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: BOT5_DEC, headshot: true, damage: 120, weapon: 'ak47', map: 'mp_rust', gametype: 'war' });
+    expect(events[1]).toMatchObject({ originGuid: DEC_A, targetGuid: BOT6_DEC, headshot: false, damage: 100, weapon: 'mp5k' });
+    expect(events[2]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: DEC_A, headshot: false, damage: 90, weapon: 'ak74u' });
 
     // World (línea 4) y suicidio (línea 5) NO generaron evento.
     expect(events.some((e) => e.targetGuid === '' )).toBe(false);
@@ -513,6 +550,7 @@ describe('ingesta con BOTS (guid literal "botN")', () => {
     expect(await prisma.player.count()).toBe(3);
 
     // Misma partida tras un "reboot" del server (log nuevo, mismo bot5): MISMO guid.
+    // ESTA build: bot5 (1er bloque) es la VÍCTIMA de bot6 (2º bloque).
     const fresh = [
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
       '  0:04 J;bot5;15;Laupetin',
@@ -523,10 +561,178 @@ describe('ingesta con BOTS (guid literal "botN")', () => {
     expect(reboot.ok).toBe(true);
     expect(reboot.killEventsSynced).toBe(1);
 
-    // El bot5 de "mañana" acumula sobre el perfil de "hoy" (mismo guid decimal).
+    // El bot6 de "mañana" acumula sobre el perfil de "hoy" (mismo guid decimal);
+    // bot5 acumula DEATHS (aquí siempre es la víctima).
+    const botsix = await prisma.player.findUnique({ where: { guid: BOT6_DEC } });
+    expect(botsix?.name).toBe('BotSix');
+    expect(botsix?.kills).toBe(3); // 2 del primer log + 1 del segundo
     const laupetin = await prisma.player.findUnique({ where: { guid: BOT5_DEC } });
-    expect(laupetin?.name).toBe('Laupetin');
-    expect(laupetin?.kills).toBe(2); // 1 del primer log + 1 del segundo
+    expect(laupetin?.deaths).toBe(3); // 2 del primer log + 1 del segundo
     expect(laupetin?.connections).toBe(2); // 1 conexión por "sesión de server"
+  });
+});
+
+// ── FIXTURES REALES del log de ESTA build (2026-11-07) + REGRESIÓN ──────────
+
+const ADMIN_HEX = 'c103bb7531742427';
+const ADMIN_DEC = BigInt(`0x${ADMIN_HEX}`).toString(10); // 13908166186265486375 (el dueño)
+const MANDANGO_DEC = BigInt('0xb94be6deca6c750c').toString(10); // 13352019364823201036
+const RBOT4_DEC = BigInt('0xb07000000000004').toString(10);
+const RBOT5_DEC = BigInt('0xb07000000000005').toString(10);
+const RBOT8_DEC = BigInt('0xb07000000000008').toString(10);
+
+/**
+ * ⚠️ TEST DE REGRESIÓN DEL FORMATO DEL GAMELOG.
+ *
+ * ESTA build loguea la línea K con la VÍCTIMA en el PRIMER bloque y el KILLER
+ * en el SEGUNDO — el INVERSO del estándar IW4/stock. Lo fijó el experimento del
+ * scoreboard (2026-11-07, partida en vivo): el juego mostraba para el guid
+ * c103bb7531742427 ("admin"/"pollacaballo"/"TESTPROBE", mismo dueño) Kills 12 /
+ * Deaths 0 / score 1200 (12×100), mientras la DB parseada como atacante-primero
+ * le contaba kills≈0-1 / deaths=13. Esas 13 "muertes" stock eran sus KILLS
+ * REALES (guid en el 2º bloque); los bots solo aparecen 2 veces con su guid en
+ * el 1er bloque (1 muerte + 1 suicidio) y NUNCA hay "world" en el 1er bloque.
+ *
+ * SI ESTE TEST FALLA, ALGUIEN CAMBIÓ EL FORMATO DEL LOG: repetir el experimento
+ * del scoreboard (kills/deaths visibles en el juego vs bloques del log) antes
+ * de tocar parseGameLogLine. Tras el fix, correr npm run recount:stats.
+ */
+describe('FIXTURES REALES de esta build: víctima-primero (regresión de formato)', () => {
+  it('REGRESIÓN: K real 3:04 — bot5 (víctima, 1º bloque) muere a manos de pollacaballo/admin (killer, 2º bloque)', () => {
+    const ev = parseGameLogLine('  3:04 K;bot5;4;allies;/dev/../;c103bb7531742427;5;axis;pollacaballo;sa80_grip_reflex_mp;40;MOD_RIFLE_BULLET;right_arm_lower');
+    expect(ev).toMatchObject({
+      kind: 'kill',
+      victimGuid: RBOT5_DEC, // bot5 = VÍCTIMA (primer bloque)
+      killerGuid: ADMIN_DEC, // pollacaballo (el dueño) = KILLER (segundo bloque)
+      victimName: '/dev/../',
+      killerName: 'pollacaballo',
+      weapon: 'sa80_grip_reflex_mp',
+      damage: 40,
+      hitloc: 'right_arm_lower',
+      isTeamkill: false,
+    });
+  });
+
+  it('REGRESIÓN: K real 3:17 — admin (víctima, 1º bloque) muere a manos de bot8 (killer, 2º bloque)', () => {
+    const ev = parseGameLogLine('  3:17 K;c103bb7531742427;14;axis;admin;bot8;7;allies;/dev/full;famas_gl_mp;56;MOD_RIFLE_BULLET;right_arm_lower');
+    expect(ev).toMatchObject({
+      kind: 'kill',
+      victimGuid: ADMIN_DEC, // admin = VÍCTIMA aquí
+      killerGuid: RBOT8_DEC, // bot8 "/dev/full" = KILLER
+      victimName: 'admin',
+      killerName: '/dev/full',
+      weapon: 'famas_gl_mp',
+      isTeamkill: false,
+    });
+  });
+
+  it('REGRESIÓN: K real de world (0:39) — Mandango (víctima, 1º bloque) cae por caída, sin killer', () => {
+    const ev = parseGameLogLine('  0:39 K;b94be6deca6c750c;4;axis;Mandango ProMax;;-1;world;;none;100;MOD_FALLING;none');
+    expect(ev).toMatchObject({
+      kind: 'kill',
+      victimGuid: MANDANGO_DEC,
+      killerGuid: null, // world: guid vacío en el 2º bloque
+      victimName: 'Mandango ProMax',
+      killerName: null,
+      isTeamkill: false,
+    });
+  });
+
+  it('HEADSHOT REAL (1:52): el KILLER (2º bloque, admin) recibe el headshot y el kill', async () => {
+    // Línea REAL del log con MOD_HEAD_SHOT: bot4 "/dev/console" (1º bloque) es
+    // la víctima; admin (2º bloque) el killer con headshot en "head".
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  2:52 J;c103bb7531742427;14;admin',
+      '  1:52 K;bot4;3;allies;/dev/console;c103bb7531742427;14;axis;admin;ump45_eotech_mp;55;MOD_HEAD_SHOT;head\n',
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(1);
+
+    const admin = await prisma.player.findUnique({ where: { guid: ADMIN_DEC } });
+    expect(admin?.kills).toBe(1); // el KILLER (2º bloque) suma el kill
+    expect(admin?.headshots).toBe(1); // …y el headshot
+    expect(admin?.deaths).toBe(0);
+
+    const bot4 = await prisma.player.findUnique({ where: { guid: RBOT4_DEC } });
+    expect(bot4?.deaths).toBe(1); // la VÍCTIMA (1er bloque) suma la muerte
+    expect(bot4?.kills).toBe(0);
+    expect(bot4?.damageTaken).toBe(55);
+
+    const event = await prisma.killEvent.findFirstOrThrow();
+    expect(event).toMatchObject({
+      originGuid: ADMIN_DEC, // semántica DB stock: origin = killer
+      targetGuid: RBOT4_DEC, // target = víctima
+      headshot: true,
+      hitloc: 'head',
+      weapon: 'ump45_eotech_mp',
+      damage: 55,
+    });
+  });
+
+  it('mini-partida REAL completa: world + kills del dueño en 2º bloque + su muerte + suicidio real (19:30)', async () => {
+    writeLog([
+      '  0:00 ------------------------------------------------------------',
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  0:04 J;b94be6deca6c750c;4;Mandango ProMax',
+      '  2:52 J;c103bb7531742427;5;pollacaballo',
+      '  0:39 K;b94be6deca6c750c;4;axis;Mandango ProMax;;-1;world;;none;100;MOD_FALLING;none', // Mandango (real guid 13352019364823201036) muere por caída: LEGÍTIMO
+      '  3:04 K;bot5;4;allies;/dev/../;c103bb7531742427;5;axis;pollacaballo;sa80_grip_reflex_mp;40;MOD_RIFLE_BULLET;right_arm_lower',
+      '  3:17 K;c103bb7531742427;14;axis;admin;bot8;7;allies;/dev/full;famas_gl_mp;56;MOD_RIFLE_BULLET;right_arm_lower',
+      ' 19:30 K;c103bb7531742427;0;axis;admin;c103bb7531742427;0;axis;admin;semtex_mp;191;MOD_GRENADE_SPLASH;none', // suicidio REAL (mismo guid en ambos bloques)
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(2); // 3:04 y 3:17; world y suicidio sin evento
+
+    // El dueño (un solo Player por guid — NUNCA duplicados por nick: pollacaballo,
+    // admin y TESTPROBE comparten guid y colapsan por el upsert sobre guid @unique).
+    const admin = await prisma.player.findUnique({ where: { guid: ADMIN_DEC } });
+    expect(admin).not.toBeNull();
+    expect(await prisma.player.count({ where: { guid: ADMIN_DEC } })).toBe(1);
+    expect(admin?.kills).toBe(1); // killer en 3:04 (2º bloque); en 3:17 y 19:30 es víctima/suicidio
+    expect(admin?.deaths).toBe(2); // muerto por bot8 (3:17) + suicidio (19:30)
+    expect(admin?.damageDealt).toBe(40);
+    expect(admin?.damageTaken).toBe(56 + 191);
+
+    // Mandango real: su muerte por caída es LEGÍTIMA (1 death, 0 kills).
+    const mandango = await prisma.player.findUnique({ where: { guid: MANDANGO_DEC } });
+    expect(mandango?.deaths).toBe(1);
+    expect(mandango?.kills).toBe(0);
+    expect(mandango?.damageTaken).toBe(100);
+
+    // Los dos nombres del dueño quedan como ALIASES del MISMO guid (no players nuevos).
+    const adminAliases = await prisma.playerAlias.findMany({ where: { guid: ADMIN_DEC } });
+    expect(adminAliases.map((a) => a.name).sort()).toEqual(['admin', 'pollacaballo']);
+    expect(await prisma.player.count()).toBe(4); // Mandango + dueño + bot5 + bot8 (world no crea player)
+  });
+
+  it('expone headshots + hsRatio (ratio 2 dec) en el perfil; hsRatio es null con 0 kills', async () => {
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  2:52 J;c103bb7531742427;14;admin',
+      '  0:04 J;b94be6deca6c750c;4;Mandango ProMax',
+      // HEADSHOT REAL (MOD_HEAD_SHOT): admin (2º bloque) mata con headshot.
+      '  1:52 K;bot4;3;allies;/dev/console;c103bb7531742427;14;axis;admin;ump45_eotech_mp;55;MOD_HEAD_SHOT;head',
+      // Kill sin headshot del mismo killer → hsRatio = 1/2 = 0.5.
+      '  1:53 K;bot8;7;allies;/dev/urandom;c103bb7531742427;14;axis;admin;famas_gl_mp;77;MOD_HEAD_SHOT;torso_lower\n',
+    ]);
+    await ingestGameLog(LOG_PATH, SERVER_LABEL);
+
+    const adminRes = await req().get(`/api/players/${ADMIN_DEC}`);
+    expect(adminRes.status).toBe(200);
+    const adminBody = adminRes.body as { player: { kills: number; headshots: number; hsRatio: number | null; headshotPct: number } };
+    expect(adminBody.player.kills).toBe(2);
+    expect(adminBody.player.headshots).toBe(1);
+    expect(adminBody.player.hsRatio).toBe(0.5); // 1/2, 2 decimales
+    expect(adminBody.player.headshotPct).toBe(50); // % equivalente (campo preexistente)
+
+    // Mandango: 0 kills → hsRatio null (sin división por cero).
+    const mandangoRes = await req().get(`/api/players/${MANDANGO_DEC}`);
+    expect(mandangoRes.status).toBe(200);
+    const mandangoBody = mandangoRes.body as { player: { kills: number; headshots: number; hsRatio: number | null } };
+    expect(mandangoBody.player.kills).toBe(0);
+    expect(mandangoBody.player.hsRatio).toBeNull();
   });
 });

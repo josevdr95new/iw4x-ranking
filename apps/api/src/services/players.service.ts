@@ -21,6 +21,8 @@ export interface PlayerDto {
   headshots: number;
   /** % de kills que fueron headshot (hitloc head/helmet). */
   headshotPct: number;
+  /** Ratio headshots/kills con 2 decimales; null si 0 kills (evita div/0). */
+  hsRatio: number | null;
   damageDealt: number;
   damageTaken: number;
   /** Mejor racha de kills sin morir (aprox: solo eventos K almacenados). */
@@ -87,6 +89,7 @@ function toPlayerDto(player: PlayerWithLink, favoriteWeapon: string | null, favo
     skill: player.skill,
     headshots: player.headshots,
     headshotPct: pct(player.headshots, player.kills),
+    hsRatio: player.kills > 0 ? round2(player.headshots / player.kills) : null,
     damageDealt: player.damageDealt,
     damageTaken: player.damageTaken,
     bestStreak: player.bestStreak,
@@ -111,6 +114,10 @@ async function getPlayerOrThrow(guid: string): Promise<PlayerWithLink> {
 
 function pct(part: number, total: number): number {
   return total > 0 ? Math.round((part / total) * 10_000) / 100 : 0;
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function assertValidGuid(guidRaw: string): string {

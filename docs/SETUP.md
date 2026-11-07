@@ -135,17 +135,28 @@ SYNC_INTERVAL_SECONDS=30     # ingest casi en vivo
 ```
 
 - El sync **combina** las fuentes configuradas: `IW4MADMIN_DB_PATH` (si existe) + `GAME_LOG_PATH` (si existe). Si no hay ninguna → `503 SYNC_NOT_CONFIGURED`.
-- Formato parseado (formato clásico IW, verificado contra la build r5318):
+- Formato parseado (⚠️ **víctima-primero** en ESTA build — verificado con scoreboard en vivo; el stock IW4 es al revés):
   - `J;<guid hex>;<clientnum>;<nombre>` → conexión (abre una **Session**; incrementa `connections`)
   - `Q;<guid hex>;<clientnum>;<nombre>` → desconexión (cierra la Session)
-  - `K;<aguid>;<acid>;<ateam>;<aname>;<vguid>;<vcid>;<vteam>;<vname>;<weapon>;<dmg>;<mod>;<hitloc>` → kill (el `team` va ANTES del `name`; en kills "world" la víctima tiene guid vacío y vteam=`world`)
-  - `D;...` (mismo layout) → daño no letal: NO se almacena como evento (bloat), solo alimenta `damageDealt`/`damageTaken`
+  - `K;<vguid>;<vcid>;<vteam>;<vname>;<kguid>;<kcid>;<kteam>;<kname>;<weapon>;<dmg>;<mod>;<hitloc>` → kill: el **PRIMER bloque es la VÍCTIMA** y el **SEGUNDO el KILLER** (el `team` va ANTES del `name` en ambos; en kills "world" el killer tiene guid vacío y kteam=`world`, nunca al revés). En la DB se guarda `originGuid`=KILLER, `targetGuid`=VÍCTIMA. Si una build futura cambia esto, repetir el experimento del scoreboard (ver docs/API.md) antes de tocar el parser.
+  - `D;...` (mismo layout) → daño no letal: NO se almacena como evento (bloat), solo alimenta `damageDealt` (killer/2º bloque) y `damageTaken` (víctima/1er bloque)
   - `InitGame: \map\mp_rust\g_gametype\war\...` → estado mapa/modo que se etiqueta en cada evento (si la línea va sin infostring —como en la build actual— quedan `null`)
   - `ShutdownGame:` → cierra todas las sesiones abiertas
-- GUIDs hex de 16 chars se convierten a **decimal BigInt** (`b94be6deca6c750c` → `13371660518428851948`) para coincidir con el esquema `Player` (NetworkId decimal).
+- GUIDs hex de 16 chars se convierten a **decimal BigInt** (`b94be6deca6c750c` → `13371660518428851948`) para coincidir con el esquema `Player` (NetworkId decimal). Los bots (`botN`) se mapean al rango dedicado `0xb07…` y pueden aparecer en cualquiera de los dos bloques.
 - El lector es **incremental por offset de bytes** (`LogIngestState`): cada línea se aplica exactamente una vez; tolera escrituras a medias (la última línea sin `\n` se procesa en el ciclo siguiente) y detecta truncados/rotaciones (reinicia el offset).
-- Derivados por jugador: `headshots` (hitloc head/helmet), `damageDealt`/`damageTaken`, `bestStreak` (kills consecutivas sin muerte; aproximación), `teamkills`, `matchesPlayed` (mapas distintos), `timePlayed` (suma de sesiones; abiertas = en curso con cap de 4h).
+- Derivados por jugador: `headshots` (hitloc head/helmet, acreditadas al KILLER), `damageDealt`/`damageTaken`, `bestStreak` (kills consecutivas sin muerte; aproximación), `teamkills`, `matchesPlayed` (mapas distintos), `timePlayed` (suma de sesiones; abiertas = en curso con cap de 4h).
 - **Defensivo**: líneas no reconocidas → skip silencioso + contador (visible en `warnings` del sync); GUIDs corruptos → evento descartado + contador. Nunca rompe el sync.
+
+#### RECUENTO del histórico (`npm run recount:stats`)
+
+Recalcula TODO el histórico desde el log con el parser vigente. **Cuándo usarlo**: tras cambiar la semántica del parser (ej. el fix víctima-primero de esta build), tras corregir bugs de conteo, o cuando los agregados de `Player` queden inconsistentes con los `KillEvent`. Qué hace: backup de `dev.db` (`prisma/backups/dev.db.recount-<timestamp>` vía `VACUUM INTO`) → borra derivados del log (`KillEvent`, `Session`, `PlayerAlias`, `Player` sin cuenta vinculada; counters a 0 de los vinculados — NUNCA toca `User`/`Penalty`/`IdentityAlert`/cloud-saves) → rewirea el cursor `LogIngestState` a 0 → re-ingesta el archivo entero → recalcula el skill ELO from scratch → VERIFICA los counters contra la verdad parseada del propio log (detecta y reintenta si el scheduler del dev:api ingirió en paralelo).
+
+```powershell
+npm run recount:stats          # recuento real (con backup previo)
+npm run recount:stats -- --dry # NO borra nada: solo imprime el plan
+```
+
+> ⚠️ Ejecutar idealmente con el server VACÍO: si la partida está en curso, el scheduler del dev:api puede ingestar en paralelo durante el wipe+reingesta. El script lo detecta (verificación absoluta contra el log) y reintenta solo, pero la corrida limpia es la garantía. `npm run recompute:skill` sigue existiendo para recalcular SOLO el ELO sin tocar stats.
 
 ## 4D. Modo log remoto (server 192.168.2.251:28960)
 

@@ -17,6 +17,8 @@ export interface LeaderboardEntry {
   timePlayed: number;
   connections: number;
   skill: number;
+  /** Kills con hitloc head/helmet (acreditadas al killer; fuente log). */
+  headshots: number;
   lastConnection: string | null;
   /** true si el GUID tiene una cuenta web vinculada. */
   linked: boolean;
@@ -78,6 +80,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       timePlayed: player.timePlayed,
       connections: player.connections,
       skill: player.skill,
+      headshots: player.headshots,
       lastConnection: player.lastConnection?.toISOString() ?? null,
       linked: player.accountLinks.length > 0,
     })),

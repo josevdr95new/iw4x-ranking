@@ -585,7 +585,7 @@ Query params (todos opcionales):
 
 | Param       | Valores / default                          |
 | ----------- | ------------------------------------------ |
-| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` |
+| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` \| `headshots` |
 | `order`     | `desc` (default) \| `asc`                  |
 | `search`    | substring del nombre (case-insensitive, ASCII) |
 | `page`      | ≥ 1 (default 1)                            |
@@ -618,6 +618,7 @@ Response **200** (ejemplo real):
       "timePlayed": 593392,
       "connections": 29,
       "skill": 1042.5,
+      "headshots": 61,
       "lastConnection": "2026-11-02T21:59:06.318Z",
       "linked": false
     },
@@ -631,6 +632,7 @@ Response **200** (ejemplo real):
       "timePlayed": 521415,
       "connections": 424,
       "skill": 1187.25,
+      "headshots": 48,
       "lastConnection": "2026-10-04T21:59:06.318Z",
       "linked": true
     }
@@ -638,11 +640,27 @@ Response **200** (ejemplo real):
 }
 ```
 
-Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación).
+Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo).
 
 > **`rank` es SIEMPRE la posición GLOBAL** del jugador en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, el único match de un jugador que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
 
 Errores: `400 VALIDATION_ERROR` (p. ej. `sort=hacks`).
+
+#### ⚠️ Formato del games_mp.log de ESTA build: víctima-primero (NO es el stock IW4)
+
+Las líneas `K`/`D` de esta build de IW4x escriben el **PRIMER bloque = VÍCTIMA** y el **SEGUNDO = KILLER**, al revés que el estándar IW4/IW4MAdmin:
+
+```
+K;<vguid>;<vcid>;<vteam>;<vname>;<kguid>;<kcid>;<kteam>;<kname>;<weapon>;<dmg>;<mod>;<hitloc>
+```
+
+- Kills "world": la víctima va en el primer bloque y el killer world en el segundo (guid vacío, cid `-1`, team `world`). En el log real NUNCA hay `world` en el primer bloque.
+- Bots (`botN`) pueden aparecer en cualquiera de los dos bloques.
+- En la DB (`KillEvent`) se guarda la semántica stock: `originGuid` = KILLER, `targetGuid` = VÍCTIMA. Todo el skill ELO, streaks, armas y perfiles consumen ese orden.
+
+**Cómo verificar** (experimento del scoreboard, el que fijó este formato el 2026-11-07): con una partida en vivo, compara los `Kills`/`Deaths` visibles en el scoreboard DEL JUEGO para un guid concreto contra los bloques del log. Caso real: el guid del admin mostraba in-game `Kills 12 / Deaths 0 / score 1200` mientras la DB (parseada como atacante-primero) le contaba `kills≈0-1 / deaths=13` — esas 13 eran sus KILLS reales (guid en el 2º bloque). Si las cuentas del juego y la DB vuelven a discrepar tras un cambio de build, repetir este experimento ANTES de tocar `parseGameLogLine` (ver tests de regresión "FIXTURES REALES" en `tests/gamelog.test.ts`).
+
+Si se corrige el parser tras un cambio de formato, el histórico se recalcula con `npm run recount:stats` (ver docs/SETUP.md §4C).
 
 ---
 
@@ -665,6 +683,7 @@ Response **200** (ejemplo real, truncado):
     "skill": 1042.5,
     "headshots": 61,
     "headshotPct": 21.11,
+    "hsRatio": 0.21,
     "damageDealt": 25870,
     "damageTaken": 18322,
     "bestStreak": 9,
@@ -703,7 +722,7 @@ Notas para el frontend:
 - `recentEvents`: últimos 20 eventos del jugador, más reciente primero. `direction` es `kill` (el jugador fue el origen) o `death` (fue el objetivo). `isKill: false` = evento no letal registrado por IW4MAdmin.
 - `weapon`: con fuente IW4MAdmin es el **id crudo** (número como string); con fuente log (games_mp.log) es el **nombre base del arma** (`ak47`, `m1014`, ...). El mapping a nombre legible no está implementado aún.
 - `server` puede ser `null` si la fuente no expone servidor. Con fuente log es el valor de `GAME_SERVER_ADDRESS`.
-- Campos nuevos (fuente log): `headshots`/`headshotPct` (hitloc `head`/`helmet` sobre kills), `damageDealt`/`damageTaken` (suma de daño de líneas K + D), `bestStreak` (mejor racha de kills sin muerte intercalada; aprox: solo eventos K almacenados), `teamkills` (ateam == vteam), `matchesPlayed` (mapas distintos con actividad), `favoriteWeapon`/`favoriteMap` (arma/mapa con más kills; `null` sin actividad).
+- Campos nuevos (fuente log): `headshots`/`headshotPct` (hitloc `head`/`helmet` sobre kills), `hsRatio` (ratio `headshots`/`kills` con **2 decimales**; `null` si 0 kills — para web/launcher sin dividir por cero), `damageDealt`/`damageTaken` (suma de daño de líneas K + D), `bestStreak` (mejor racha de kills sin muerte intercalada; aprox: solo eventos K almacenados), `teamkills` (ateam == vteam), `matchesPlayed` (mapas distintos con actividad), `favoriteWeapon`/`favoriteMap` (arma/mapa con más kills; `null` sin actividad).
 - `timePlayed` (fuente log) = suma de sesiones reales J→Q (las abiertas cuentan como en curso, cap 4h).
 - `linked`: si el GUID tiene cuenta web vinculada.
 - `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres: si el leaderboard muestra dos filas con el mismo displayName (son 2 entidades/GUIDs distintas, es verdad), el perfil con `aliases` desambigua quién es quién.

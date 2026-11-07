@@ -288,3 +288,44 @@ describe('POST /api/sync (endpoint protegido)', () => {
     expect(result.playersSynced).toBe(12);
   });
 });
+
+describe('GET /api/leaderboard?sort=headshots (campo nuevo)', () => {
+  it('ordena por headshots desc y expone el campo headshots en cada entrada', async () => {
+    // Siembra headshots DISTINTOS en 3 players del mock para que el orden sea
+    // observable (se restauran los valores originales al salir).
+    const seeded = await prisma.player.findMany({ orderBy: [{ guid: 'asc' }], take: 3, select: { guid: true, headshots: true } });
+    expect(seeded).toHaveLength(3);
+    const originals = seeded.map((p) => ({ guid: p.guid, headshots: p.headshots }));
+    try {
+      await prisma.player.update({ where: { guid: originals[0]!.guid }, data: { headshots: 7 } });
+      await prisma.player.update({ where: { guid: originals[1]!.guid }, data: { headshots: 3 } });
+      await prisma.player.update({ where: { guid: originals[2]!.guid }, data: { headshots: 0 } });
+
+      const res = await req().get('/api/leaderboard?sort=headshots&order=desc&pageSize=100');
+      expect(res.status).toBe(200);
+      const body = res.body as { sort: string; order: string; players: Array<{ guid: string; headshots: number; kills: number }> };
+      expect(body.sort).toBe('headshots');
+      expect(body.order).toBe('desc');
+      expect(body.players[0]?.guid).toBe(originals[0]!.guid); // 7 headshots primero
+      expect(body.players[0]?.headshots).toBe(7);
+      const headshots = body.players.map((p) => p.headshots);
+      expect([...headshots].sort((a, b) => b - a)).toEqual(headshots);
+
+      // asc también funciona.
+      const asc = await req().get('/api/leaderboard?sort=headshots&order=asc&pageSize=100');
+      const ascList = (asc.body as { players: Array<{ headshots: number }> }).players.map((p) => p.headshots);
+      expect([...ascList].sort((a, b) => a - b)).toEqual(ascList);
+    } finally {
+      // Restaura para no perturbar los rankings por kills de otros tests.
+      for (const original of originals) {
+        await prisma.player.update({ where: { guid: original.guid }, data: { headshots: original.headshots } });
+      }
+    }
+  });
+
+  it('sort inválido sigue rechazándose con 400 (headshots ahora es válido)', async () => {
+    const res = await req().get('/api/leaderboard?sort=hs');
+    expect(res.status).toBe(400);
+    expect((res.body as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+  });
+});

@@ -416,13 +416,15 @@ export async function rebuildAliases(options: { logPath?: string | null }): Prom
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
       } else if (event.kind === 'kill') {
-        if (!isMeaninglessName(event.originName)) {
-          const key = `${event.originGuid}\u0000${event.originName}`;
+        // Semántica de esta build: killerName (2º bloque) y victimName (1er bloque).
+        // A los efectos de alias el rol no importa: ambos participantes cuentan.
+        if (!isMeaninglessName(event.killerName ?? '')) {
+          const key = `${event.killerGuid}\u0000${event.killerName}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
-        // Víctima "world" no tiene guid (targetGuid null) → skip.
-        if (event.targetGuid !== null && event.targetGuid !== event.originGuid && event.targetName && !isMeaninglessName(event.targetName)) {
-          const key = `${event.targetGuid}\u0000${event.targetName}`;
+        // Víctima "world" no tiene guid (killerGuid null) → skip.
+        if (event.victimGuid !== event.killerGuid && event.victimName && !isMeaninglessName(event.victimName)) {
+          const key = `${event.victimGuid}\u0000${event.victimName}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
       }

@@ -17,6 +17,8 @@ dist/
 *.sqlite-shm
 *.db
 *.db-journal
+# Backups del recount (dev.db.recount-<timestamp> — nunca al repo)
+apps/api/prisma/backups/
 Database/
 
 # Tests temporales

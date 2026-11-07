@@ -6,35 +6,57 @@ import { isBotGuid, upsertPlayerAlias } from '../alias.service.js';
 import { reportIdentityAlert } from '../identity.service.js';
 
 /**
- * Lector del games_mp.log del servidor dedicado IW4x (formato clásico IW).
+ * Lector del games_mp.log del servidor dedicado IW4x.
  *
- * Formato real verificado (build r5318): cada línea lleva un prefijo de tiempo
- * de juego "  m:ss " que se descarta, y en K/D el team va ANTES del name para
- * atacante y víctima:
+ * Formato real: cada línea lleva un prefijo de tiempo de juego "  m:ss " que se
+ * descarta, y en K/D el team va ANTES del name en cada bloque:
  *
  *   J;<guid hex>;<clientnum>;<nombre>            → conexión (abre Session)
  *   Q;<guid hex>;<clientnum>;<nombre>            → desconexión (cierra Session)
  *   InitGame: \map\mp_rust\g_gametype\war\...    → estado de mapa/modo
  *   ShutdownGame:                                → cierra todas las Session abiertas
  *
- *   K;aguid;acid;ateam;aname;vguid;vcid;vteam;vname;weapon;dmg;mod;hitloc  → kill
+ * ⚠️ SEMÁNTICA K/D DE ESTA BUILD (NO es el estándar IW4): el PRIMER bloque es
+ * la VÍCTIMA y el SEGUNDO el KILLER (al revés que el stock IW / IW4MAdmin):
+ *
+ *   K;vguid;vcid;vteam;vname;kguid;kcid;kteam;kname;weapon;dmg;mod;hitloc  → kill
  *   D;... (mismo layout que K) → daño no letal (NO se almacena como evento:
  *     alimenta damageDealt/damageTaken de los Player implicados)
  *
- * BOTS (`+spawnBot N`): el guid llega como token literal "botN" y se mapea
- * DETERMINISTA a un guid decimal del rango dedicado 0xb07… (ver
- * botGuidToDecimal). El perfil del bot acumula stats entre reboots.
+ * EVIDENCIA que fijó este orden (2026-11-07, partida en vivo):
+ *  1. El scoreboard IN-GAME del guid c103bb7531742427 ("admin") mostraba
+ *     Kills 12 / Deaths 0 / score 1200 (12×100) a mitad de sesión, mientras la
+ *     DB (parseada como atacante-primero, formato stock) le contaba
+ *     kills≈0-1 / deaths=13. Esas 13 "muertes" stock eran en realidad sus
+ *     KILLS REALES: el guid estaba en el SEGUNDO bloque de esas líneas.
+ *  2. Al cierre parcial del mismo log: 31 líneas K con el guid en el 2º bloque
+ *     vs solo 2 con el guid en el 1º (1 muerte contra un bot + 1 suicidio).
+ *  3. En NINGUNA línea K del log va "world" en el PRIMER bloque: el caso
+ *     world es víctima-primero con killer world (guid vacío, cid -1, team
+ *     "world") — imposible bajo el orden stock.
+ * Si algún día cambia la build y esto falla, REPETIR EL EXPERIMENTO DEL
+ * SCOREBOARD: comparar kills/deaths visibles en el juego contra los bloques
+ * del log antes de tocar este parser.
  *
- * Ejemplos REALES (de este server):
- *   0:04 J;b94be6deca6c750c;4;Mandango ProMax
+ * Líneas reales de ese log (fixtures de tests/gamelog.test.ts):
  *   0:39 K;b94be6deca6c750c;4;axis;Mandango ProMax;;-1;world;;none;100;MOD_FALLING;none
- *   (en el kill "world" la víctima tiene vguid vacío, vcid=-1 y vteam="world")
- *   0:12 J;bot5;15;Laupetin
- *   0:20 K;bot5;15;axis;Laupetin;bot8;18;allies;OtroBot;ak47;120;MOD_RIFLE_BULLET;head
+ *   (víctima Mandango en el 1º bloque; killer world en el 2º: guid vacío, cid -1)
+ *   3:04 K;bot5;4;allies;/dev/../;c103bb7531742427;5;axis;pollacaballo;sa80_grip_reflex_mp;40;MOD_RIFLE_BULLET;right_arm_lower
+ *   (víctima bot5; killer pollacaballo = el dueño)
+ *   3:17 K;c103bb7531742427;14;axis;admin;bot8;7;allies;/dev/full;famas_gl_mp;56;MOD_RIFLE_BULLET;right_arm_lower
+ *   (víctima admin; killer bot8)
+ *
+ * BOTS (`+spawnBot N`): el guid llega como token literal "botN" en CUALQUIERA
+ * de los dos bloques y se mapea DETERMINISTA a un guid decimal del rango
+ * dedicado 0xb07… (ver botGuidToDecimal). El perfil del bot acumula stats
+ * entre reboots.
  *
  * Extracción por evento K (almacenado en KillEvent): weapon, damage, hitloc,
- * headshot (hitloc ∈ head/helmet), isTeamkill (ateam == vteam), map y gametype
- * (del estado InitGame vigente; null si el log no lo declaró aún).
+ * headshot (hitloc ∈ head/helmet, se acredita al KILLER), isTeamkill
+ * (vteam == kteam), map y gametype (del estado InitGame vigente; null si el
+ * log no lo declaró aún). En KillEvent la DB guarda la semántica stock:
+ * originGuid = KILLER, targetGuid = VÍCTIMA (todo el skill ELO, streaks,
+ * armas y perfiles consumen ese orden).
  *
  * Defensivo por diseño:
  *  - Líneas no reconocidas → skip silencioso + contador (linesIgnored).
@@ -63,20 +85,27 @@ export interface GameLogDisconnect {
 
 export interface GameLogKill {
   kind: 'kill';
-  originGuid: string;
-  targetGuid: string | null; // null = world (vguid vacío)
-  originName: string; // nombre EXACTO del atacante (para historial de alias)
-  targetName: string | null; // nombre de la víctima; null = world (vname vacío)
+  /** VÍCTIMA (quien muere): PRIMER bloque del K de esta build. Siempre tiene guid. */
+  victimGuid: string;
+  /** KILLER: SEGUNDO bloque del K de esta build. null = world (guid vacío). */
+  killerGuid: string | null;
+  /** Nombre EXACTO de la víctima (primer bloque; para historial de alias). */
+  victimName: string;
+  /** Nombre EXACTO del killer (segundo bloque); null si world. */
+  killerName: string | null;
   weapon: string | null;
   damage: number;
   hitloc: string | null;
+  /** Teamkill: víctima y killer con guid distinto y MISMO team (vteam == kteam). */
   isTeamkill: boolean;
 }
 
 export interface GameLogDamage {
   kind: 'damage';
-  originGuid: string;
-  targetGuid: string | null;
+  /** Quien RECIBE el daño (primer bloque del D de esta build). */
+  receiverGuid: string;
+  /** Quien INFLIGE el daño (segundo bloque); null = world (guid vacío). */
+  dealerGuid: string | null;
   damage: number;
 }
 
@@ -101,7 +130,7 @@ export type GameLogEvent =
 /** Prefijo de tiempo de juego al inicio de cada línea: "  0:04 ", "12:03 ", etc. */
 const TIME_PREFIX = /^\s*\d{1,4}:\d{2}\s?/;
 
-const HEADSHOT_HITLOCS = new Set(['head', 'helmet']);
+export const HEADSHOT_HITLOCS = new Set(['head', 'helmet']);
 
 /**
  * GUIDs de BOTS (server dedicado con `+spawnBot N`, build r5318): el engine
@@ -208,37 +237,43 @@ export function parseGameLogLine(rawLine: string): GameLogEvent | null | 'ignore
   }
 
   // K / D: al menos 12 campos tras el tipo.
-  // K;aguid;acid;ateam;aname;vguid;vcid;vteam;vname;weapon;dmg;mod;hitloc
+  // ⚠️ ESTA BUILD (verificado con scoreboard en vivo, ver cabecera): el PRIMER
+  // bloque es la VÍCTIMA y el SEGUNDO el KILLER (orden INVERTIDO respecto al
+  // stock IW4):
+  // K;vguid;vcid;vteam;vname;kguid;kcid;kteam;kname;weapon;dmg;mod;hitloc
   if (fields.length < 12) return 'ignored';
-  const originGuid = guidHexToDecimal(fields[0] ?? '');
-  if (originGuid === null) return 'ignored';
 
-  const originName = (fields[3] ?? '').trim();
-  const targetRaw = (fields[4] ?? '').trim();
-  const targetGuid = targetRaw === '' ? null : guidHexToDecimal(targetRaw);
-  if (targetRaw !== '' && targetGuid === null) return 'ignored'; // GUID víctima corrupto
-  const targetName = (fields[7] ?? '').trim() || null;
+  const victimGuid = guidHexToDecimal(fields[0] ?? '');
+  if (victimGuid === null) return 'ignored'; // la víctima SIEMPRE tiene guid (es quien muere)
+
+  const victimName = (fields[3] ?? '').trim();
+  const killerRaw = (fields[4] ?? '').trim();
+  const killerGuid = killerRaw === '' ? null : guidHexToDecimal(killerRaw);
+  if (killerRaw !== '' && killerGuid === null) return 'ignored'; // GUID killer corrupto
+  const killerName = (fields[7] ?? '').trim() || null;
 
   const damage = toInt(fields[9]);
-  const originTeam = (fields[2] ?? '').trim();
-  const targetTeam = (fields[6] ?? '').trim();
+  const victimTeam = (fields[2] ?? '').trim();
+  const killerTeam = (fields[6] ?? '').trim();
   const hitloc = (fields[11] ?? '').trim() || null;
 
   if (type === 'D') {
-    return { kind: 'damage', originGuid, targetGuid, damage };
+    // D: primer bloque = quien RECIBE el daño, segundo = quien lo INFLIGE.
+    return { kind: 'damage', receiverGuid: victimGuid, dealerGuid: killerGuid, damage };
   }
 
   const event: GameLogKill = {
     kind: 'kill',
-    originGuid,
-    targetGuid,
-    originName,
-    targetName,
+    victimGuid,
+    killerGuid,
+    victimName,
+    killerName,
     weapon: (fields[8] ?? '').trim() || null,
     damage,
     hitloc,
-    // Teamkill: solo tiene sentido con víctima válida y distinta del origen.
-    isTeamkill: targetGuid !== null && targetGuid !== originGuid && originTeam !== '' && originTeam === targetTeam,
+    // Teamkill: killer y víctima reales con MISMO team (world/suicidio → false).
+    isTeamkill:
+      killerGuid !== null && killerGuid !== victimGuid && victimTeam !== '' && victimTeam === killerTeam,
   };
   return event;
 }
@@ -376,7 +411,10 @@ async function incrementPlayer(guid: string, data: Record<string, number | { inc
   }
   const create: Record<string, unknown> = { guid, firstConnection: now };
   for (const [key, value] of Object.entries(data)) {
-    create[key] = typeof value === 'number' ? value : 1; // { increment: n } en creación = n
+    // En creación, { increment: n } = el valor n (no 1): el primer kill/daño
+    // de un player sin línea J previa (ej. víctima de bot sin conexión
+    // registrada) debe quedar con el importe REAL del evento.
+    create[key] = typeof value === 'number' ? value : value.increment;
   }
   create.isBot = isBotGuid(guid);
   await prisma.player.create({ data: create as never });
@@ -540,35 +578,43 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         touched.add(event.guid);
       } else if (event.kind === 'damage') {
         // D: no letal → solo agregados de daño (NO crea evento ni kill/death).
-        const self = event.targetGuid === null || event.targetGuid === event.originGuid;
+        // Semántica de esta build: receiver (1er bloque) recibe, dealer (2º) inflige.
+        const self = event.dealerGuid === null || event.dealerGuid === event.receiverGuid;
         if (self) {
-          await incrementPlayer(event.originGuid, { damageTaken: { increment: event.damage } }, now);
-          touched.add(event.originGuid);
+          await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
+          touched.add(event.receiverGuid);
         } else {
-          await incrementPlayer(event.originGuid, { damageDealt: { increment: event.damage } }, now);
-          await incrementPlayer(event.targetGuid!, { damageTaken: { increment: event.damage } }, now);
-          touched.add(event.originGuid);
-          touched.add(event.targetGuid!);
+          await incrementPlayer(event.dealerGuid!, { damageDealt: { increment: event.damage } }, now);
+          await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
+          touched.add(event.dealerGuid!);
+          touched.add(event.receiverGuid);
         }
         result.playersSynced += self ? 1 : 2;
       } else {
-        // K: kill. Suicidio (origin==target) y world (target null) cuentan SOLO death + daño recibido.
-        const isSuicide = event.targetGuid !== null && event.targetGuid === event.originGuid;
-        const victimGuid = isSuicide ? null : event.targetGuid;
+        // K: kill (semántica de ESTA BUILD: primer bloque = VÍCTIMA).
+        //  - victimGuid (1er bloque) SIEMPRE tiene guid: es quien muere.
+        //  - killerGuid (2º bloque): world (null) o == victimGuid (suicidio)
+        //    → solo death + daño recibido de la víctima, sin evento.
+        const isSuicide = event.killerGuid !== null && event.killerGuid === event.victimGuid;
+        const killerGuid = isSuicide ? null : event.killerGuid;
+        const victimGuid = event.victimGuid;
         const headshot = event.hitloc !== null && HEADSHOT_HITLOCS.has(event.hitloc.toLowerCase());
 
-        if (victimGuid !== null) {
-          await incrementPlayer(event.originGuid, { kills: { increment: 1 }, damageDealt: { increment: event.damage } }, now);
+        if (killerGuid !== null) {
+          // Kill real: kills/headshot/daño para el KILLER; death para la VÍCTIMA.
+          await incrementPlayer(killerGuid, { kills: { increment: 1 }, damageDealt: { increment: event.damage } }, now);
           await incrementPlayer(victimGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
           if (event.isTeamkill) {
-            await incrementPlayer(event.originGuid, { teamkills: { increment: 1 } }, now);
+            await incrementPlayer(killerGuid, { teamkills: { increment: 1 } }, now);
           }
           if (headshot) {
-            await incrementPlayer(event.originGuid, { headshots: { increment: 1 } }, now);
+            await incrementPlayer(killerGuid, { headshots: { increment: 1 } }, now);
           }
+          // KillEvent guarda la semántica stock de la DB: origin = KILLER,
+          // target = VÍCTIMA (skill ELO, streaks, armas y perfiles consumen ese orden).
           await prisma.killEvent.create({
             data: {
-              originGuid: event.originGuid,
+              originGuid: killerGuid,
               targetGuid: victimGuid,
               isKill: true,
               damage: event.damage,
@@ -584,26 +630,25 @@ export async function ingestGameLog(path: string, server: string | null): Promis
             },
           });
           result.killEventsSynced += 1;
-          // Alias por K: atacante + víctima real (suicidio → victimGuid ya es null;
-          // world → sin guid de víctima → solo atacante).
-          if (await upsertPlayerAlias({ guid: event.originGuid, name: event.originName, server, when: now })) {
+          // Alias por K: killer + víctima real.
+          if (await upsertPlayerAlias({ guid: killerGuid, name: event.killerName ?? '', server, when: now })) {
             result.aliasesUpserted += 1;
           }
-          if (victimGuid !== null && (await upsertPlayerAlias({ guid: victimGuid, name: event.targetName ?? '', server, when: now }))) {
+          if (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now })) {
             result.aliasesUpserted += 1;
           }
-          touched.add(event.originGuid);
+          touched.add(killerGuid);
           touched.add(victimGuid);
         } else {
-          // world / suicidio: el "atacante" es quien muere o se daña.
-          await incrementPlayer(event.originGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
-          // Alias del "atacante" (es quien muere); la víctima world no tiene guid → skip.
-          if (await upsertPlayerAlias({ guid: event.originGuid, name: event.originName, server, when: now })) {
+          // world / suicidio: el que muere es la VÍCTIMA (1er bloque); sin atacante.
+          await incrementPlayer(victimGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
+          // Alias de la víctima; el "killer" world no tiene guid → skip.
+          if (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now })) {
             result.aliasesUpserted += 1;
           }
-          touched.add(event.originGuid);
+          touched.add(victimGuid);
         }
-        result.playersSynced += victimGuid !== null ? 2 : 1;
+        result.playersSynced += killerGuid !== null ? 2 : 1;
       }
       result.linesParsed += 1;
     } catch (err) {
