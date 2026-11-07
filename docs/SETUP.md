@@ -191,6 +191,45 @@ El reader de IW4MAdmin sigue disponible y es **combinable** con el log ([4C](#4c
 - Agregaciones (kills/deaths/K/D/tiempo/conexiones/skill) se recalculan completas en cada sync con `GROUP BY`; los kill events individuales se importan **incrementalmente** (`Time > último epoch sincronizado`), por lo que re-sincronizar es barato.
 - Si ambas fuentes están activas a la vez: IW4MAdmin recalcula agregados completos (su fuente es autoritativa) y el log añade sus eventos/delta incrementalmente encima.
 
+## 4G. IW4MAdmin (moderación)
+
+Instalado como **suite de moderación** (bans / penalidades / reportes / comandos in-game / webfront) — **NO como fuente de stats**. Ver sección 4C para la fuente del ranking.
+
+- **Versión**: IW4MAdmin 2025.12.16.1 (último estable del [repo oficial](https://github.com/RaidMax/IW4M-Admin))
+- **Ubicación**: `D:\IW4MAdmin` (fuera del repo y de la carpeta del juego)
+- **Requisito**: .NET 10.x ASP.NET Core (runtime 10.0.14 instalado vía `winget install Microsoft.DotNet.AspNetCore.10 --source winget --silent`)
+- **Config**: `D:\IW4MAdmin\Configuration\IW4MAdminSettings.json` (pre-escrita, sin first-run interactivo):
+  - Server: `127.0.0.1:28961`, RCon parser `Call of Duty`, `ManualLogPath` = `D:\Call of Duty 6\userraw\logs\games_mp.log`, `Password` = el `rcon_password` de `userraw\server.cfg` (sincronizar a mano si cambias la cfg)
+  - Webfront: `http://0.0.0.0:1624` → entra por <http://127.0.0.1:1624>
+  - DB propia (SQLite, solo para IW4MAdmin): `D:\IW4MAdmin\Database\Database.db` — NO es la del ranking
+- **Logs**: `D:\IW4MAdmin\Log\` y consola redirigida a `D:\IW4MAdmin\console.stdout.log` / `console.stderr.log`
+
+### Arrancar / parar
+
+```powershell
+# Arrancar (con UI de ventana):
+D:\IW4MAdmin\StartIW4MAdmin.cmd
+# Arrancar headless (recomendado si el server ya corre):
+Start-Process -FilePath 'C:\Program Files\dotnet\dotnet.exe' -ArgumentList 'Lib\IW4MAdmin.dll','--no-confirm' -WorkingDirectory 'D:\IW4MAdmin' -WindowStyle Hidden
+
+# Parar (kill del proceso dotnet de IW4MAdmin):
+Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" |
+  Where-Object { $_.CommandLine -like '*Lib\IW4MAdmin.dll*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+IW4MAdmin solo necesita que el server dedicado esté corriendo: se conecta por RCon a 28961 (hace polling cada `RConPollRate` ms = 5s) y lee el `games_mp.log` en modo lectura (sin conflicto con la ingesta del ranking por log).
+
+### Reclamar ownership
+
+1. En el chat del juego, escribiendo `!owner` — el primer humano conectado que lo escribó se convierte en owner de esa instancia (verificado: el comando existe mientras no haya owner en la DB).
+2. In-game: `!rt` (register) genera las credenciales de tu cuenta para login en el webfront (`http://127.0.0.1:1624` → Login). Con el webfront logeado podés administrar bans/mutear/reportes desde la web.
+3. Comandos moderación desde webfront o chat: `!ban`, `!warn`, `!mute`, `!kick` (ver `!help`).
+
+> ℹ️ El log de IW4MAdmin marca `[GameInterface] gsc integration is disabled` — la integración GSC es opcional (habilita funciones avanzadas). Si algún comando in-game no llegara a funcionar, copia `D:\IW4MAdmin\GameFiles\_integration_iw4x.gsc` a la carpeta de scripts del server (`userraw\iw4x\scripts`) y reinicia el server.
+
+> 🚨 **NOTA IMPORTANTE — fuentes de datos**: el ranking **NO ingiere la DB de IW4MAdmin por defecto** (fuente = `games_mp.log`, ver [4C](#4c-ingesta-por-log-del-server-dedicado)). Para cambiar de fuente: config `IW4MADMIN_DB_PATH` y comenta `GAME_LOG_PATH` — **nunca dejes las dos activas contra el MISMO server** (doble conteo de kills). Ver [4F](#4f-conectar-un-iw4madmin-real-alternativa). `IW4MADMIN_DB_PATH` queda **comentado/desactivado a propósito** en `apps/api/.env`; NO tocar mientras el ranking use el log.
+
 ## 5. Ejecutar
 
 ```powershell
