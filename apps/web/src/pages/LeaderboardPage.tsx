@@ -9,6 +9,7 @@ import { Input } from "../components/ui/Input";
 import { KdBadge } from "../components/ui/Badge";
 import { Skeleton } from "../components/ui/Spinner";
 import { RankCell } from "../components/RankCell";
+import { MedalBadge } from "../components/MedalBadge";
 import { SortableHeader } from "../components/SortableHeader";
 import { Pagination } from "../components/Pagination";
 import {
@@ -365,6 +366,9 @@ export function LeaderboardPage() {
                   <th scope="col" className="min-w-[180px] px-3 py-2.5 text-left">
                     <span className="type-label text-text-2">Jugador</span>
                   </th>
+                  <th scope="col" className="min-w-[110px] px-3 py-2.5 text-left">
+                    <span className="type-label text-text-2">Medalla</span>
+                  </th>
                   <th scope="col" className="w-[9%] px-3 py-2.5 text-right" aria-sort={sort === "kills" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="Kills" field="kills" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
@@ -373,6 +377,9 @@ export function LeaderboardPage() {
                   </th>
                   <th scope="col" className="w-[9%] px-3 py-2.5 text-right" aria-sort={sort === "headshots" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="HS" field="headshots" ariaLabel="headshots" activeField={sort} activeOrder={order} onSort={handleSort} />
+                  </th>
+                  <th scope="col" className="w-[7%] px-3 py-2.5 text-right" aria-sort={sort === "level" ? (order === "desc" ? "descending" : "ascending") : undefined}>
+                    <SortableHeader label="Nivel" field="level" ariaLabel="nivel" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
                   <th scope="col" className="w-[8%] px-3 py-2.5 text-right" aria-sort={sort === "kd" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="K/D" field="kd" activeField={sort} activeOrder={order} onSort={handleSort} />
@@ -403,6 +410,18 @@ export function LeaderboardPage() {
                     <td className="px-3 py-2.5">
                       <PlayerNameCell player={player} />
                     </td>
+                    <td className="px-3 py-2.5">
+                      {player.medal ? (
+                        <div className="flex items-center gap-2">
+                          <MedalBadge medal={player.medal} size="sm" elo={player.skill} />
+                          <span className="type-caption hidden max-w-[96px] truncate text-text-2 xl:inline">
+                            {player.medal.name}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-sm text-text-2">—</span>
+                      )}
+                    </td>
                     <td data-numeric className="px-3 py-2.5 text-right">
                       <span className="type-number-m text-text">{formatInt(player.kills)}</span>
                     </td>
@@ -411,6 +430,11 @@ export function LeaderboardPage() {
                     </td>
                     <td data-numeric className="px-3 py-2.5 text-right">
                       <span className="type-number-m text-text">{formatInt(player.headshots ?? 0)}</span>
+                    </td>
+                    <td data-numeric className="px-3 py-2.5 text-right">
+                      <span className={`type-number-m ${player.level == null ? "text-text-2" : "text-text"}`}>
+                        {player.level != null ? formatInt(player.level) : "—"}
+                      </span>
                     </td>
                     <td data-numeric className="px-3 py-2.5 text-right">
                       <KdBadge value={player.kd} />
@@ -444,6 +468,7 @@ export function LeaderboardPage() {
                     <div className="w-12 shrink-0">
                       <RankCell rank={player.rank} />
                     </div>
+                    <MedalBadge medal={player.medal} size="sm" elo={player.skill} className="shrink-0" />
                     <div className="min-w-0 flex-1">
                       <p className="type-display-m flex items-center gap-1.5 truncate text-text">
                         {player.name}
@@ -457,7 +482,13 @@ export function LeaderboardPage() {
                       </p>
                       <p className="type-caption mt-0.5 tabular text-text-2">
                         {formatInt(player.kills)} K · {formatInt(player.deaths)} M ·{" "}
-                        {formatInt(player.headshots ?? 0)} HS · {formatDuration(player.timePlayed)}
+                        {formatInt(player.headshots ?? 0)} HS
+                        {player.level !== null && player.level !== undefined && (
+                          <>
+                            {" "}· {formatInt(player.level)} Lv
+                          </>
+                        )}
+                        {" "}· {formatDuration(player.timePlayed)}
                         {player.skill !== null && player.skill !== undefined && (
                           <>
                             {" "}· Skill {formatSkill(player.skill)}

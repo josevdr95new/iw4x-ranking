@@ -97,7 +97,9 @@ export type LeaderboardSort =
   | "headshots"
   | "kd"
   | "timePlayed"
-  | "skill";
+  | "skill"
+  /** Nivel real del save en la nube (nulls al final en desc). API v0.4. */
+  | "level";
 
 export type LeaderboardOrder = "desc" | "asc";
 
@@ -109,6 +111,25 @@ export interface LeaderboardParams {
   pageSize?: number;
   /** true → incluye bots del server (heurística GUID 0xB07…). Default: solo humanos. */
   includeBots?: boolean;
+}
+
+/**
+ * Medalla ELO (contrato cerrado backend medallas). Tiers 1–8 derivados del skill;
+ * tier 8 = LEYENDA. La UI tolera que el campo no venga (deploy en curso).
+ */
+export interface PlayerMedal {
+  /** 1 (RECLUTA) … 8 (LEYENDA). */
+  tierId: number;
+  /** Nombre del tier tal cual lo envía la API: "RECLUTA" … "LEYENDA" (con numeral si aplica). */
+  name: string;
+  /** Asset sin extensión: "medal-1-recluta" → /medals/medal-1-recluta.png. */
+  assetId: string;
+  /** 0–5 estrellas; null SOLO en tier 8. */
+  stars: number | null;
+  /** Posición global por skill; solo tier 8 (null en tiers 1–7). */
+  globalRank: number | null;
+  /** true si está en el top 12 élite (solo tier 8 → anillo ámbar + label TOP 12). */
+  eliteTop12: boolean;
 }
 
 export interface LeaderboardPlayer {
@@ -128,6 +149,10 @@ export interface LeaderboardPlayer {
   isBot?: boolean;
   /** Tiros a la cabeza acumulados. Opcional: API anterior puede no enviarlo. */
   headshots?: number;
+  /** Nivel real del save en la nube (parseado EN VIVO por GSC). Opcional: API anterior puede no enviarlo; null si no hay nivel conocido. */
+  level?: number | null;
+  /** Medalla ELO del jugador. Opcional: backend medallas en despliegue; si falta, el UI no la pinta. */
+  medal?: PlayerMedal | null;
 }
 
 export interface LeaderboardResponse {
@@ -189,9 +214,20 @@ export interface PlayerProfile {
   knifeKills?: number;
   /** Muertes a cuchillo. Opcional: APIs previas pueden no enviarlo. */
   knifeDeaths?: number;
+  /** Save en la nube parseado EN VIVO por GSC (nivel real del jugador). Opcional: API anterior puede no enviarlo; null si el jugador no tiene nivel conocido. */
+  save?: PlayerLiveSave | null;
   firstConnection: string;
   lastConnection: string;
   linked: boolean;
+}
+
+/** `player.save` (API v0.4): nivel real leído del save por GSC en el server. */
+export interface PlayerLiveSave {
+  level: number;
+  prestige: number;
+  xp: number;
+  /** ISO del parseo. */
+  parsedAt: string;
 }
 
 /** Alias histórico del GUID (docs/API.md §Perfil — anti-confusión de identidades). */
@@ -210,6 +246,8 @@ export interface PlayerDetail {
   byServer: Array<{ server: string; kills: number; deaths: number }>;
   /** Nombres históricos ≠ nombre actual, lastSeenAt desc, máx 10. Vacío → siempre usó el mismo nombre. */
   aliases?: PlayerAlias[];
+  /** Medalla ELO (posición global por skill). Opcional: backend medallas en despliegue; null/ausente → sin medalla. */
+  medal?: PlayerMedal | null;
 }
 
 export interface AuthResponse {

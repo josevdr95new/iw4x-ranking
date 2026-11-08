@@ -7,6 +7,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Skeleton, Spinner } from "../components/ui/Spinner";
+import { MedalBadge } from "../components/MedalBadge";
 import { useAuth } from "../lib/auth";
 import {
   formatDecimal,
@@ -31,8 +32,8 @@ function PlayerSkeleton() {
           <Skeleton className="h-3 w-72" />
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-9">
-        {Array.from({ length: 9 }, (_, index) => (
+      <div className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-10">
+        {Array.from({ length: 10 }, (_, index) => (
           <div key={index} className="bg-surface p-4">
             <Skeleton className="h-2.5 w-16" />
             <Skeleton className="mt-3 h-6 w-20" />
@@ -335,6 +336,9 @@ export function PlayerPage() {
   const hsRatio = player.hsRatio ?? (player.headshotPct !== null && player.headshotPct !== undefined ? player.headshotPct / 100 : null);
   const hsPercent = hsRatio !== null && hsRatio !== undefined ? Math.round(hsRatio * 100) : null;
 
+  // Nivel real del save en la nube (GSC): null si el jugador no tiene nivel conocido aún.
+  const save = player.save ?? null;
+
   return (
     <div>
       <Link
@@ -374,6 +378,21 @@ export function PlayerPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 md:flex-col md:items-end md:gap-3">
+            {/* MEDALLA: la identidad competitiva va primero, junto al rank global. */}
+            {detail.medal && (
+              <div className="flex flex-col items-start gap-1.5 md:items-end">
+                <MedalBadge medal={detail.medal} size="lg" elo={player.skill} showName />
+                <p className="type-caption tabular text-text-2">
+                  ELO{" "}
+                  {player.skill !== null && player.skill !== undefined
+                    ? formatInt(Math.round(player.skill))
+                    : "—"}
+                  {detail.medal.globalRank !== null && detail.medal.globalRank !== undefined && (
+                    <> · #{formatInt(detail.medal.globalRank)} global</>
+                  )}
+                </p>
+              </div>
+            )}
             {detail.rank !== null && (
               <Badge variant="success">#{formatInt(detail.rank)} global</Badge>
             )}
@@ -397,8 +416,24 @@ export function PlayerPage() {
           </div>
         </div>
 
-        {/* Stat strip: celdas con hairlines, NO cards (§3.3). 3×3 en móvil, 9 en fila desde lg. */}
-        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-9">
+        {/* Stat strip: celdas con hairlines, NO cards (§3.3). 3×4 en móvil, 10 en fila desde lg. */}
+        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-10">
+          <div className="bg-surface p-4">
+            <dt className="type-label text-text-2">Nivel</dt>
+            {save !== null && save.level !== null && save.level !== undefined ? (
+              <>
+                <dd className="type-number-l stat-value mt-2 text-text">{formatInt(save.level)}</dd>
+                <dd className="type-caption mt-1 text-text-2">
+                  {save.prestige > 0 ? `Prestigio ${formatInt(save.prestige)}` : "del save en la nube"}
+                </dd>
+              </>
+            ) : (
+              <>
+                <dd className="type-number-l stat-value mt-2 text-text-2">—</dd>
+                <dd className="type-caption mt-1 text-text-2">sin nivel aún</dd>
+              </>
+            )}
+          </div>
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">Kills</dt>
             <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.kills)}</dd>
