@@ -534,10 +534,18 @@ class App(ctk.CTk):
         def ok(data: Dict[str, Any]) -> None:
             self._stats_fetching = False
             self._stats_fetch_count += 1
-            # save: nivel REAL parseado del iw4x.stat en la nube (| null /
-            # ausente en perfiles viejos → el panel pinta '—' sin crash).
-            panel.set_values(data.get("player") or {}, data.get("rank"),
-                             last_server, data.get("save"))
+            # Contrato REAL de GET /api/players/:guid: la MEDALLA viaja en la
+            # RAÍZ de la respuesta (data["medal"]) y el save parseado dentro
+            # de player (player["save"]); el panel espera player["medal"] y el
+            # save como 4º argumento. Fix del bug "la medalla no sale en el
+            # launcher": el perfil llegaba al panel SIN medal → bloque '—'
+            # SIEMPRE aunque la API la sirviera (la web la leía de la raíz,
+            # por eso ahí sí se veía SOLDADO/RECLUTA). setdefault: si una API
+            # futura mueve medal dentro de player, manda la del perfil.
+            player = dict(data.get("player") or {})
+            player.setdefault("medal", data.get("medal"))
+            panel.set_values(player, data.get("rank"),
+                             last_server, data.get("save") or player.get("save"))
             self._schedule_stats_refresh()
 
         def err(exc: Exception) -> None:

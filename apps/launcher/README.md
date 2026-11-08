@@ -83,6 +83,19 @@ ratón).
 - Token JWT: `%APPDATA%\iw4x-ranking-launcher\token.json` (auto-login).
 - Log rotativo: `%APPDATA%\iw4x-ranking-launcher\logs\launcher.log`.
 
+## Panel de stats en vivo (`// TUS STATS //`)
+
+La home pinta el perfil del GUID vinculado (`GET /api/players/:guid`,
+refresco cada 30 s o con el botón ↻). El grid muestra RANK · LVL · KILLS ·
+DEATHS · HEADSHOTS · K/D · MEDALLA (medallón del tier + su nombre; la medalla
+la decide la API desde el ELO y viaja en la raíz de la respuesta). La línea
+de detalle añade el tiempo jugado, el último server, el jugador, el ratio de
+headshots (`HS 15% de bajas`), el **ELO** del perfil (`ELO 1375` — el mismo
+número que decide la medalla) y el balance de cuchillo (`CUCHILLO 11/0`,
+bajas/muertes por cuchillo, como en la web). Cualquier dato que aún no llegue
+se pinta como `—` sin romper el panel; en tiers 1-7 el detalle muestra las
+estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
+
 ## Flujo JUGAR (simplificado: sin pantalla de verificación)
 
 1. Al dar JUGAR el launcher abre/renueva la **sesión de juego**

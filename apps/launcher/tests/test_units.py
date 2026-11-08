@@ -58,6 +58,7 @@ from save_sync import (  # noqa: E402
     stat_quarantine_root,
     stat_rels,
 )
+from ui.stats_panel import medal_detail_parts  # noqa: E402
 
 RESULTS: list = []
 
@@ -876,6 +877,51 @@ def phase_autosave() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Units: medalla (contrato player["medal"]) — partes del segmento del panel.
+def phase_medal_parts() -> None:
+    print("\n=== Units: medal_detail_parts (segmento MEDALLA del detalle) ===")
+    full, empty, text, kind = medal_detail_parts(
+        {"tierId": 4, "name": "SARGENTO", "assetId": "medal-4-sargento",
+         "stars": 3, "globalRank": 12, "eliteTop12": False})
+    check("medalla tier 4 con 3 estrellas → '★★★' llenas + '☆☆' vacías",
+          (full, empty, text, kind) == ("★★★", "☆☆", "", "estrellas"),
+          f"{full!r}/{empty!r}/{text!r}/{kind}")
+    full, empty, text, kind = medal_detail_parts(
+        {"tierId": 2, "name": "SOLDADO", "assetId": "medal-2-soldado",
+         "stars": 5, "globalRank": None, "eliteTop12": True})
+    check("medalla 5/5 con élite → '★★★★★' + '· TOP 12' tras las vacías",
+          (full, empty, text, kind) == ("★★★★★", "· TOP 12", "", "estrellas"),
+          f"{full!r}/{empty!r}/{text!r}/{kind}")
+    full, empty, text, kind = medal_detail_parts(
+        {"tierId": 8, "name": "LEYENDA", "assetId": "medal-8-leyenda",
+         "stars": None, "globalRank": 3, "eliteTop12": True})
+    check("tier 8 (stars null) → 'LEYENDA #3 · TOP 12' tipo leyenda",
+          (full, empty, text, kind) == ("", "", "LEYENDA #3 · TOP 12", "leyenda"),
+          f"{text!r}/{kind}")
+    _f, _e, text, kind = medal_detail_parts(
+        {"tierId": 8, "name": "LEYENDA", "assetId": "medal-8-leyenda",
+         "stars": None, "globalRank": None, "eliteTop12": False})
+    check("tier 8 sin globalRank → solo 'LEYENDA' (sin '#')",
+          text == "LEYENDA" and kind == "leyenda", f"{text!r}/{kind}")
+    p_none = medal_detail_parts(None)
+    p_ilegible = medal_detail_parts({"name": "Rara"})  # sin tierId legible
+    check("medal null/ausente o ilegible → '—' tipo vacio (convención)",
+          p_none == ("", "", "—", "vacio")
+          and p_ilegible == ("", "", "—", "vacio"),
+          f"{p_none}/{p_ilegible}")
+    full_hi, empty_hi, _, _ = medal_detail_parts(
+        {"tierId": 5, "name": "TENIENTE", "assetId": "x", "stars": 99,
+         "globalRank": 1, "eliteTop12": False})
+    full_lo, empty_lo, _, _ = medal_detail_parts(
+        {"tierId": 5, "name": "TENIENTE", "assetId": "x", "stars": -2,
+         "globalRank": 1, "eliteTop12": False})
+    check("stars fuera de rango se acota a 0..5 (99→5 llenas, -2→5 vacías)",
+          full_hi == "★★★★★" and empty_hi == ""
+          and full_lo == "" and empty_lo == "☆☆☆☆☆",
+          f"hi={full_hi!r}/{empty_hi!r} lo={full_lo!r}/{empty_lo!r}")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -896,6 +942,7 @@ def main() -> int:
     phase_kill_tree()
     phase_wait_process_exit()
     phase_autosave()
+    phase_medal_parts()
 
     fails = sum(1 for r in RESULTS if r.startswith("[FALLO"))
     print("\n================ RESUMEN ================")

@@ -6,6 +6,10 @@ Uso:
 Exporta en assets\\medals\\:
   - medal-1-recluta.png ... medal-8-leyenda.png  8× 512×512 RGBA
     (fondo alpha 0: van sobre tarjetas oscuras, NO sobre carbón)
+  - star-full.png / star-empty.png  2× 64×64 RGBA (alpha 0 en esquinas):
+    estrellas de progreso I-V que pinta la UI junto al detalle
+  - elite-top12.png  badge 256×96 RGBA (fondo carbón OPACO + borde ámbar
+    2px + texto mono "TOP 12" ámbar) del club élite
   - medals-sheet.png  preview de los 8 en fila sobre fondo carbón
     (1 archivo para mostrar al dueño, no es asset de UI)
 
@@ -217,6 +221,47 @@ def make_sheet(paths: list) -> Path:
     return out
 
 
+# --- Assets de UI: estrellas de progreso + badge élite ------------------------
+# Las estrellas I-V NO van dentro del emblema (make_medal): la UI las pinta
+# al lado del detalle. Aquí se generan como PNG independientes (64×64 RGBA,
+# alpha 0 en esquinas) para que el bloque MEDALLA del stats panel y futuras
+# vistas usen el MISMO par de glifos (llena ámbar ACCENT / vacía dim).
+STAR_SIZE = 64
+STAR_EMPTY_HEX = "#3B443E"   # = COLORS["border_strong"] (dim del tema)
+
+# Badge del club élite (top 12 global): 256×96, fondo carbón OPACO (no es
+# un asset alpha: se dibuja su propio fondo como el sheet) + borde ámbar.
+ELITE_SIZE = (256, 96)
+
+
+def make_star(fill_hex: str, filename: str) -> Path:
+    """Estrella de 5 puntas 64×64 RGBA transparente (misma geometría que la
+    estrella del tier 8: proporción interior ≈ 0.4 del radio exterior)."""
+    img = Image.new("RGBA", (STAR_SIZE, STAR_SIZE), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    cx, cy = STAR_SIZE // 2, STAR_SIZE // 2 + 2  # óptico: punta arriba pesa menos
+    d.polygon(star5_points(cx, cy, 30, 12), fill=hex_rgba(fill_hex))
+    out = OUT / filename
+    img.save(out, "PNG")
+    return out
+
+
+def make_elite_badge() -> Path:
+    """Badge 'TOP 12' 256×96: rectángulo carbón + borde ámbar 2px + texto
+    mono Consolas bold ámbar centrado (mismo patrón HUD que el sheet)."""
+    W, H = ELITE_SIZE
+    img = Image.new("RGBA", (W, H), hex_rgba(BG))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, W - 1, H - 1], outline=hex_rgba(ACCENT), width=2)
+    f = load_font(30)
+    ascent, _descent = f.getmetrics()
+    draw_tracked_centered(d, W // 2, (H - ascent) // 2, "TOP 12", f,
+                          ACCENT, tracking=6)
+    out = OUT / "elite-top12.png"
+    img.save(out, "PNG")
+    return out
+
+
 # --- Verificación --------------------------------------------------------------
 
 def verify() -> None:
@@ -245,6 +290,38 @@ def verify() -> None:
     print(f"{sheet.name:<26}{f'{simg.size[0]}x{simg.size[1]} {simg.mode}':<12}"
           f"{os.path.getsize(sheet):<9}{'-':<10}{'-':<20}{'-':<13}"
           f"{'SI' if simg.size[0] > 0 else 'NO'}")
+
+    # Assets de UI: estrellas transparentes (alpha 0 en esquinas, cuerpo
+    # opaco al color esperado) y badge élite opaco (borde ámbar en el borde,
+    # fondo carbón dentro). Misma disciplina de verificación determinista.
+    ui_expect = [
+        ("star-full.png", (STAR_SIZE, STAR_SIZE), hex_rgba(ACCENT), 0),
+        ("star-empty.png", (STAR_SIZE, STAR_SIZE), hex_rgba(STAR_EMPTY_HEX), 0),
+        ("elite-top12.png", ELITE_SIZE, hex_rgba(BG), 255),
+    ]
+    for name, size, inner, corner_a_want in ui_expect:
+        p = OUT / name
+        img = Image.open(p)
+        rgba = img.convert("RGBA")
+        size_ok = img.size == size and img.mode == "RGBA"
+        corner_a = rgba.getpixel((0, 0))[3]
+        cx, cy = size[0] // 2, size[1] // 2 + (2 if name.startswith("star") else 0)
+        inner_px = rgba.getpixel((cx, cy))
+        if name == "elite-top12.png":
+            # el centro puede caer en texto o hueco: se verifica el FONDO
+            # carbón en una zona interior sin texto y el borde ámbar en (1,1)
+            inner_ok = rgba.getpixel((12, size[1] - 12)) == inner
+            border_ok = rgba.getpixel((1, 1))[:3] == hex_rgba(ACCENT)[:3]
+            color_ok = inner_ok and border_ok
+            want = f"{inner} / borde ámbar"
+        else:
+            color_ok = inner_px[:3] == inner[:3] and inner_px[3] == 255
+            want = str(inner)
+        ok = size_ok and corner_a == corner_a_want and color_ok
+        all_ok &= ok
+        print(f"{p.name:<26}{f'{img.size[0]}x{img.size[1]} {img.mode}':<12}"
+              f"{os.path.getsize(p):<9}{corner_a:<10}"
+              f"{str(inner_px):<20}{want:<13}{'SI' if ok else 'NO'}")
     if not all_ok:
         raise SystemExit("[FAIL] verificación de medallas")
 
@@ -259,6 +336,15 @@ def main() -> None:
     paths = [make_medal(num, slug, metal_hex)
              for num, slug, _name, metal_hex, _elo in TIERS]
     for p in paths:
+        img = Image.open(p)
+        print(f"[OK] {p.name}: {img.size[0]}x{img.size[1]} {img.mode} "
+              f"({os.path.getsize(p)} bytes)")
+    ui_paths = [
+        make_star(ACCENT, "star-full.png"),
+        make_star(STAR_EMPTY_HEX, "star-empty.png"),
+        make_elite_badge(),
+    ]
+    for p in ui_paths:
         img = Image.open(p)
         print(f"[OK] {p.name}: {img.size[0]}x{img.size[1]} {img.mode} "
               f"({os.path.getsize(p)} bytes)")

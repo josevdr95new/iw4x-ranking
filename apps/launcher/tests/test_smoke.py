@@ -90,6 +90,8 @@ from logging_setup import app_data_dir, setup_logging  # noqa: E402
 import save_sync as ss  # noqa: E402
 from save_sync import decide_sync  # noqa: E402
 from ui.main_window import App  # noqa: E402
+from ui.stats_panel import GRID_ORDER, MEDAL_IMG_H  # noqa: E402
+from ui.theme import COLORS  # noqa: E402
 from user_store import UserStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -675,7 +677,7 @@ def synthetic_lvl_checks(panel) -> None:
     prestige 2) → '47·P2' con caption dim 'LVL·SAVE'; sin save (None) y con
     perfil VIEJO sin el campo (llamada a 3 argumentos) → '—' + 'LVL', sin
     crash. Son los mismos checks para la fase completa y la reducida."""
-    check("bloque LVL mapeado en el grid (6 columnas)",
+    check("bloque LVL mapeado en el grid (7 columnas)",
           panel._blocks["lvl"].winfo_ismapped()
           and panel._captions["lvl"].winfo_ismapped(),
           f"val_mgr={panel._blocks['lvl'].winfo_manager()} "
@@ -713,6 +715,120 @@ def synthetic_lvl_checks(panel) -> None:
           sin_none and sin_campo,
           f"None={panel._blocks['lvl'].cget('text')} "
           f"sin_campo={panel._blocks['lvl'].cget('text')}")
+
+
+def synthetic_elo_knife_checks(panel) -> None:
+    """Inyección sintética de los segmentos ELO + CUCHILLO de la línea de
+    detalle sobre el panel REAL (no depende del entorno): con campos del
+    perfil → 'ELO 1750'/'CUCHILLO 2/1'; sin ellos → 'ELO —'/'CUCHILLO —'
+    (convención del panel), sin crash. Corre igual en modo FULL y REDUCIDO.
+    """
+    panel.set_values(
+        {"name": "Con ELO", "kills": 31, "deaths": 20,
+         "kd": 1.55, "skill": 1750, "knifeKills": 2,
+         "knifeDeaths": 1, "timePlayed": 3600},
+        1, "SRV",
+    )
+    sub_con = str(panel.sub_label.cget("text"))
+    panel.set_values(
+        {"name": "Sin ELO", "kills": 31, "deaths": 20,
+         "kd": 1.55, "timePlayed": 3600},
+        1, "SRV",
+    )
+    sub_sin = str(panel.sub_label.cget("text"))
+    check("detalle ELO: 'ELO 1750' con skill y 'ELO —' sin él, sin crash",
+          "ELO 1750" in sub_con and "ELO —" in sub_sin,
+          f"con={sub_con} | sin={sub_sin}")
+    check("detalle CUCHILLO: 'CUCHILLO 2/1' con knife y 'CUCHILLO —' sin él, sin crash",
+          "CUCHILLO 2/1" in sub_con and "CUCHILLO —" in sub_sin,
+          f"con={sub_con} | sin={sub_sin}")
+
+
+def synthetic_medal_checks(panel) -> None:
+    """Inyección sintética del bloque MEDALLA sobre el panel REAL (no depende
+    del entorno ni de que el backend ya sirva el campo). El perfil llega con
+    medal sintético y un assetId VÁLIDO (los PNG reales de assets/medals,
+    ruta resuelta por asset_path) → medallón cargado como PhotoImage ~36px
+    sin crash; tier 8 → 'LEYENDA #N · TOP 12' en ámbar; medal null/ausente
+    y assetId inválido → '—' (convención), todo sin crash. Los mismos checks
+    para la fase completa y la reducida."""
+    check("bloque MEDALLA en el grid: 7ª clave con caption 'MEDALLA' mapeada",
+          "medal" in GRID_ORDER
+          and str(panel._captions["medal"].cget("text")) == "MEDALLA"
+          and panel._blocks["medal"].winfo_ismapped()
+          and panel._captions["medal"].winfo_ismapped(),
+          f"claves={len(GRID_ORDER)} "
+          f"val_mgr={panel._blocks['medal'].winfo_manager()}")
+    panel.set_values(
+        {"name": "Con Medalla", "kills": 31, "deaths": 20, "kd": 1.55,
+         "timePlayed": 3600,
+         "medal": {"tierId": 4, "name": "SARGENTO",
+                   "assetId": "medal-4-sargento", "stars": 3,
+                   "globalRank": 12, "eliteTop12": True}},
+        1, "SRV",
+    )
+    img_set = bool(panel._medal_img.cget("image"))
+    nombre = str(panel._medal_name.cget("text"))
+    ancho = (panel._medal_photo.width()
+             if panel._medal_photo is not None else 0)
+    check("medal sintético (SARGENTO, assetId válido) → medallón cargado "
+          "(PhotoImage ~36px) + nombre al lado, sin crash",
+          img_set and MEDAL_IMG_H <= ancho <= MEDAL_IMG_H + 2
+          and nombre == "SARGENTO",
+          f"img={'sí' if img_set else 'no'} ancho={ancho} nombre={nombre!r}")
+    estrellas_ok = (
+        str(panel._stars_full.cget("text")) == "★★★"
+        and str(panel._stars_empty.cget("text")) == "☆☆ · TOP 12"
+        and panel._stars_full.winfo_manager() == "grid"
+        and panel._stars_empty.winfo_manager() == "grid"
+        and panel._medal_text.winfo_manager() != "grid")
+    check("detalle: 5 estrellas (★★★ llenas ámbar / ☆☆ vacías dim) "
+          "con '· TOP 12' si eliteTop12",
+          estrellas_ok,
+          f"full={panel._stars_full.cget('text')!r} "
+          f"empty={panel._stars_empty.cget('text')!r}")
+    panel.set_values(
+        {"name": "Leyenda", "kills": 31, "deaths": 20, "kd": 1.55,
+         "timePlayed": 3600,
+         "medal": {"tierId": 8, "name": "LEYENDA",
+                   "assetId": "medal-8-leyenda", "stars": None,
+                   "globalRank": 3, "eliteTop12": True}},
+        1, "SRV",
+    )
+    leyenda_ok = (
+        str(panel._medal_text.cget("text")) == "LEYENDA #3 · TOP 12"
+        and panel._medal_text.cget("text_color") == COLORS["accent"]
+        and panel._medal_text.winfo_manager() == "grid"
+        and panel._stars_full.winfo_manager() != "grid"
+        and panel._stars_empty.winfo_manager() != "grid")
+    check("tier 8 LEYENDA → 'LEYENDA #3 · TOP 12' en ámbar (sin estrellas)",
+          leyenda_ok,
+          f"texto={panel._medal_text.cget('text')!r} "
+          f"color={panel._medal_text.cget('text_color')!r}")
+    panel.set_values(
+        {"name": "Sin Medalla", "kills": 31, "deaths": 20,
+         "kd": 1.55, "timePlayed": 3600},  # sin campo medal
+        1, "SRV",
+    )
+    sin_medal = (
+        str(panel._medal_img.cget("text")) == "—"
+        and not panel._medal_img.cget("image")
+        and str(panel._medal_name.cget("text")) == ""
+        and str(panel._medal_text.cget("text")) == "—")
+    panel.set_values(
+        {"name": "Asset Fantasma", "kills": 31, "deaths": 20, "kd": 1.55,
+         "timePlayed": 3600,
+         "medal": {"tierId": 6, "name": "CAPITÁN",
+                   "assetId": "medal-999-fantasma", "stars": 2,
+                   "globalRank": 9, "eliteTop12": False}},
+        1, "SRV",
+    )
+    asset_malo = (panel._medal_photo is None
+                  and str(panel._medal_img.cget("text")) == "—")
+    check("medal null/ausente y assetId inválido → '—' en bloque y detalle "
+          "(sin crash, decorativo)",
+          sin_medal and asset_malo,
+          f"null={sin_medal} asset_malo={asset_malo}")
 
 
 def phase_stats() -> None:
@@ -786,6 +902,38 @@ def phase_stats() -> None:
             print(f"    panel: RANK={rank} LVL={lvl} KILLS={kills} "
                   f"DEATHS={deaths} HS={hs} K/D={kd}")
             print(f"    sub: {sub}")
+            # Medalla REAL por el cableado completo (App → main_window.ok()
+            # → panel): la medal viaja en la RAÍZ de GET /api/players/:guid;
+            # si ok() la pierde, el panel muestra '—' aunque la API la
+            # sirva (bug del dueño: la web la leía de la raíz y sí salía).
+            try:
+                me = api.me(app.token)
+                u = me.get("user") or me
+                links = u.get("linkedGuids") or []
+                g = (u.get("linkedGuid")
+                     or (links[0].get("guid")
+                         if links and isinstance(links[0], dict) else ""))
+                raw = api.player(str(g)) if g else {}
+                want = (raw.get("medal")
+                        or (raw.get("player") or {}).get("medal"))
+                nombre_real = str(panel._medal_name.cget("text"))
+                foto_real = panel._medal_photo is not None
+                if want:
+                    check("medalla REAL (raíz de la respuesta) llega al "
+                          "panel por el cableado App→ok()",
+                          nombre_real == str(want.get("name") or "")
+                          and foto_real,
+                          f"esperada={want.get('name')!r} "
+                          f"panel={nombre_real!r} foto={foto_real}")
+                else:
+                    check("medalla REAL (raíz de la respuesta) llega al "
+                          "panel por el cableado App→ok()",
+                          nombre_real == "" and not foto_real,
+                          "perfil sin medal en esta corrida → bloque "
+                          f"'—' (panel={nombre_real!r})")
+            except Exception as exc:  # noqa: BLE001
+                check("medalla REAL (raíz de la respuesta) llega al "
+                      "panel por el cableado App→ok()", False, repr(exc))
             # Inyección sintética dentro del panel real: primero un perfil
             # actual (headshots + hsRatio → '2' y 'HS 6% de bajas') y luego
             # uno "viejo" sin esos campos → bloque '—' y 'HS —', sin crash.
@@ -813,12 +961,26 @@ def phase_stats() -> None:
             except Exception as exc:  # noqa: BLE001
                 check("perfil con y sin headshots: '2'/'HS 6% de bajas' y luego '—'/'HS —' sin crash",
                       False, repr(exc))
+            # ELO + CUCHILLO (segmentos de la línea de detalle): misma
+            # inyección sintética que en la fase reducida, sin crash.
+            try:
+                synthetic_elo_knife_checks(panel)
+            except Exception as exc:  # noqa: BLE001
+                check("detalle ELO+CUCHILLO con/sin campos del perfil sin crash",
+                      False, repr(exc))
             # LVL real (nivel del save en la nube, campo save del perfil):
             # los mismos checks sintéticos que en la fase reducida.
             try:
                 synthetic_lvl_checks(panel)
             except Exception as exc:  # noqa: BLE001
                 check("bloque LVL con/sin save del perfil sin crash",
+                      False, repr(exc))
+            # MEDALLA (contrato player["medal"]): mismos checks sintéticos
+            # que en la fase reducida (assets reales de assets/medals).
+            try:
+                synthetic_medal_checks(panel)
+            except Exception as exc:  # noqa: BLE001
+                check("bloque MEDALLA con/sin medal del perfil sin crash",
                       False, repr(exc))
             done()
 
@@ -829,16 +991,22 @@ def phase_stats() -> None:
         """Verificación mecánica anti-solape del grid (bug 'DEATHSHEADSHOTSK/D').
 
         Renderiza el panel con valores reales LARGOS (kills=999, deaths=88,
-        headshots=77, kd=1.25, rank=999) y comprueba con los bboxes REALES
-        que, fila a fila, el x_fin de cada caption no invade el x_inicio del
-        siguiente (tolerancia −2px por redondeos de render). También los
-        valores, y que la decisión 1↔2 filas fue consistente con el ancho
-        medido del panel.
+        headshots=77, kd=1.25, rank=999) y MEDALLA ancha ('COMANDANTE' con
+        medallón cargado) y comprueba con los bboxes REALES que, fila a fila,
+        el x_fin de cada caption no invade el x_inicio del siguiente
+        (tolerancia −2px por redondeos de render). También los valores —
+        incluido el MARCO del bloque medalla — y que la decisión 1↔2 filas
+        fue consistente con el ancho medido del panel usando las 7 claves.
         """
         panel = app.home_frame.stats_panel
         panel.set_values(
             {"name": "Grid Test", "kills": 999, "deaths": 88, "kd": 1.25,
-             "headshots": 77, "hsRatio": 0.077, "timePlayed": 7200},
+             "headshots": 77, "hsRatio": 0.077, "timePlayed": 7200,
+             # Medal sintética con nombre ANCHO ('COMANDANTE'): su columna
+             # (medallón + aire + nombre) también participa de la medición.
+             "medal": {"tierId": 7, "name": "COMANDANTE",
+                       "assetId": "medal-7-comandante", "stars": 4,
+                       "globalRank": 3, "eliteTop12": False}},
             999, "SRV-LARGO",
             # Save sintético con nivel ANCHO ('999·P9'): el LVL también
             # participa de la medición anti-solape.
@@ -848,11 +1016,14 @@ def phase_stats() -> None:
 
         def check_grid() -> None:
             app.update_idletasks()  # geometría al día antes de medir bboxes
-            keys = ("rank", "lvl", "kills", "deaths", "hs", "kd")
-            texts = {k: str(panel._blocks[k].cget("text")) for k in keys}
-            check("grid: valores largos pintados (999/999·P9/88/77/1,25)",
+            keys = ("rank", "lvl", "kills", "deaths", "hs", "kd", "medal")
+            texts = {k: str(panel._blocks[k].cget("text"))
+                     for k in keys if k != "medal"}
+            check("grid: valores largos pintados (999/999·P9/88/77/1,25 "
+                  "+ COMANDANTE)",
                   texts == {"rank": "999", "lvl": "999·P9", "kills": "999",
                             "deaths": "88", "hs": "77", "kd": "1,25"}
+                  and str(panel._medal_name.cget("text")) == "COMANDANTE"
                   and all(panel._captions[k].winfo_ismapped() for k in keys),
                   str(texts))
 
@@ -871,8 +1042,17 @@ def phase_stats() -> None:
 
             caps = [panel._captions[k] for k in keys]
             vals = [panel._blocks[k] for k in keys]
-            det = lambda ws: [(str(w.cget("text")), w.winfo_x(), w.winfo_width())
-                              for w in ws]  # noqa: E731
+
+            def det(ws):
+                out = []
+                for w in ws:
+                    try:
+                        texto = str(w.cget("text"))
+                    except Exception:  # el bloque medalla es un marco
+                        texto = "<marco medalla>"
+                    out.append((texto, w.winfo_x(), w.winfo_width()))
+                return out  # noqa: E731
+
             ok_caps = all(
                 b.winfo_x() - (a.winfo_x() + a.winfo_width()) >= -2
                 for a, b in pares_consecutivos(caps))
@@ -886,11 +1066,12 @@ def phase_stats() -> None:
 
             # Coherencia de la decisión MEDIDA: 'fila' solo si la suma de
             # anchos requeridos + huecos cabe en el ancho real del panel.
+            # Ahora con las 7 claves (MEDALLA incluida en la suma).
             needs = sum(panel._column_need(k) for k in keys)
             avail = panel._grid_avail
             mode = panel._grid_mode
             gap = panel._grid_gap
-            huecos = len(keys) - 1  # 6 columnas → 5 huecos
+            huecos = len(keys) - 1  # 7 columnas → 6 huecos
             consistente = mode in ("fila", "dos_filas") and (
                 (mode == "fila" and needs + gap * huecos <= avail)
                 or (mode == "dos_filas" and needs + 24 * huecos > avail)
@@ -899,8 +1080,20 @@ def phase_stats() -> None:
                   "(1 fila si cabe, 2 si no)",
                   consistente,
                   f"mode={mode} gap={gap} avail={avail} needs={needs}")
+            medal_need = panel._column_need("medal")
+            check("grid: medidor decide con 7 claves (MEDALLA entra en la "
+                  "medición con su medallón + nombre)",
+                  len(GRID_ORDER) == 7
+                  and "medal" in GRID_ORDER
+                  and panel._medal_photo is not None
+                  and medal_need >= MEDAL_IMG_H
+                  and panel._blocks["medal"].winfo_ismapped(),
+                  f"claves={len(GRID_ORDER)} "
+                  f"need_medal={medal_need} "
+                  f"foto={'sí' if panel._medal_photo is not None else 'no'}")
             print(f"    grid: modo={mode} gap={gap}px disponible={avail}px "
-                  f"necesario={needs}px (+{gap * huecos}px de huecos)")
+                  f"necesario={needs}px (+{gap * huecos}px de huecos) "
+                  f"medalla={medal_need}px")
             done()
 
         app.after(250, check_grid)
@@ -957,14 +1150,25 @@ def phase_stats() -> None:
         )
     else:
         # Modo REDUCIDO (entorno sin GUIDs): auto-login → home (el panel
-        # queda en CTA, sin fetches) y los checks sintéticos del LVL corren
-        # igual sobre el panel real. Nada depende de datos del leaderboard.
+        # queda en CTA, sin fetches) y los checks sintéticos del LVL y la
+        # MEDALLA corren igual sobre el panel real. Nada depende de datos
+        # del leaderboard.
         def step_lvl_reducido(app: App, done: Callable[[], None]) -> None:
             def ok() -> None:
                 try:
                     synthetic_lvl_checks(app.home_frame.stats_panel)
                 except Exception as exc:  # noqa: BLE001
                     check("bloque LVL con/sin save del perfil sin crash",
+                          False, repr(exc))
+                try:
+                    synthetic_medal_checks(app.home_frame.stats_panel)
+                except Exception as exc:  # noqa: BLE001
+                    check("bloque MEDALLA con/sin medal del perfil sin crash",
+                          False, repr(exc))
+                try:
+                    synthetic_elo_knife_checks(app.home_frame.stats_panel)
+                except Exception as exc:  # noqa: BLE001
+                    check("detalle ELO+CUCHILLO con/sin campos del perfil sin crash",
                           False, repr(exc))
                 done()
 
@@ -976,7 +1180,7 @@ def phase_stats() -> None:
             )
 
         run_phase(
-            "panel de stats (reducido: bloque LVL sintético)",
+            "panel de stats (reducido: LVL + MEDALLA + ELO/CUCHILLO sintéticos)",
             [step_wait_home, step_lvl_reducido],
             build_stats_app,
         )
