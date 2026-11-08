@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 log = logging.getLogger("config")
 
@@ -32,6 +33,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # evitar pérdida de progreso si la PC muere a mitad de sesión).
     # 0 = desactivado. Editable en Ajustes.
     "autosave_minutes": 10,
+    # Recordar sesión (cyber-café): FALSE por defecto — al CERRAR el launcher
+    # se borra el token guardado y al ABRIR cada quien hace LOGIN (nada de
+    # auto-login con sesiones de otros). true = auto-login como siempre.
+    # Editable en Ajustes ("Mantener mi sesión abierta al cerrar el launcher").
+    "remember_session": False,
 }
 
 
@@ -106,6 +112,79 @@ def default_web_url(api_url: str = DEFAULT_CONFIG["api_url"]) -> str:
 DEFAULT_CONFIG["web_url"] = default_web_url(DEFAULT_CONFIG["api_url"])
 
 
+# --- Servers de juego: validación de la lista editable (Ajustes) -----------
+# host: hostname/IP v4 (letras, dígitos, puntos, guiones; sin esquema) +
+# puerto de 4-5 dígitos. El rango fino lo pone la función (1024..65535).
+SERVER_ADDR_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?:\d{4,5}$"
+)
+
+
+def normalize_server_address(address: str) -> str:
+    """Valida/normaliza la dirección 'host:puerto' de un server (pura).
+
+    - host: hostname (``localhost``, ``mi-server.lan``) o IP v4, SIN esquema.
+    - puerto: entero **1024..65535** (los ≤1023 son privilegiados y el 80
+      tipifica el error de pegar una URL web — se rechaza).
+    - Trim de espacios (normalización documentada). Devuelve ``host:puerto``
+      tal cual, o ``""`` si es inválida.
+    """
+    addr = str(address or "").strip()
+    if not SERVER_ADDR_RE.match(addr):
+        return ""
+    port = int(addr.rsplit(":", 1)[1])
+    if not (1024 <= port <= 65535):
+        return ""
+    return addr
+
+
+def sanitize_servers(rows: Any, default_index: int = 0
+                     ) -> Tuple[List[Dict[str, str]], int]:
+    """Valida y normaliza la lista editable de servers (pura, para GUARDAR).
+
+    ``rows``: lo que hay en la UI, ``[{"name": str, "address": str}, ...]``.
+    - Fila TOTALMENTE vacía (sin nombre y sin dirección) → se descarta (es
+      una fila "AÑADIR" que nunca se rellenó; no es un error).
+    - Dirección inválida → ``ValueError`` con mensaje claro: la UI lo
+      muestra y NO se guarda nada (jamás se persiste una lista rota).
+    - Nombre vacío → ``"Server N"`` (N = posición 1-based en la lista final).
+    Devuelve ``([{name, address}, ...], default_server)`` con el índice
+    acotado a la lista final (0 si queda vacía).
+    """
+    clean: List[Dict[str, str]] = []
+    for row in (rows or []):
+        name = str((row or {}).get("name") or "").strip()
+        addr = str((row or {}).get("address") or "").strip()
+        if not name and not addr:
+            continue  # fila añadida y nunca rellenada: fuera, sin drama
+        addr_ok = normalize_server_address(addr)
+        if not addr_ok:
+            raise ValueError(
+                f"Dirección de server no válida: '{addr or '(vacía)'}' "
+                "(formato host:puerto — ej. 192.168.1.50:28961, puerto "
+                "1024-65535)"
+            )
+        clean.append({"name": name, "address": addr_ok})
+    out = [{"name": (row["name"] or f"Server {i + 1}"), "address": row["address"]}
+           for i, row in enumerate(clean)]
+    idx = default_index if 0 <= default_index < len(out) else 0
+    return out, idx
+
+
+def default_server_after_delete(default_index: int, removed_index: int) -> int:
+    """``default_server`` tras BORRAR una fila de la lista (pura).
+
+    - Se borró el default → recae en el PRIMERO (0), decisión del dueño.
+    - Se borró una fila ANTES del default → el default se corre una posición.
+    - Se borró una fila después → el default no cambia.
+    """
+    if removed_index == default_index:
+        return 0
+    if removed_index < default_index:
+        return default_index - 1
+    return default_index
+
+
 class AppConfig:
     """Envoltura tipada y ligera sobre el diccionario de configuración."""
 
@@ -156,6 +235,24 @@ class AppConfig:
             return max(0, int(self.data.get("autosave_minutes", 10)))
         except (TypeError, ValueError):
             return 10
+
+    @property
+    def remember_session(self) -> bool:
+        """¿Conservar el token al cerrar el launcher (auto-login al abrir)?
+
+        Default **False** (cyber-café): al CERRAR se borra el token guardado
+        y al ABRIR cada quien hace LOGIN. ``true`` → auto-login como siempre.
+        Lectura ESTRICTA (fallar en seguro): solo un booleano True, el número
+        1 o los textos "true"/"1"/"yes"/"on"/"si" activan el recuerdo —
+        cualquier otra basura → False (jamás se recuerda una sesión por
+        un valor ambiguo escrito a mano en el config).
+        """
+        value = self.data.get("remember_session", False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value == 1
+        return str(value).strip().lower() in ("true", "1", "yes", "on", "si")
 
     @property
     def web_url(self) -> str:

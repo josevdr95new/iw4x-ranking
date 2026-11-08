@@ -129,6 +129,10 @@ def make_test_cfg() -> AppConfig:
         ],
         "default_server": 1,
         "simulate_game": True,
+        # La suite USA auto-login (token guardado → home): es el camino que
+        # se prueba en phase_autologin. El camino remember_session=false
+        # (login directo + borrado al cerrar) se prueba en phase_session_logout.
+        "remember_session": True,
     })
     return AppConfig(data)
 
@@ -295,20 +299,38 @@ def link_test_account(api: ApiClient, token: str) -> Optional[str]:
     """Vincula la cuenta de prueba con el primer GUID disponible.
 
     Orden: candidatos frescos (ingest del log cada 30s) → GUID libre del
-    leaderboard. Devuelve el guid vinculado o None si no hay nada.
+    leaderboard. Devuelve el guid vinculado o None si no hay nada VINCULABLE.
+
+    El backend rechaza los GUIDs del rango dedicado de BOTS (0xb07…) con
+    BOT_GUID_NOT_LINKABLE ("los bots no son cuentas"): ese candidato se
+    SALTA y se prueba el siguiente (puede haber varios bots arriba del
+    leaderboard mientras el ingest reconstruye jugadores). Si no queda
+    ninguno vinculable → None (los callers lo tratan como PENDIENTE de
+    entorno, no como fallo).
     """
     cand = api.link_candidates(token).get("candidates") or []
-    if cand:
-        guid = str(cand[0]["guid"])
-        result = api.link_confirm(token, guid)
-        return guid if result.get("status") == "linked" else None
-    board = api._request("GET", "/leaderboard?pageSize=5")
-    free = [p for p in board.get("players", []) if not p.get("linked")]
+    free = [str(c.get("guid")) for c in cand
+            if isinstance(c, dict) and c.get("guid")]
     if not free:
-        return None
-    guid = str(free[0]["guid"])
-    result = api.link_confirm(token, guid)
-    return guid if result.get("status") == "linked" else None
+        board = api._request("GET", "/leaderboard?pageSize=5")
+        free = [str(p.get("guid")) for p in board.get("players", [])
+                if isinstance(p, dict) and not p.get("linked") and p.get("guid")]
+
+    last_bot_err: Optional[ApiError] = None
+    for guid in free:
+        try:
+            result = api.link_confirm(token, guid)
+        except ApiError as exc:
+            if exc.code == "BOT_GUID_NOT_LINKABLE":
+                print(f"    GUID {guid} saltado: es un BOT (no vinculable)")
+                last_bot_err = exc
+                continue  # probar el siguiente candidato
+            raise
+        if result.get("status") == "linked":
+            return guid
+    if last_bot_err is not None:
+        return None  # solo había bots (o nada): PENDIENTE de entorno
+    return None
 
 
 def wait_in_app(
@@ -614,6 +636,15 @@ def phase_autologin() -> None:
                 str((app.user or {}).get("email", "")).lower() == EMAIL,
                 str((app.user or {}).get("email")),
             )
+            # (b) remember_session=true: el token se CONSERVA y el auto-login
+            # funciona (la config de prueba lo activa explícitamente).
+            check("remember_session=true: la config de prueba lo activa y el "
+                  "token sigue guardado",
+                  app.cfg.remember_session is True
+                  and app.store.load() is not None
+                  and str(app.store.load().get("token") or "") == app.token,
+                  f"flag={app.cfg.remember_session} "
+                  f"store={'sí' if app.store.load() else 'no'}")
             # Enlace WEB ↗ de la cabecera (fantasma junto a AJUSTES/CERRAR
             # SESIÓN): mapeado con el copy exacto del config con web_url.
             web = app.home_frame.web_btn
@@ -2533,6 +2564,439 @@ def phase_login_compact() -> None:
     )
 
 
+def phase_settings_servers() -> None:
+    """Fase GUI: AJUSTES edita WEB URL y SERVERS DE JUEGO (lista completa).
+
+    - La pantalla muestra API URL + WEB URL (con ABRIR) + la lista editable
+      de servers (nombre+dirección, USAR/BORRAR por fila, AÑADIR).
+    - AÑADIR un server desde la UI → USAR → GUARDAR: persiste en config Y en
+      el launcher.config.json (path INYECTADO a %TEMP%: jamás el real junto
+      al exe), la home preselecciona el server nuevo y JUGAR conecta a él
+      (+connect en la consola de simulación).
+    - Dirección inválida (puerto 80) → error visible y NADA se guarda.
+    - BORRAR el default → recae en el primero (0) y desaparece del config.
+    """
+    print("\n=== Fase GUI: ajustes (WEB URL + servers de juego editables) ===")
+    import json
+    import tempfile
+
+    import app_config as ac_module
+
+    NEW_NAME, NEW_ADDR = "Test LAN 2", "127.0.0.1:28999"
+    cfg_holder: Dict[str, Any] = {}
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login_retry(api)
+        UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    except Exception as exc:
+        check("preparación ajustes (login)", False, str(exc))
+        return
+
+    def build():
+        return App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH))
+
+    def step_open_settings(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            st = app.settings_frame
+            app.show_settings()
+            app.update_idletasks()
+            fondo = app.winfo_rooty() + app.winfo_height()
+
+            def dentro(w) -> bool:
+                return bool(w.winfo_ismapped()) and \
+                    (w.winfo_rooty() + w.winfo_height()) <= fondo + 1
+
+            check("ajustes: API URL (existente) y WEB URL mapeados",
+                  bool(st.api_url.winfo_ismapped())
+                  and bool(st.web_url.winfo_ismapped())
+                  and str(st.web_open_btn.cget("text")) == "ABRIR",
+                  f"api={st.api_url.winfo_ismapped()} "
+                  f"web={st.web_url.winfo_ismapped()}")
+            check("ajustes: hint del WEB URL documenta la derivación "
+                  "('vacío = mismo host que la API, puerto 5173')",
+                  "puerto 5173" in str(st.web_hint.cget("text")),
+                  repr(str(st.web_hint.cget("text"))))
+            check("ajustes: hint de servers con el formato esperado "
+                  "('host:puerto — ej. 192.168.1.50:28961')",
+                  "host:puerto — ej. 192.168.1.50:28961"
+                  in str(st.servers_hint.cget("text")),
+                  repr(str(st.servers_hint.cget("text"))))
+            check("ajustes: lista editable con las 2 filas del config y la "
+                  "default en uso",
+                  len(st._server_rows) == 2
+                  and st._server_rows[1]["use_btn"].cget("text") == "EN USO"
+                  and st._server_rows[0]["use_btn"].cget("text") == "USAR",
+                  f"filas={len(st._server_rows)} "
+                  f"def={st._default_row}")
+            check("ajustes: checkbox de sesión coherente con el flag de la "
+                  "config (test: remember_session=true → marcado)",
+                  st.remember_check.get() == (1 if app.cfg.remember_session else 0)
+                  and "Mantener mi sesión abierta" in
+                  str(st.remember_check.cget("text")),
+                  f"val={st.remember_check.get()} "
+                  f"flag={app.cfg.remember_session}")
+            # Bug del dueño: GUARDAR quedaba cortado bajo la ventana. El pie
+            # es FIJO (fuera del scroll): visible en 980x640 sin maximizar y
+            # PEGADO ABAJO (no "dentro pero arriba", bug de orden de pack).
+            guardar_y = st.save_btn.winfo_rooty() + st.save_btn.winfo_height()
+            check("ajustes 980x640: GUARDAR (pie fijo) mapeado, dentro del "
+                  "viewport y pegado abajo",
+                  dentro(st.save_btn) and guardar_y >= fondo - 40,
+                  f"y={guardar_y} fondo={fondo}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    def step_viewport_small(app: App, done: Callable[[], None]) -> None:
+        """Viewport mínimo 760x500 con lista de servers CRECIDA (5 filas).
+
+        El pie fijo (VOLVER/PROBAR/GUARDAR) queda SIEMPRE dentro de la
+        ventana aunque el contenido no quepa; la Scrollbar se activa y el
+        scroll programático llega al fondo (las filas son alcanzables).
+        El resize del WM es ASÍNCRONO: se mide tras un asentamiento de
+        350ms (mismo método que el test de login compacto).
+        """
+        app.show_settings()
+        app.update_idletasks()
+        st = app.settings_frame
+        while len(st._server_rows) < 5:  # 3 filas sintéticas extra
+            st.add_server_btn.invoke()
+        app.geometry("760x500")
+
+        def check_small() -> None:
+            app.update_idletasks()
+            st._canvas.yview_moveto(1.0)  # scroll programático al fondo
+            app.update_idletasks()
+            fondo = app.winfo_rooty() + app.winfo_height()
+
+            def dentro(w) -> bool:
+                return bool(w.winfo_ismapped()) and \
+                    (w.winfo_rooty() + w.winfo_height()) <= fondo + 1
+
+            guardar_y = st.save_btn.winfo_rooty() + st.save_btn.winfo_height()
+            check("ajustes 760x500 con 5 servers: GUARDAR mapeado, DENTRO de "
+                  "la ventana y pegado abajo (pie fijo, no scrollea)",
+                  dentro(st.save_btn) and guardar_y >= fondo - 40,
+                  f"mapped={st.save_btn.winfo_ismapped()} "
+                  f"y={guardar_y} fondo={fondo}")
+            check("ajustes 760x500: VOLVER y PROBAR también dentro del viewport",
+                  dentro(st.back_btn) and dentro(st.test_btn),
+                  f"volver={dentro(st.back_btn)} probar={dentro(st.test_btn)}")
+            check("ajustes 760x500: contenido crecido → Scrollbar activa",
+                  st._scroll_active and bool(st._vbar.winfo_ismapped()),
+                  f"active={st._scroll_active} vbar={st._vbar.winfo_ismapped()}")
+            pie = [st.back_btn, st.test_btn, st.feedback, st.save_btn]
+            ordenados = sorted(pie, key=lambda w: w.winfo_rootx())
+            sin_solape = all(
+                b.winfo_rootx() - (a.winfo_rootx() + a.winfo_width()) >= -2
+                for a, b in zip(ordenados, ordenados[1:]))
+            det = [(str(w.cget("text") or "")[:8], w.winfo_rootx(),
+                    w.winfo_width()) for w in ordenados]
+            check("ajustes 760x500: cero solapes entre los widgets del pie",
+                  sin_solape, str(det))
+            app.geometry("980x640")  # restaurar para los pasos siguientes
+            st._canvas.yview_moveto(0)
+            app.update_idletasks()
+            done()
+
+        app.after(350, check_small)
+
+    def step_add_save(app: App, done: Callable[[], None]) -> None:
+        st = app.settings_frame
+        # El GUARDAR persiste al config REAL junto al exe: se INYECTA la ruta
+        # del archivo a %TEMP% para la prueba (jamás el del dueño).
+        tmp = Path(tempfile.mkdtemp(prefix="iw4x-settings-"))
+        fake_path = tmp / "launcher.config.json"
+        ac_module.config_path = lambda: fake_path  # inyección (test only)
+        cfg_holder["file"] = fake_path
+
+        antes = len(st._server_rows)
+        st.add_server_btn.invoke()
+        nueva = st._server_rows[-1]
+        check("ajustes: AÑADIR crea una fila nueva nombre+dirección",
+              len(st._server_rows) == antes + 1,
+              f"antes={antes} ahora={len(st._server_rows)}")
+        nueva["name"].insert(0, NEW_NAME)
+        nueva["addr"].insert(0, NEW_ADDR)
+        nueva["use_btn"].invoke()  # USAR: pasa a ser el default_server
+        app.update_idletasks()
+        check("ajustes: USAR marca la fila nueva como default (EN USO)",
+              st._default_row == antes
+              and str(nueva["use_btn"].cget("text")) == "EN USO"
+              and str(nueva["use_btn"].cget("state")) == "disabled",
+              f"def={st._default_row} text={nueva['use_btn'].cget('text')}")
+        st.save_btn.invoke()  # GUARDAR síncrono → termina en la home
+
+        def ok() -> None:
+            servers = app.cfg.data.get("servers") or []
+            nuevo = {"name": NEW_NAME, "address": NEW_ADDR}
+            check("ajustes: GUARDAR persiste el server nuevo en la config",
+                  nuevo in servers
+                  and app.cfg.data.get("default_server") == antes,
+                  f"servers={servers} def={app.cfg.data.get('default_server')}")
+            try:
+                saved = json.loads(cfg_holder["file"].read_text(encoding="utf-8"))
+                en_disco = nuevo in (saved.get("servers") or [])
+            except Exception as exc:  # noqa: BLE001
+                en_disco, saved = False, str(exc)
+            check("ajustes: el launcher.config.json (inyectado) contiene la "
+                  "lista y el default",
+                  en_disco and saved.get("default_server") == antes,
+                  str(saved)[:200])
+            menu = str(app.home_frame.server_menu.get())
+            check("home: el dropdown preselecciona el server nuevo (en caliente)",
+                  NEW_NAME in menu and NEW_ADDR in menu, f"menu={menu!r}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame,
+                    ok, timeout=10)
+
+    def step_play_uses_it(app: App, done: Callable[[], None]) -> None:
+        """JUGAR con el server nuevo como default: el +connect real lo usa."""
+        calls = {"n": 0}
+
+        def counting_play_session(token):
+            calls["n"] += 1
+            return {"ok": True, "nick": DISPLAY,
+                    "expiresAt": "2026-11-08T00:00:00.000Z"}
+
+        app.api.play_session = counting_play_session  # type: ignore[method-assign]
+        app.home_frame.log_line(
+            f">>> JUGAR desde la prueba de ajustes ({NEW_ADDR})")
+        app.start_play()
+
+        def ok() -> None:
+            console = app.home_frame.console.get("1.0", "end")
+            check("JUGAR: conecta al server elegido en AJUSTES "
+                  f"('+connect {NEW_ADDR}')",
+                  f"+connect {NEW_ADDR}" in console, console[-300:])
+            check("JUGAR: abre sesión de juego (POST /api/play/session stub)",
+                  calls["n"] >= 1, f"calls={calls['n']}")
+            done()
+
+        wait_in_app(app, lambda: app.flow is None,
+                    lambda: app.after(250, ok), timeout=30)
+
+    def step_invalid_addr(app: App, done: Callable[[], None]) -> None:
+        """Dirección inválida (puerto 80): error visible y NADA se guarda."""
+        app.show_settings()
+        app.update_idletasks()
+        st = app.settings_frame
+        st.add_server_btn.invoke()
+        roto = st._server_rows[-1]
+        roto["name"].insert(0, "Roto")
+        roto["addr"].insert(0, "192.168.1.50:80")  # puerto privilegiado
+        servers_antes = [dict(s) for s in app.cfg.data.get("servers") or []]
+        st.save_btn.invoke()
+        app.update_idletasks()
+        check("ajustes: dirección inválida (puerto 80) → error visible en "
+              "pantalla",
+              "no válida" in str(st.feedback.cget("text")),
+              repr(str(st.feedback.cget("text"))))
+        check("ajustes: con error de validación NO se guarda nada "
+              "(config intacta y seguimos en AJUSTES)",
+              app.cfg.data.get("servers") == servers_antes
+              and app.current_frame is app.settings_frame,
+              f"iguales={app.cfg.data.get('servers') == servers_antes} "
+              f"frame={'settings' if app.current_frame is app.settings_frame else 'otro'}")
+        roto["del_btn"].invoke()  # limpiar la fila rota
+        done()
+
+    def step_delete_default(app: App, done: Callable[[], None]) -> None:
+        """BORRAR el default: recae en el primero y desaparece del config."""
+        app.show_settings()
+        app.update_idletasks()
+        st = app.settings_frame
+        objetivo = None
+        for fila in st._server_rows:
+            if fila["name"].get() == NEW_NAME:
+                objetivo = fila
+                break
+        check("ajustes: al reabrir, el server nuevo sigue siendo el default",
+              objetivo is not None
+              and str(objetivo["use_btn"].cget("text")) == "EN USO",
+              f"objetivo={objetivo is not None}")
+        if objetivo is None:
+            done()
+            return
+        objetivo["del_btn"].invoke()
+        st.save_btn.invoke()
+
+        def ok() -> None:
+            servers = app.cfg.data.get("servers") or []
+            nombres = [s.get("name") for s in servers]
+            check("ajustes: BORRAR el default → recae en el PRIMERO (0)",
+                  app.cfg.data.get("default_server") == 0,
+                  f"def={app.cfg.data.get('default_server')} names={nombres}")
+            check("ajustes: el server borrado desaparece de la config",
+                  NEW_NAME not in nombres and len(servers) == 2,
+                  f"names={nombres}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame,
+                    ok, timeout=10)
+
+    orig_config_path = ac_module.config_path
+    try:
+        run_phase(
+            "ajustes: WEB URL + servers de juego editables",
+            [step_open_settings, step_add_save, step_play_uses_it,
+             step_viewport_small, step_invalid_addr, step_delete_default],
+            build,
+        )
+    finally:
+        ac_module.config_path = orig_config_path  # siempre, incluso en abort
+
+
+def phase_session_logout() -> None:
+    """Fase GUI: recordar sesión (cyber-café, pedido del dueño).
+
+    - (c) Token residual de una corrida vieja + remember_session=false
+      (DEFAULT) → el arranque muestra LOGIN y el token se ELIMINA al abrir.
+    - (a) Cierre del launcher (remember_session=false, tras login real por
+      UI con API stub) → el token guardado se BORRA + log dim
+      "Sesión cerrada. Hasta la próxima."; el PRÓXIMO arranque pide LOGIN.
+    - (b) remember_session=true → el token se conserva y el auto-login
+      funciona como siempre.
+    El JWT es stateless (no hay logout con estado en el server): el borrado
+    local del token es suficiente.
+    """
+    print("\n=== Fase recordar sesión: cierre cierra sesión, abrir pide login ===")
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login_retry(api)
+    except Exception as exc:
+        check("preparación recordar sesión (login headless)", False, str(exc))
+        return
+
+    def cfg_con(value: bool) -> AppConfig:
+        cfg = make_test_cfg()
+        cfg.set("remember_session", value)
+        return cfg
+
+    def build_false():
+        return App(cfg_con(False), ApiClient(API_URL), UserStore(STORE_PATH))
+
+    def build_true():
+        return App(cfg_con(True), ApiClient(API_URL), UserStore(STORE_PATH))
+
+    # --- (c) token residual + false → LOGIN y token eliminado al abrir ------
+    UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+
+    def step_residual(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            check("(c) token residual + remember_session=false → pantalla "
+                  "LOGIN (no auto-login)",
+                  app.current_frame is app.login_frame and app.token is None,
+                  f"frame={'login' if app.current_frame is app.login_frame else 'otro'} "
+                  f"token={'no' if app.token is None else 'sí'}")
+            check("(c) el token residual fue ELIMINADO al abrir",
+                  app.store.load() is None,
+                  f"store={'vacío' if app.store.load() is None else 'con token'}")
+            # El checkbox de AJUSTES refleja el default DESMARCADO cuando la
+            # config es false (copiado exacto del texto pedido por el dueño).
+            app.show_settings()
+            app.update_idletasks()
+            st = app.settings_frame
+            check("(c) en AJUSTES el checkbox de sesión aparece DESMARCADO "
+                  "(config false)",
+                  st.remember_check.get() == 0
+                  and "Mantener mi sesión abierta al cerrar el launcher"
+                  in str(st.remember_check.cget("text")),
+                  f"val={st.remember_check.get()} "
+                  f"text={st.remember_check.cget('text')!r}")
+            app.show_login()
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.login_frame,
+                    ok, timeout=15)
+
+    run_phase("(c) token residual + remember_session=false → LOGIN",
+              [step_residual], build_false)
+
+    # --- (a) login por UI (API stub) + cierre → token borrado + log ----------
+    console: List[str] = []
+
+    def step_login(app: App, done: Callable[[], None]) -> None:
+        def fake_login(nick, password):
+            return {"user": {"id": "u-logout", "email": EMAIL,
+                             "displayName": DISPLAY, "linkedGuids": []},
+                    "token": "tok-cierre-logout"}
+
+        app.api.login = fake_login  # type: ignore[method-assign]
+        f = app.login_frame
+        f.nick.delete(0, "end")
+        f.nick.insert(0, DISPLAY)
+        f.password.delete(0, "end")
+        f.password.insert(0, PASSWORD)
+        f._on_submit()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, done, timeout=15)
+
+    def step_close(app: App, done: Callable[[], None]) -> None:
+        orig = app.home_frame.log_line
+
+        def spy(text):
+            console.append(str(text))
+            try:
+                orig(text)
+            except Exception:
+                pass
+
+        app.home_frame.log_line = spy
+        check("(a) pre-cierre: el login por UI guardó el token en el store",
+              app.store.load() is not None
+              and app.store.load().get("token") == "tok-cierre-logout")
+        app._on_close()  # withdraw → secuencia de cierre → destroy
+
+    run_phase("(a) cierre con remember_session=false borra la sesión",
+              [step_login, step_close], build_false)
+    check("(a) cierre con remember_session=false → el token fue BORRADO",
+          UserStore(STORE_PATH).load() is None,
+          f"store={'vacío' if UserStore(STORE_PATH).load() is None else 'con token'}")
+    check("(a) log dim 'Sesión cerrada. Hasta la próxima.' en la consola",
+          any("Sesión cerrada. Hasta la próxima." in x for x in console),
+          str(console[-4:]))
+
+    # --- (a-2) el PRÓXIMO arranque (false, sin token) pide LOGIN -------------
+    def step_login_screen(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            check("(a) el próximo arranque (remember_session=false) muestra "
+                  "LOGIN directamente",
+                  app.current_frame is app.login_frame,
+                  f"frame={'login' if app.current_frame is app.login_frame else 'otro'}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.login_frame,
+                    ok, timeout=15)
+
+    run_phase("(a) próximo arranque → LOGIN", [step_login_screen], build_false)
+
+    # --- (b) remember_session=true → token conservado + auto-login -----------
+    UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+
+    def step_autologin(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            check("(b) remember_session=true → auto-login con el token "
+                  "conservado",
+                  app.current_frame is app.home_frame
+                  and app.token is not None
+                  and app.cfg.remember_session is True
+                  and app.store.load() is not None,
+                  f"home={app.current_frame is app.home_frame} "
+                  f"flag={app.cfg.remember_session}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    run_phase("(b) remember_session=true conserva la sesión",
+              [step_autologin], build_true)
+    STORE_PATH.unlink(missing_ok=True)  # limpieza de la fase
+
+
 def main() -> int:
     # Consola Windows (cp1252): nunca romper por caracteres Unicode.
     try:
@@ -2584,6 +3048,16 @@ def main() -> int:
     # arranca SIN sesión guardada (necesita la pantalla de login) y NO
     # guarda token — por eso vive después de la audit de navegación.
     phase_login_compact()
+
+    # Ajustes (WEB URL + servers editables): re-loguea headless por si el
+    # token de prueba se borró en las fases anteriores; su GUARDAR escribe
+    # el launcher.config.json con ruta INYECTADA (jamás el real del dueño).
+    phase_settings_servers()
+
+    # Recordar sesión (cyber-café): cierre borra token, abrir pide login.
+    # AL FINAL DEL TODO: usa login real por UI (stub de api.login) y borra
+    # el store de prueba al terminar.
+    phase_session_logout()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

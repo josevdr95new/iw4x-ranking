@@ -71,6 +71,7 @@ ratón).
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
 | `cloud_save`            | **true** por defecto: sincroniza el progreso (`players\iw4x.stat`, `iw4x_config.cfg`, `mods\<mod>\iw4x.stat`) con la cuenta antes de abrir el juego y al cerrarlo (backup automático previo en `%APPDATA%\iw4x-ranking-launcher\save-backups\`). Editable en Ajustes. |
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el flujo JUGAR contra la API). |
+| `remember_session`      | **false** por defecto (cyber-café): al **CERRAR** el launcher se **borra el token guardado** (log `Sesión cerrada. Hasta la próxima.`) y al **ABRIR** aparece el **LOGIN** — cada quien hace su propio login, nadie hereda sesiones. `true` = auto-login con el token como siempre. Editable en Ajustes ("Mantener mi sesión abierta al cerrar el launcher"). |
 | `autosave_minutes`      | **Auto-guardado** del progreso en la nube cada X minutos (default **10**; **0 = desactivado**). Evita perder progreso si la PC muere a mitad de sesión: sube solo lo que cambió, respeta lo más nuevo y no consulta la API si nada cambió. Editable en Ajustes. |
 
 > Las claves viejas `link_poll_interval` / `link_poll_max_seconds` quedaron

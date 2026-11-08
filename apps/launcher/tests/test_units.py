@@ -33,7 +33,14 @@ from subprocess import TimeoutExpired
 # Importa los módulos del launcher (directorio padre, sin depender del cwd).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app_config import AppConfig, DEFAULT_CONFIG, normalize_api_url  # noqa: E402
+from app_config import (  # noqa: E402
+    AppConfig,
+    DEFAULT_CONFIG,
+    default_server_after_delete,
+    normalize_api_url,
+    normalize_server_address,
+    sanitize_servers,
+)
 import game_flow as gf  # noqa: E402
 from game_flow import build_game_args  # noqa: E402
 import save_sync as ss  # noqa: E402
@@ -372,9 +379,99 @@ def phase_app_config() -> None:
           AppConfig({"web_url": ""}).web_url == "",
           repr(AppConfig({"web_url": ""}).web_url))
 
+    # --- remember_session (cyber-café): default FALSE = cerrar cierra sesión --
+    check("remember_session: clave nueva en DEFAULT_CONFIG (default False)",
+          DEFAULT_CONFIG.get("remember_session") is False,
+          str(DEFAULT_CONFIG.get("remember_session")))
+    check("remember_session: dict vacío → False (cada quien hace login)",
+          AppConfig({}).remember_session is False)
+    check("remember_session: true explícito → True (auto-login como siempre)",
+          AppConfig({"remember_session": True}).remember_session is True)
+    check("remember_session: basura ('x') → False (defensivo)",
+          AppConfig({"remember_session": "x"}).remember_session is False)
+
 
 # ---------------------------------------------------------------------------
-# 5. normalize_api_url: defensa contra configs escritos a mano (pura).
+# 5b. servers de juego: validación de la lista editable (Ajustes).
+def phase_servers_validation() -> None:
+    print("\n=== Units: normalize_server_address / sanitize_servers (Ajustes) ===")
+
+    # --- normalize_server_address: VÁLIDAS (devuelve host:puerto canónico) ---
+    check("server: ip:puerto válida",
+          normalize_server_address("192.168.1.50:28961") == "192.168.1.50:28961",
+          normalize_server_address("192.168.1.50:28961"))
+    check("server: hostname:puerto válido",
+          normalize_server_address("mi-server.lan:28961") == "mi-server.lan:28961",
+          normalize_server_address("mi-server.lan:28961"))
+    check("server: host local (localhost) válido",
+          normalize_server_address("localhost:28961") == "localhost:28961",
+          normalize_server_address("localhost:28961"))
+    check("server: espacios en extremos se recortan (normalización documentada)",
+          normalize_server_address("  192.168.1.50:28961 ")
+          == "192.168.1.50:28961",
+          normalize_server_address("  192.168.1.50:28961 "))
+
+    # --- INVÁLIDAS → '' (la UI muestra el error y no guarda nada) ------------
+    check("server: sin puerto → inválida",
+          normalize_server_address("192.168.1.50") == "",
+          repr(normalize_server_address("192.168.1.50")))
+    check("server: puerto 80 (privilegiado/URL web) → inválida",
+          normalize_server_address("192.168.1.50:80") == "",
+          repr(normalize_server_address("192.168.1.50:80")))
+    check("server: puerto por debajo del rango (1023) → inválida",
+          normalize_server_address("host:1023") == "",
+          repr(normalize_server_address("host:1023")))
+    check("server: puerto por encima del rango (65536) → inválida",
+          normalize_server_address("host:65536") == "",
+          repr(normalize_server_address("host:65536")))
+    check("server: texto basura sin host:puerto → inválida",
+          normalize_server_address("hola") == "",
+          repr(normalize_server_address("hola")))
+    check("server: host vacío (':28961') → inválida",
+          normalize_server_address(":28961") == "",
+          repr(normalize_server_address(":28961")))
+    check("server: puerto no numérico ('host:puerto') → inválida",
+          normalize_server_address("host:puerto") == "",
+          repr(normalize_server_address("host:puerto")))
+
+    # --- sanitize_servers: la lista que persiste GUARDAR ----------------------
+    servers, idx = sanitize_servers(
+        [{"name": "LAN", "address": "192.168.1.50:28961"},
+         {"name": "", "address": "localhost:28961"}],
+        1,
+    )
+    check("sanitize: lista válida pasa y el nombre vacío → 'Server N'",
+          servers == [{"name": "LAN", "address": "192.168.1.50:28961"},
+                      {"name": "Server 2", "address": "localhost:28961"}]
+          and idx == 1, f"{servers} idx={idx}")
+    dropped, idx_d = sanitize_servers(
+        [{"name": "", "address": ""},                    # fila nunca rellenada
+         {"name": "Test", "address": "127.0.0.1:28961"}], 0)
+    check("sanitize: fila totalmente vacía se descarta sin error",
+          dropped == [{"name": "Test", "address": "127.0.0.1:28961"}]
+          and idx_d == 0, f"{dropped}")
+    try:
+        sanitize_servers([{"name": "Roto", "address": "192.168.1.50:80"}], 0)
+        roto = False
+    except ValueError as exc:
+        roto = "no válida" in str(exc)
+    check("sanitize: dirección inválida → ValueError con mensaje claro",
+          roto, "esperaba ValueError")
+    vacia, idx_v = sanitize_servers([{"name": "", "address": ""}], 3)
+    check("sanitize: lista vacía final → [] con default 0 (fuera de rango cae a 0)",
+          vacia == [] and idx_v == 0, f"{vacia} idx={idx_v}")
+
+    # --- default_server_after_delete: el default borrado recae en el primero --
+    check("delete: borrar el DEFAULT → recae en el primero (0)",
+          default_server_after_delete(2, 2) == 0)
+    check("delete: borrar UNA FILA ANTES del default → el default se corre",
+          default_server_after_delete(2, 0) == 1)
+    check("delete: borrar UNA FILA DESPUÉS del default → no cambia",
+          default_server_after_delete(1, 2) == 1)
+
+
+# ---------------------------------------------------------------------------
+# 5c. normalize_api_url: defensa contra configs escritos a mano (pura).
 def phase_normalize_api_url() -> None:
     print("\n=== Units: normalize_api_url (esquema/barra; JAMÁS inventa puertos) ===")
 
@@ -732,6 +829,7 @@ def main() -> int:
     phase_save_sync_pure()
     phase_command_args()
     phase_app_config()
+    phase_servers_validation()
     phase_normalize_api_url()
     phase_kill_tree()
     phase_wait_process_exit()

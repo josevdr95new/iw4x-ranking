@@ -189,7 +189,21 @@ class App(ctk.CTk):
 
     # ================== Arranque / sesión ==================
     def _bootstrap_session(self) -> None:
-        """Intenta auto-login con el token guardado; si no, muestra login."""
+        """Intenta auto-login con el token guardado; si no, muestra login.
+
+        Cyber-café (decisión del dueño): con ``remember_session`` false
+        (DEFAULT) NADIE hereda sesiones — cualquier token residual (incluso
+        de una corrida vieja con la config anterior) se DESCARTA al abrir y
+        se muestra el LOGIN directamente.
+        """
+        if not self.cfg.remember_session:
+            try:
+                self.store.clear()  # token residual fuera, sea de quien sea
+            except Exception:
+                pass
+            log.info("Sesión no recordada (remember_session=false): login.")
+            self.show_login()
+            return
         saved = self.store.load()
         if not saved:
             self.show_login()
@@ -829,6 +843,17 @@ class App(ctk.CTk):
             self.home_frame.stop_animations()
         except Exception:
             pass
+
+        # Sesión del launcher (cyber-café): tras el upload y ANTES de
+        # destruir, con remember_session=false se BORRA el token guardado —
+        # la próxima apertura muestra LOGIN (nadie hereda la sesión).
+        if not self.cfg.remember_session:
+            try:
+                self.store.clear()
+            except Exception:
+                pass
+            self._log_line_safe("Sesión cerrada. Hasta la próxima.")
+            log.info("Sesión cerrada al salir (remember_session=false).")
 
         self._log_line_safe("Cerrando…")
         log.info("Cerrando…")
