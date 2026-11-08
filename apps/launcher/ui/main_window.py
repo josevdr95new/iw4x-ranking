@@ -505,7 +505,10 @@ class App(ctk.CTk):
         def ok(data: Dict[str, Any]) -> None:
             self._stats_fetching = False
             self._stats_fetch_count += 1
-            panel.set_values(data.get("player") or {}, data.get("rank"), last_server)
+            # save: nivel REAL parseado del iw4x.stat en la nube (| null /
+            # ausente en perfiles viejos → el panel pinta '—' sin crash).
+            panel.set_values(data.get("player") or {}, data.get("rank"),
+                             last_server, data.get("save"))
             self._schedule_stats_refresh()
 
         def err(exc: Exception) -> None:

@@ -629,12 +629,64 @@ def phase_autologin() -> None:
     )
 
 
+def synthetic_lvl_checks(panel) -> None:
+    """Inyección sintética del bloque LVL sobre el panel REAL (no depende del
+    entorno: funciona con o sin GUID vinculado). Con save parseado (level 47,
+    prestige 2) → '47·P2' con caption dim 'LVL·SAVE'; sin save (None) y con
+    perfil VIEJO sin el campo (llamada a 3 argumentos) → '—' + 'LVL', sin
+    crash. Son los mismos checks para la fase completa y la reducida."""
+    check("bloque LVL mapeado en el grid (6 columnas)",
+          panel._blocks["lvl"].winfo_ismapped()
+          and panel._captions["lvl"].winfo_ismapped(),
+          f"val_mgr={panel._blocks['lvl'].winfo_manager()} "
+          f"cap_mgr={panel._captions['lvl'].winfo_manager()}")
+    panel.set_values(
+        {"name": "Con Save", "kills": 31, "deaths": 20,
+         "kd": 1.55, "timePlayed": 3600},
+        1, "SRV",
+        {"level": 47, "prestige": 2, "xp": 987654,
+         "parsedAt": "2026-11-08T10:00:00.000Z"},
+    )
+    lvl_p = (str(panel._blocks["lvl"].cget("text")) == "47·P2"
+             and str(panel._captions["lvl"].cget("text")) == "LVL·SAVE")
+    check("bloque LVL con save presente (level 47, prestige 2) "
+          "→ '47·P2' con caption 'LVL·SAVE'",
+          lvl_p,
+          f"lvl={panel._blocks['lvl'].cget('text')} "
+          f"cap={panel._captions['lvl'].cget('text')}")
+    panel.set_values(
+        {"name": "Sin Save", "kills": 31, "deaths": 20,
+         "kd": 1.55, "timePlayed": 3600},
+        1, "SRV", None,
+    )
+    sin_none = (str(panel._blocks["lvl"].cget("text")) == "—"
+                and str(panel._captions["lvl"].cget("text")) == "LVL")
+    panel.set_values(
+        {"name": "Perfil Viejo", "kills": 31, "deaths": 20,
+         "kd": 1.55, "timePlayed": 3600},
+        1, "SRV",  # sin 4º arg: perfil que NO trae campo save
+    )
+    sin_campo = (str(panel._blocks["lvl"].cget("text")) == "—"
+                 and str(panel._captions["lvl"].cget("text")) == "LVL")
+    check("bloque LVL sin save (None y perfil sin campo save) "
+          "→ '—' sin crash",
+          sin_none and sin_campo,
+          f"None={panel._blocks['lvl'].cget('text')} "
+          f"sin_campo={panel._blocks['lvl'].cget('text')}")
+
+
 def phase_stats() -> None:
-    """Fase GUI: panel de stats en vivo (carga, refresh manual, logout)."""
+    """Fase GUI: panel de stats en vivo (carga, refresh manual, logout).
+
+    Sin GUID disponible en el entorno (DB reseteada por el trabajo paralelo
+    en apps/api), la fase corre en modo REDUCIDO: los checks sintéticos del
+    bloque LVL no dependen del entorno y corren igual sobre el panel real.
+    """
     # Preparación headless: asegura sesión + GUID vinculado para que el
     # panel tenga valores reales que cargar (la DB puede resetearse entre
     # corridas por el trabajo paralelo en apps/api).
     api = ApiClient(API_URL)
+    full = True
     try:
         token = ensure_login_retry(api)
         user = api.me(token)
@@ -643,11 +695,14 @@ def phase_stats() -> None:
             if guid is None:
                 # El ingest recrea jugadores al haber partidas; mientras tanto
                 # es PENDIENTE de entorno (backend en paralelo), no un fallo.
+                full = False
                 check("preparación stats: hay GUID disponible", True,
                       "PENDIENTE entorno: sin candidatos ni GUIDs libres en el "
                       "leaderboard (se recrean con partidas reales)")
-                return
-            print(f"    cuenta vinculada de nuevo a {guid} para la prueba")
+                print("    sin GUID: fase REDUCIDA (los checks sintéticos del "
+                      "bloque LVL corren igual)")
+            else:
+                print(f"    cuenta vinculada de nuevo a {guid} para la prueba")
     except Exception as exc:
         check("preparación de stats (login + vinculación)", False, str(exc))
         return
@@ -664,6 +719,7 @@ def phase_stats() -> None:
         def ok() -> None:
             panel = app.home_frame.stats_panel
             rank = str(panel._blocks["rank"].cget("text"))
+            lvl = str(panel._blocks["lvl"].cget("text"))
             kills = str(panel._blocks["kills"].cget("text"))
             deaths = str(panel._blocks["deaths"].cget("text"))
             hs = str(panel._blocks["hs"].cget("text"))
@@ -687,8 +743,8 @@ def phase_stats() -> None:
             check("edad del dato visible ('hace Ns')",
                   "hace " in str(panel.age_label.cget("text")),
                   str(panel.age_label.cget("text")))
-            print(f"    panel: RANK={rank} KILLS={kills} DEATHS={deaths} "
-                  f"HS={hs} K/D={kd}")
+            print(f"    panel: RANK={rank} LVL={lvl} KILLS={kills} "
+                  f"DEATHS={deaths} HS={hs} K/D={kd}")
             print(f"    sub: {sub}")
             # Inyección sintética dentro del panel real: primero un perfil
             # actual (headshots + hsRatio → '2' y 'HS 6% de bajas') y luego
@@ -717,6 +773,13 @@ def phase_stats() -> None:
             except Exception as exc:  # noqa: BLE001
                 check("perfil con y sin headshots: '2'/'HS 6% de bajas' y luego '—'/'HS —' sin crash",
                       False, repr(exc))
+            # LVL real (nivel del save en la nube, campo save del perfil):
+            # los mismos checks sintéticos que en la fase reducida.
+            try:
+                synthetic_lvl_checks(panel)
+            except Exception as exc:  # noqa: BLE001
+                check("bloque LVL con/sin save del perfil sin crash",
+                      False, repr(exc))
             done()
 
         # 20s: la primera carga se programa a ~600ms y la API es local.
@@ -737,15 +800,19 @@ def phase_stats() -> None:
             {"name": "Grid Test", "kills": 999, "deaths": 88, "kd": 1.25,
              "headshots": 77, "hsRatio": 0.077, "timePlayed": 7200},
             999, "SRV-LARGO",
+            # Save sintético con nivel ANCHO ('999·P9'): el LVL también
+            # participa de la medición anti-solape.
+            {"level": 999, "prestige": 9, "xp": 1,
+             "parsedAt": "2026-11-08T10:00:00.000Z"},
         )
 
         def check_grid() -> None:
             app.update_idletasks()  # geometría al día antes de medir bboxes
-            keys = ("rank", "kills", "deaths", "hs", "kd")
+            keys = ("rank", "lvl", "kills", "deaths", "hs", "kd")
             texts = {k: str(panel._blocks[k].cget("text")) for k in keys}
-            check("grid: valores largos pintados (999/999/88/77/1,25)",
-                  texts == {"rank": "999", "kills": "999", "deaths": "88",
-                            "hs": "77", "kd": "1,25"}
+            check("grid: valores largos pintados (999/999·P9/88/77/1,25)",
+                  texts == {"rank": "999", "lvl": "999·P9", "kills": "999",
+                            "deaths": "88", "hs": "77", "kd": "1,25"}
                   and all(panel._captions[k].winfo_ismapped() for k in keys),
                   str(texts))
 
@@ -783,16 +850,17 @@ def phase_stats() -> None:
             avail = panel._grid_avail
             mode = panel._grid_mode
             gap = panel._grid_gap
+            huecos = len(keys) - 1  # 6 columnas → 5 huecos
             consistente = mode in ("fila", "dos_filas") and (
-                (mode == "fila" and needs + gap * 4 <= avail)
-                or (mode == "dos_filas" and needs + 24 * 4 > avail)
+                (mode == "fila" and needs + gap * huecos <= avail)
+                or (mode == "dos_filas" and needs + 24 * huecos > avail)
             )
             check("grid: decisión de layout medido coherente "
                   "(1 fila si cabe, 2 si no)",
                   consistente,
                   f"mode={mode} gap={gap} avail={avail} needs={needs}")
             print(f"    grid: modo={mode} gap={gap}px disponible={avail}px "
-                  f"necesario={needs}px (+{gap * 4}px de huecos)")
+                  f"necesario={needs}px (+{gap * huecos}px de huecos)")
             done()
 
         app.after(250, check_grid)
@@ -837,12 +905,41 @@ def phase_stats() -> None:
             done(),
         ))
 
-    run_phase(
-        "panel de stats en vivo",
-        [step_wait_home, step_wait_first_load, step_grid_no_overlap,
-         step_manual_refresh, step_logout_cancels],
-        lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
-    )
+    build_stats_app = lambda: App(  # noqa: E731
+        make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH))
+
+    if full:
+        run_phase(
+            "panel de stats en vivo",
+            [step_wait_home, step_wait_first_load, step_grid_no_overlap,
+             step_manual_refresh, step_logout_cancels],
+            build_stats_app,
+        )
+    else:
+        # Modo REDUCIDO (entorno sin GUIDs): auto-login → home (el panel
+        # queda en CTA, sin fetches) y los checks sintéticos del LVL corren
+        # igual sobre el panel real. Nada depende de datos del leaderboard.
+        def step_lvl_reducido(app: App, done: Callable[[], None]) -> None:
+            def ok() -> None:
+                try:
+                    synthetic_lvl_checks(app.home_frame.stats_panel)
+                except Exception as exc:  # noqa: BLE001
+                    check("bloque LVL con/sin save del perfil sin crash",
+                          False, repr(exc))
+                done()
+
+            wait_in_app(
+                app,
+                lambda: app.current_frame is app.home_frame
+                and app.token is not None,
+                ok, timeout=15,
+            )
+
+        run_phase(
+            "panel de stats (reducido: bloque LVL sintético)",
+            [step_wait_home, step_lvl_reducido],
+            build_stats_app,
+        )
 
 
 def phase_play_unlinked() -> None:

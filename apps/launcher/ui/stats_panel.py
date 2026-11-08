@@ -1,9 +1,11 @@
 """Panel "// TUS STATS //" en vivo de la pantalla principal.
 
-Muestra rank/kills/deaths/headshots/k/d + tiempo jugado, último server y
-nombre actual del jugador (con el ratio de headshots en la línea de
-detalle). Los datos los trae App (GET /api/players/:guid cada 30s o con
-el botón ↻); este panel solo pinta y lleva el contador de edad ("hace 12s").
+Muestra rank/lvl/kills/deaths/headshots/k/d + tiempo jugado, último server
+y nombre actual del jugador (con el ratio de headshots en la línea de
+detalle). El LVL es el nivel REAL del juego, parseado del iw4x.stat subido
+a la nube (el perfil trae save: {level, prestige, ...} | null). Los datos
+los trae App (GET /api/players/:guid cada 30s o con el botón ↻); este panel
+solo pinta y lleva el contador de edad ("hace 12s").
 
 El color del K/D sigue los umbrales del diseño (docs/DESIGN.md §1.1):
 ≥ 1,20 verde · 1,00–1,19 neutro · 0,80–0,99 ámbar · < 0,80 rojo.
@@ -30,15 +32,15 @@ log = logging.getLogger("ui.stats")
 # Fix en tres piezas:
 #   1. el padx separador va también en la caption;
 #   2. fuentes reducidas 18→16 (valores) y 9→8 (captions);
-#   3. layout MEDIDO (no a ojo): los 5 bloques van en UNA fila solo si la
+#   3. layout MEDIDO (no a ojo): los bloques van en UNA fila solo si la
 #      suma de anchos requeridos (métrica real de fuente) + huecos cabe en
 #      el ancho REAL del panel (winfo_width); si no, dos filas
-#      (RANK/KILLS/DEATHS arriba · HEADSHOTS/K/D abajo).
+#      (RANK/LVL/KILLS arriba · DEATHS/HEADSHOTS/K/D abajo).
 GRID_VALUE_SIZE = 16
 GRID_CAPTION_SIZE = 8
-GRID_ORDER: Tuple[str, ...] = ("rank", "kills", "deaths", "hs", "kd")
-GRID_TOP: Tuple[str, ...] = ("rank", "kills", "deaths")
-GRID_BOTTOM: Tuple[str, ...] = ("hs", "kd")
+GRID_ORDER: Tuple[str, ...] = ("rank", "lvl", "kills", "deaths", "hs", "kd")
+GRID_TOP: Tuple[str, ...] = ("rank", "lvl", "kills")
+GRID_BOTTOM: Tuple[str, ...] = ("deaths", "hs", "kd")
 GRID_ROW_GAP = SP["m"]  # aire vertical entre filas en modo 2 filas
 
 
@@ -55,6 +57,23 @@ def _fmt_kd(value: Any) -> str:
         return f"{float(value):.2f}".replace(".", ",")
     except (TypeError, ValueError):
         return "—"
+
+
+def _fmt_lvl(save: Any) -> str:
+    """Nivel REAL del juego (save parseado en la nube): '47', o '47·P2' con
+    prestigio. '—' si no hay save o el nivel no es utilizable (defensivo:
+    la API puede responder aún sin campo save o sin parsear)."""
+    if not isinstance(save, dict):
+        return "—"
+    try:
+        level = int(save.get("level"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+    try:
+        prestige = int(save.get("prestige") or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        prestige = 0
+    return f"{level}·P{prestige}" if prestige > 0 else str(level)
 
 
 def _fmt_time(seconds: Any) -> str:
@@ -134,6 +153,7 @@ class StatsPanel(ctk.CTkFrame):
         self._captions: Dict[str, ctk.CTkLabel] = {}
         specs = [
             ("rank", "RANK", COLORS["ok"]),
+            ("lvl", "LVL", COLORS["text"]),
             ("kills", "KILLS", COLORS["text"]),
             ("deaths", "DEATHS", COLORS["text"]),
             ("hs", "HEADSHOTS", COLORS["text"]),
@@ -206,8 +226,14 @@ class StatsPanel(ctk.CTkFrame):
             text="Aún no tienes partidas registradas.", text_color=COLORS["text_dim"]
         )
 
-    def set_values(self, player: Dict[str, Any], rank: Any, last_server: Any) -> None:
-        """Pinta una respuesta correcta de GET /api/players/:guid."""
+    def set_values(self, player: Dict[str, Any], rank: Any, last_server: Any,
+                   save: Any = None) -> None:
+        """Pinta una respuesta correcta de GET /api/players/:guid.
+
+        ``save`` es el nivel REAL parseado del iw4x.stat en la nube
+        ({level, prestige, xp, parsedAt}) o None si aún no hay save; los
+        perfiles viejos sin el campo llegan como None (misma ruta defensiva).
+        """
         self.status_label.configure(text="")
         self._blocks["rank"].configure(
             text="—" if rank is None else _fmt_int(rank)
@@ -218,6 +244,15 @@ class StatsPanel(ctk.CTkFrame):
         kd_text = _fmt_kd(player.get("kd"))
         self._blocks["kd"].configure(
             text=kd_text, text_color=_kd_color(player.get("kd"))
+        )
+        # LVL real: del save en la nube (no de las partidas). Caption dinámica
+        # (dim por defecto, text_faint): solo señala la fuente cuando hay
+        # nivel parseado — "LVL" solo, "LVL·SAVE" con save (misma convención
+        # compacta del K/D; sin colores nuevos).
+        lvl_text = _fmt_lvl(save)
+        self._blocks["lvl"].configure(text=lvl_text)
+        self._captions["lvl"].configure(
+            text="LVL·SAVE" if lvl_text != "—" else "LVL"
         )
 
         server = str(last_server) if last_server else "—"
@@ -271,12 +306,13 @@ class StatsPanel(ctk.CTkFrame):
     def _reset_values(self) -> None:
         """Todos los valores a '—' (antes de la primera respuesta)."""
         default_colors = {
-            "rank": COLORS["ok"], "kills": COLORS["text"],
-            "deaths": COLORS["text"], "hs": COLORS["text"],
-            "kd": COLORS["text"],
+            "rank": COLORS["ok"], "lvl": COLORS["text"],
+            "kills": COLORS["text"], "deaths": COLORS["text"],
+            "hs": COLORS["text"], "kd": COLORS["text"],
         }
         for key, block in self._blocks.items():
             block.configure(text="—", text_color=default_colors[key])
+        self._captions["lvl"].configure(text="LVL")
         self._relayout_grid()
 
     # ================== Layout medido del grid ==================
@@ -294,8 +330,8 @@ class StatsPanel(ctk.CTkFrame):
         return sum(needs) + gap * max(0, len(needs) - 1)
 
     def _relayout_grid(self) -> None:
-        """Coloca los 5 bloques en UNA fila si caben MEDIDOS en el ancho real
-        del panel; si no, en dos filas (RANK/KILLS/DEATHS · HEADSHOTS/K/D).
+        """Coloca los 6 bloques en UNA fila si caben MEDIDOS en el ancho real
+        del panel; si no, en dos filas (RANK/LVL/KILLS · DEATHS/HEADSHOTS/K/D).
 
         Ancho disponible: winfo_width() del frame del grid (el panel vive
         empaquetado con fill='x', así que su ancho es el de la ventana). Si
