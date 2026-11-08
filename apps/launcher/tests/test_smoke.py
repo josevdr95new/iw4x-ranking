@@ -91,7 +91,7 @@ import save_sync as ss  # noqa: E402
 from save_sync import decide_sync  # noqa: E402
 from ui.main_window import App  # noqa: E402
 from ui.stats_panel import GRID_ORDER, MEDAL_IMG_H  # noqa: E402
-from ui.theme import COLORS  # noqa: E402
+from ui.theme import COLORS, MEDAL_TIER_COLORS  # noqa: E402
 from user_store import UserStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -748,10 +748,11 @@ def synthetic_medal_checks(panel) -> None:
     """Inyección sintética del bloque MEDALLA sobre el panel REAL (no depende
     del entorno ni de que el backend ya sirva el campo). El perfil llega con
     medal sintético y un assetId VÁLIDO (los PNG reales de assets/medals,
-    ruta resuelta por asset_path) → medallón cargado como PhotoImage ~36px
-    sin crash; tier 8 → 'LEYENDA #N · TOP 12' en ámbar; medal null/ausente
-    y assetId inválido → '—' (convención), todo sin crash. Los mismos checks
-    para la fase completa y la reducida."""
+    ruta resuelta por asset_path) → medallón cargado como PhotoImage ~50px
+    sin crash y nombre del tier EN SU METAL (MEDAL_TIER_COLORS); tier 8 →
+    'LEYENDA #N · TOP 12' en ámbar; medal null/ausente y assetId inválido →
+    '—' (convención), todo sin crash. Los mismos checks para la fase
+    completa y la reducida."""
     check("bloque MEDALLA en el grid: 7ª clave con caption 'MEDALLA' mapeada",
           "medal" in GRID_ORDER
           and str(panel._captions["medal"].cget("text")) == "MEDALLA"
@@ -772,10 +773,14 @@ def synthetic_medal_checks(panel) -> None:
     ancho = (panel._medal_photo.width()
              if panel._medal_photo is not None else 0)
     check("medal sintético (SARGENTO, assetId válido) → medallón cargado "
-          "(PhotoImage ~36px) + nombre al lado, sin crash",
+          "(PhotoImage ~50px) + nombre al lado, sin crash",
           img_set and MEDAL_IMG_H <= ancho <= MEDAL_IMG_H + 2
           and nombre == "SARGENTO",
           f"img={'sí' if img_set else 'no'} ancho={ancho} nombre={nombre!r}")
+    check("nombre del tier EN EL COLOR del metal (SARGENTO → ámbar #E8930C)",
+          panel._medal_name.cget("text_color") == MEDAL_TIER_COLORS[4],
+          f"color={panel._medal_name.cget('text_color')!r} "
+          f"esperado={MEDAL_TIER_COLORS[4]!r}")
     estrellas_ok = (
         str(panel._stars_full.cget("text")) == "★★★"
         and str(panel._stars_empty.cget("text")) == "☆☆ · TOP 12"

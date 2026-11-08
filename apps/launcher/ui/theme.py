@@ -51,6 +51,21 @@ COLORS = {
     "play_hover": "#F5A430",
 }
 
+# --- Metales por tier de medalla ELO ----------------------------------------
+# Valores EXACTOS de assets/make_medals.py · TIERS (única fuente del dibujo).
+# La UI pinta el nombre del tier en SU metal para que la medalla se lea de
+# un vistazo. Clave = tierId 1-8 del contrato player["medal"].
+MEDAL_TIER_COLORS = {
+    1: "#3B443E",  # RECLUTA    (gris acero dim — el tier base es intencionalmente apagado)
+    2: "#B0722F",  # SOLDADO    (bronce)
+    3: "#A9B2AC",  # CABO       (plata)
+    4: "#E8930C",  # SARGENTO   (ámbar militar = accent)
+    5: "#F5A430",  # TENIENTE   (ámbar claro = accent_hover)
+    6: "#8FD429",  # CAPITÁN    (verde señal = ok)
+    7: "#D2544A",  # COMANDANTE (rojo apagado = danger)
+    8: "#FFE9C4",  # LEYENDA    (blanco cálido)
+}
+
 # --- Rejilla de espaciado (múltiplos de 4) ---------------------------------
 SP = {"xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24, "xxl": 32}
 

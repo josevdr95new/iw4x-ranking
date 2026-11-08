@@ -20,10 +20,13 @@ Sistema de 8 tiers (ELO 1000-2500), estilo Dota 2 pero militar MW2:
 
 Estética HUD MW2 (ui/theme.py), igual que make_logo.py:
   - cero gradientes, cero glow, esquinas rectas, contraste AA
-  - metal del tier como color principal, contorno gris claro #E6EAE6,
-    interior oscuro #101312 semiopaco (alpha 200) para legibilidad
+  - metal del tier como color principal, contorno gris claro #E6EAE6
+  - interior = METAL OSCURECIDO del tier, OPACO (fix del dueño: el viejo
+    interior #101312 semiopaco era una mancha ilegible a ~50px; el nuevo
+    lleva el tint del metal y hace POP el emblema sobre fondo carbón)
   - brackets de esquina en tono del metal para unificar con el logo
-  - SIN texto dentro del emblema (el nombre lo pone la UI)
+  - SIN texto dentro del emblema (el nombre lo pone la UI, en el color
+    del metal del tier — ver ui/theme.py MEDAL_TIER_COLORS)
 """
 from __future__ import annotations
 
@@ -38,7 +41,27 @@ BG = "#101312"          # fondo de ventana / carbón del sheet
 TEXT = "#E6EAE6"        # texto principal (off-white) → contorno del escudo
 DIM = "#9BA69E"         # texto secundario → labels del sheet
 ACCENT = "#E8930C"      # ámbar militar → estrella del tier LEYENDA
-INTERIOR = (16, 19, 18, 200)  # #101312 semiopaco (alpha ~200)
+# Interior del escudo VIEJO (#101312 semiopaco): referencia del fix — el
+# nuevo interior es METAL OSCURECIDO opaco (ver interior_for()).
+OLD_INTERIOR = (16, 19, 18)
+INTERIOR_FLOOR = (33, 37, 35)  # suelo: ~35% más claro que el viejo #101312
+INTERIOR_METAL_MIX = 0.42      # metal al ~42% → interior tintado por tier
+
+
+def interior_for(metal_hex: str) -> tuple:
+    """Color del interior del escudo para un tier: METAL OSCURECIDO y OPACO.
+
+    Mezcla el metal del tier al ~42% y asegura un suelo ~35% más claro que
+    el viejo #101312 (que a ~50px de render era una mancha ilegible sobre
+    las tarjetas carbón). Opaco (alpha 255): sin transparencias que apaguen
+    el emblema. Los chevrones en METAL pleno contrastan sobre este fondo.
+    """
+    r, g, b = hex_rgba(metal_hex)[:3]
+    mixed = (int(r * INTERIOR_METAL_MIX), int(g * INTERIOR_METAL_MIX),
+             int(b * INTERIOR_METAL_MIX))
+    return (max(INTERIOR_FLOOR[0], mixed[0]),
+            max(INTERIOR_FLOOR[1], mixed[1]),
+            max(INTERIOR_FLOOR[2], mixed[2]), 255)
 
 FONT_CANDIDATES = [
     "consolab.ttf",                # Consolas bold (familia mono de la UI)
@@ -64,8 +87,10 @@ TIERS = [
 
 # Evolución por tier: nº de chevrons apilados y medio-ancho del chevron.
 CHEVRONS_BY_TIER = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
-CHEVRON_HW = {1: 84, 2: 90, 3: 96, 4: 100}  # medio-ancho por nº de chevrons
-BAND = 26   # grosor vertical de la banda del chevron
+# Medio-ancho SUBIDO (fix del dueño: chevrones más anchos → más presencia
+# del metal a ~50px de render). Siguen dentro del escudo (x 128..384 ≤ 398).
+CHEVRON_HW = {1: 104, 2: 112, 3: 120, 4: 128}
+BAND = 30   # grosor vertical de la banda del chevron (subido de 26)
 RISE = 44   # altura del pico del chevron
 GAP = 12    # aire entre chevrons apilados
 
@@ -118,16 +143,19 @@ def draw_tracked_centered(draw: ImageDraw.ImageDraw, cx: int, y: int, s: str,
 # --- Geometría del emblema ----------------------------------------------------
 
 # Escudo militar de fondo plano: top recto, laterales que afinan y punta
-# inferior. Contorno gris claro (outer) + interior oscuro semiopaco (inner).
+# inferior. Contorno gris claro (outer) + interior metal oscurecido (inner).
+# Inner más separado del outer que antes: contorno blanco ~10px que sigue
+# visible tras el downsample a ~50px en la UI.
 SHIELD_OUTER = [
     (108, 118), (404, 118), (404, 330), (368, 392), (256, 452), (144, 392), (108, 330),
 ]
 SHIELD_INNER = [
-    (114, 125), (398, 125), (398, 328), (363, 387), (256, 444), (149, 387), (115, 328),
+    (118, 128), (394, 128), (394, 326), (361, 384), (256, 440), (151, 384), (118, 326),
 ]
 
-# Ancla vertical: la banda del chevron central SIEMPRE cubre el pixel central
-# (256, 256) → [244, 270], para que la verificación de color sea determinista.
+# Ancla vertical: la banda de ALGÚN chevron SIEMPRE cubre el pixel central
+# (256, 256) — con BAND=30: count 1 → [244,274], 2 → [246,276], 3 → [246,276],
+# 4 → [248,278] — para que la verificación de color sea determinista.
 CHEVRON_ANCHOR_Y = 244
 
 
@@ -165,10 +193,10 @@ def make_medal(num: int, slug: str, metal_hex: str) -> Path:
     metal = hex_rgba(metal_hex)
     outline = hex_rgba(TEXT)
 
-    # 1) Escudo: contorno gris claro + interior oscuro semiopaco (legibilidad
-    #    sobre cualquier fondo de tarjeta).
+    # 1) Escudo: contorno blanco ~10px + interior METAL OSCURECIDO opaco
+    #    (tintado por tier — el emblema hace POP sobre fondo carbón).
     d.polygon(SHIELD_OUTER, fill=outline)
-    d.polygon(SHIELD_INNER, fill=INTERIOR)
+    d.polygon(SHIELD_INNER, fill=interior_for(metal_hex))
 
     # 2) Chevrones del tier en el metal (color principal del emblema).
     n = CHEVRONS_BY_TIER[num]
@@ -280,11 +308,20 @@ def verify() -> None:
         center = rgba.getpixel((256, 256))
         want = expected[num]
         color_ok = center[:3] == want and center[3] == 255
-        ok = size_ok and corner_a == 0 and color_ok
+        # Interior metal oscurecido OPACO: muestra dentro del escudo y
+        # encima del chevron más alto de cualquier tier (256, 150).
+        interior_want = interior_for(metal_hex)
+        interior_px = rgba.getpixel((256, 150))
+        interior_ok = (interior_px[:3] == interior_want[:3]
+                       and interior_px[3] == 255)
+        ok = size_ok and corner_a == 0 and color_ok and interior_ok
         all_ok &= ok
         print(f"{p.name:<26}{f'{img.size[0]}x{img.size[1]} {img.mode}':<12}"
               f"{os.path.getsize(p):<9}{corner_a:<10}"
-              f"{str(center):<20}{str(want):<13}{'SI' if ok else 'NO'}")
+              f"{str(center):<20}{str(want):<13}"
+              f"{'SI' if ok else 'NO'} interior={interior_px}")
+        if not interior_ok:
+            print(f"    interior esperado {interior_want} — ¡NO cuadra!")
     sheet = OUT / "medals-sheet.png"
     simg = Image.open(sheet)
     print(f"{sheet.name:<26}{f'{simg.size[0]}x{simg.size[1]} {simg.mode}':<12}"

@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import customtkinter as ctk
 
 from ui.hud import bind_ghost_focus, hairline
-from ui.theme import COLORS, RADIUS, SP, asset_path, font
+from ui.theme import (COLORS, MEDAL_TIER_COLORS, RADIUS, SP, asset_path,
+                      font)
 
 log = logging.getLogger("ui.stats")
 
@@ -50,7 +51,7 @@ GRID_ORDER: Tuple[str, ...] = (
 GRID_TOP: Tuple[str, ...] = ("rank", "lvl", "kills", "deaths")
 GRID_BOTTOM: Tuple[str, ...] = ("hs", "kd", "medal")
 GRID_ROW_GAP = SP["m"]  # aire vertical entre filas en modo 2 filas
-MEDAL_IMG_H = 36  # alto OBJETIVO del medallón en px (subsample entero: sale ~37)
+MEDAL_IMG_H = 50  # alto OBJETIVO del medallón en px (subsample entero: sale ~51)
 
 
 def _fmt_int(value: Any) -> str:
@@ -235,9 +236,10 @@ class StatsPanel(ctk.CTkFrame):
             )
             self._blocks[key] = value
             self._captions[key] = cap
-        # 7ª clave MEDALLA: el valor es un MARCO (medallón PNG ~36px +
-        # nombre del tier en mono pequeño), no un label de texto — por eso
-        # _column_need la mide a mano y _reset_values la salta.
+        # 7ª clave MEDALLA: el valor es un MARCO (medallón PNG ~50px +
+        # nombre del tier en mono pequeño EN SU COLOR de metal), no un
+        # label de texto — por eso _column_need la mide a mano y
+        # _reset_values la salta.
         self._medal_name_font = font(10, mono=True)
         medal_value = ctk.CTkFrame(self._grid, fg_color="transparent")
         self._medal_img = ctk.CTkLabel(
@@ -411,12 +413,12 @@ class StatsPanel(ctk.CTkFrame):
 
     # ================== Medalla (bloque del grid + detalle) ==================
     def _get_medal_photo(self, asset_id: str) -> Optional[tk.PhotoImage]:
-        """PhotoImage del medallón a ~36px (PNG 512×512 subsampleado).
+        """PhotoImage del medallón a ~50px (PNG 512×512 subsampleado).
 
         Los assets son decorativos: si el archivo falta (exe viejo sin la
         carpeta medals, assetId desconocido) devuelve None y el bloque cae
         a '—' sin crash. Sin PIL en runtime: Tk 8.6 lee PNG nativo y
-        subsamplea por factor entero (factor 14 sobre 512 → ~37×37).
+        subsamplea por factor entero (factor 10 sobre 512 → ~51×51).
         """
         cached = self._medal_photos.get(asset_id)
         if cached is not None:
@@ -435,9 +437,11 @@ class StatsPanel(ctk.CTkFrame):
         return photo
 
     def _render_medal_block(self, medal: Optional[Dict[str, Any]]) -> None:
-        """Bloque del grid: imagen del medallón + nombre del tier al lado.
-        Sin nombre el label se retira (sin gap fantasma: lo que se renderiza
-        es exactamente lo que mide _column_need)."""
+        """Bloque del grid: imagen del medallón + nombre del tier al lado,
+        EN EL COLOR del metal del tier (MEDAL_TIER_COLORS, tokens de
+        make_medals.py) — la medalla se lee de un vistazo aunque sea
+        pequeña. Sin nombre el label se retira (sin gap fantasma: lo que
+        se renderiza es exactamente lo que mide _column_need)."""
         asset_id = str(medal.get("assetId") or "") if medal else ""
         name = str(medal.get("name") or "") if medal else ""
         photo = self._get_medal_photo(asset_id) if asset_id else None
@@ -447,7 +451,13 @@ class StatsPanel(ctk.CTkFrame):
         else:
             # image="" (no None): CTkLabel no baja la imagen interna con None.
             self._medal_img.configure(image="", text="—")
-        self._medal_name.configure(text=name)
+        # Nombre en el METAL del tier (defensivo: tier desconocido → dim).
+        try:
+            name_color = MEDAL_TIER_COLORS[int(medal.get("tierId"))] if medal \
+                else COLORS["text_dim"]
+        except (KeyError, TypeError, ValueError):
+            name_color = COLORS["text_dim"]
+        self._medal_name.configure(text=name, text_color=name_color)
         if name:
             self._medal_name.pack(side="left", padx=(SP["s"], 0))
         else:
@@ -539,7 +549,7 @@ class StatsPanel(ctk.CTkFrame):
         caption_text = str(self._captions[key].cget("text"))
         cap_w = self._caption_font.measure(caption_text)
         if key == "medal":
-            # Valor = medallón (~36px) + aire + nombre del tier en mono
+            # Valor = medallón (~50px) + aire + nombre del tier en mono
             # pequeño. La métrica de fuente queda corta (CTkLabel añade
             # padding interno escalado: 40px medidos → 64px render), así que
             # se usa el ancho PEDIDO del marco (winfo_reqwidth, exacto y
