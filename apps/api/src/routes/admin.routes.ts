@@ -27,10 +27,12 @@ import {
   botsCountInput,
   botsDifficultyInput,
   launcherOnlyInput,
+  antiUnlockInput,
   mapChangeInput,
 } from '../dto/serveradmin.dto.js';
 import { getActivePlaySessions } from '../services/play-session.service.js';
-import { getLauncherOnly, setLauncherOnly } from '../services/setting.service.js';
+import { getLauncherOnly, setLauncherOnly, getAntiUnlockAutokick, setAntiUnlockAutokick } from '../services/setting.service.js';
+import { getLiveStatsOverview } from '../services/livestats.service.js';
 import {
   changeMap,
   fastRestart,
@@ -184,6 +186,36 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     const { enabled } = parseWith(launcherOnlyInput, req.body ?? {});
     res.json({ enabled: await setLauncherOnly(enabled) });
+  }),
+);
+
+// ── Live stats (snapshot GSC del server) + anti-unlock (unlockstats) ────────
+
+// Jugadores vivos según el último snapshot del script GSC (LIVE_STATS_FILE):
+// {guid,name,xp,level,prestige,kills,deaths,headshots,timePlayed,suspicious,
+//  reason,previousXp,delta}. Ingesta desactivada o sin archivo aún → players: [].
+adminRouter.get(
+  '/server/livestats',
+  asyncHandler(async (_req, res) => {
+    res.json(getLiveStatsOverview());
+  }),
+);
+
+// Interruptor anti-unlock: default false (solo alerta/flag). true = el tick
+// live kickea (tell + clientkick) a los guids suspicious.
+adminRouter.get(
+  '/server/anti-unlock',
+  asyncHandler(async (_req, res) => {
+    res.json({ enabled: await getAntiUnlockAutokick() });
+  }),
+);
+
+adminRouter.post(
+  '/server/anti-unlock',
+  validate(antiUnlockInput, 'body'),
+  asyncHandler(async (req, res) => {
+    const { enabled } = parseWith(antiUnlockInput, req.body ?? {});
+    res.json({ enabled: await setAntiUnlockAutokick(enabled) });
   }),
 );
 

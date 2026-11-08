@@ -7,6 +7,7 @@ import {
   startModerationEnforcer,
   stopModerationEnforcer,
 } from './services/enforcer.service.js';
+import { startLiveStatsScheduler, stopLiveStatsScheduler } from './services/livestats.service.js';
 import { resetSharedRcon } from './lib/rcon/iw4x-rcon.js';
 
 // Primera instalación: si la tabla User está vacía, crea el admin por defecto
@@ -29,6 +30,7 @@ const server = app.listen(env.port, () => {
 
 const scheduler = startSyncScheduler();
 const enforcerTimer = startModerationEnforcer();
+const liveStatsTimer = startLiveStatsScheduler();
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -37,6 +39,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`[api] recibido ${signal}; cerrando...`);
   stopSyncScheduler(scheduler);
   stopModerationEnforcer(enforcerTimer);
+  stopLiveStatsScheduler(liveStatsTimer);
   resetSharedRcon();
   server.close();
   await prisma.$disconnect();

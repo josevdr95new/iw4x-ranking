@@ -31,6 +31,9 @@ export default defineConfig({
       // (cadena vacía → undefined tras el transform del schema) para que el sync de
       // sync.test.ts use solo el mock determinista.
       GAME_LOG_PATH: '',
+      // Ingesta live (snapshot GSC): desactivada por defecto en tests (los tests
+      // de livestats fijan la ruta por-test vía runLiveStatsTick({file})).
+      LIVE_STATS_FILE: '',
       SYNC_INTERVAL_MINUTES: '0',
       SYNC_INTERVAL_SECONDS: '0',
       LINK_WINDOW_MINUTES: '10',

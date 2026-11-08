@@ -13,6 +13,10 @@ export const launcherOnlyInput = z
   })
   .strict();
 
+// ── anti-unlock (unlockstats autokick) ──────────────────────────────────────
+
+export const antiUnlockInput = launcherOnlyInput;
+
 // ── Mapas ───────────────────────────────────────────────────────────────────
 
 /** Id mp_ del catálogo (el servicio valida que exista → 400 si desconocido). */
@@ -63,6 +67,7 @@ export const botsCountInput = z
   .strict();
 
 export type LauncherOnlyInput = z.infer<typeof launcherOnlyInput>;
+export type AntiUnlockInput = z.infer<typeof antiUnlockInput>;
 export type MapChangeInput = z.infer<typeof mapChangeInput>;
 export type BotsDifficultyInput = z.infer<typeof botsDifficultyInput>;
 export type BotsCountInput = z.infer<typeof botsCountInput>;

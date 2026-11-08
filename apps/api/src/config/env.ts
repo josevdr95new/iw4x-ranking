@@ -45,6 +45,23 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value !== undefined && value.trim().length > 0 ? value : undefined)),
+  /**
+   * Snapshot en vivo que escribe el script GSC del server (apps/api/gsc/
+   * iw4x-ranking.gsc → userraw/scriptdata/iw4x-ranking.json). Vacío = ingesta
+   * live DESACTIVADA (todo null silencioso).
+   */
+  LIVE_STATS_FILE: z
+    .string()
+    .optional()
+    .transform((value) => (value !== undefined && value.trim().length > 0 ? value : undefined)),
+  /** Intervalo del scheduler de ingesta live en ms (default 30000; min 1000). */
+  LIVE_STATS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+  /** Detector unlockstats: salto de XP en el límite de la ventana → suspicious. */
+  LIVE_XP_JUMP_LIMIT: z.coerce.number().int().min(1).default(500000),
+  /** Detector unlockstats: ventana temporal del salto en ms (default 10 min). */
+  LIVE_XP_JUMP_WINDOW_MS: z.coerce.number().int().min(1000).default(600000),
+  /** Mensaje del tell antes del clientkick por unlockstats (autokick ON). */
+  ANTI_UNLOCK_KICK_MSG: z.string().min(1).default('Stats modificados detectados'),
   GAME_SERVER_ADDRESS: z.string().min(1).optional(),
   SYNC_INTERVAL_MINUTES: z.coerce.number().default(0),
   SYNC_INTERVAL_SECONDS: z.coerce.number().default(0),
@@ -113,6 +130,11 @@ export const env = {
   rconEnforcerIntervalMs: raw.RCON_ENFORCER_INTERVAL_MS,
   rconBansFile: raw.RCON_BANS_FILE,
   gameLogPath: raw.GAME_LOG_PATH,
+  liveStatsFile: raw.LIVE_STATS_FILE,
+  liveStatsIntervalMs: raw.LIVE_STATS_INTERVAL_MS,
+  liveXpJumpLimit: raw.LIVE_XP_JUMP_LIMIT,
+  liveXpJumpWindowMs: raw.LIVE_XP_JUMP_WINDOW_MS,
+  antiUnlockKickMsg: raw.ANTI_UNLOCK_KICK_MSG,
   gameServerAddress: raw.GAME_SERVER_ADDRESS,
   syncIntervalMinutes: raw.SYNC_INTERVAL_MINUTES,
   syncIntervalSeconds: raw.SYNC_INTERVAL_SECONDS,

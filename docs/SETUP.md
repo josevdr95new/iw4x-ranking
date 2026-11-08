@@ -252,6 +252,79 @@ IW4MAdmin solo necesita que el server dedicado esté corriendo: se conecta por R
 
 > 🚨 **NOTA IMPORTANTE — fuentes de datos**: el ranking **NO ingiere la DB de IW4MAdmin por defecto** (fuente = `games_mp.log`, ver [4C](#4c-ingesta-por-log-del-server-dedicado)). Para cambiar de fuente: config `IW4MADMIN_DB_PATH` y comenta `GAME_LOG_PATH` — **nunca dejes las dos activas contra el MISMO server** (doble conteo de kills). Ver [4F](#4f-conectar-un-iw4madmin-real-alternativa). `IW4MADMIN_DB_PATH` queda **comentado/desactivado a propósito** en `apps/api/.env`; NO tocar mientras el ranking use el log.
 
+## 4H. Ingesta LIVE + anti-unlockstats (script GSC del server)
+
+Además del [log](#4c-ingesta-por-log-del-server-dedicado) y del cloud save (`/api/profile/*`), el server dedicado puede alimentar el ranking **EN VIVO**: un script GSC server-side lee las stats descifradas de cada cliente conectado (`GetStat` → `SV_GetClientStat`, mismos índices que el parser del `iw4x.stat`) y escribe un snapshot que la API ingiere cada ~30s. Con eso:
+
+- El **LVL/prestigio en vivo** aparece en perfil y leaderboard **sin depender del blob cifrado** (la fuente del "save" pasa a ser *"cloud save O live del server, la más reciente"* por `saveParsedAt`).
+- El **detector unlockstats** marca (y opcionalmente expulsa) a quien muestre XP imposible.
+
+### Qué hace el script
+
+`apps/api/gsc/iw4x-ranking.gsc` (server-side, sin mods ni clientes):
+
+1. En cada carga de mapa (`init`) arranca un hilo que se repite cada ~60s.
+2. Por cada jugador HUMANO conectado (`level.players`; bots excluidos: su guid string contiene `bot` — mismo criterio que Bot Warfare) lee: guid (`getguid()`), name y stats por `GetStat`: XP (2300), prestigio (2325), kills (2305), deaths (2315), headshots (2321), timePlayedTotal (2324).
+3. **REESCRIBE** (snapshot, no append) el archivo:
+
+   ```
+   <raíz del juego>\userraw\scriptdata\iw4x-ranking.json
+   ```
+
+   con formato:
+
+   ```
+   #iw4x-ranking v1
+   <guid>;<xp>;<prestigio>;<kills>;<deaths>;<headshots>;<timePlayed>;<name>
+   ```
+
+   (el name va al FINAL para tolerar `;` en el nick; `FileWrite` antepone `scriptdata/` si falta y resuelve relativo a `userraw` — verificado en `GSC/IO.cpp` de iw4x-client).
+
+### Instalación y activación
+
+```powershell
+# 1. Crear la carpeta de scripts del server si no existe y copiar:
+New-Item -ItemType Directory -Force -Path "D:\Call of Duty 6\userraw\scripts" | Out-Null
+Copy-Item ".\apps\api\gsc\iw4x-ranking.gsc" "D:\Call of Duty 6\userraw\scripts\iw4x-ranking.gsc"
+```
+
+2. **Activación**: el server carga los `.gsc` de `userraw/scripts/` por **CARGA DE MAPA** (`Scr_StartupGameType` ejecuta `init`). Tras copiar el archivo hace falta `map_rotate` (rcon o consola) o reiniciar el server. Un `fast_restart` NO recarga el VM de GSC. La consola debe imprimir `Loading script scripts/iw4x-ranking.gsc...` en la próxima carga de mapa.
+3. **Verificación**: tras la carga de mapa, `D:\Call of Duty 6\userraw\scriptdata\iw4x-ranking.json` debe existir (solo cabecera si no hay humanos conectados) y refrescarse cada ~60s.
+
+> ⚠️ Si hay una **partida en curso**, NO hagas map_rotate: instala el script y espera el fin de la partida (la rotación automática lo activa).
+
+### Config de la API (`apps/api/.env`)
+
+| Variable | Default | Descripción |
+| --- | --- | --- |
+| `LIVE_STATS_FILE` | (vacío = OFF) | Ruta del snapshot (ej. `D:/Call of Duty 6/userraw/scriptdata/iw4x-ranking.json`). Ausente/corrupto → ciclo silencioso, nunca lanza |
+| `LIVE_STATS_INTERVAL_MS` | `30000` | Cada cuánto la API lee el snapshot (scheduler propio, NO requiere RCON) |
+| `LIVE_XP_JUMP_LIMIT` | `500000` | Salto de XP mínimo para sospechar (detector, ver abajo) |
+| `LIVE_XP_JUMP_WINDOW_MS` | `600000` | Ventana temporal del salto (10 min) |
+| `ANTI_UNLOCK_KICK_MSG` | `Stats modificados detectados` | Mensaje del `tell` previo al kick (solo con autokick ON) |
+
+### Reglas EXACTAS del detector unlockstats (anti-falso-positivo)
+
+Cada ciclo, por guid humano con valores sanos (XP 0..2516000, prestigio 0..10, counters 0..10M — cualquier línea con un campo fuera de rango se ignora ENTERA):
+
+1. **`xp-jump` (señal principal)**: `nuevoXp - xpPrevio > LIVE_XP_JUMP_LIMIT` (default 500000) dentro de `LIVE_XP_JUMP_WINDOW_MS` (default 10 min). Justificación: el máximo legítimo son decenas de horas de juego; nadie gana 500k XP en 10 minutos. El xpPrevio viene del ciclo anterior en memoria o, tras un restart de la API, de la columna `saveXp` del Player (historial de cloud save / ciclo previo) — **nunca de cero**.
+2. **`max-xp-first-sighting` (solo alerta)**: primera vez que se ve un guid SIN NINGÚN historial con XP == **2516000 exacto** (L70 completo). Justificación: unlockstats suelta al jugador justo en el max; pero un legacy legítimo TAMBIÉN puede estar en max — por eso es la señal débil y **solo** aplica sin historial (con `saveParsedAt`/`saveXp` en DB no se acusa).
+3. **XP que baja → JAMÁS suspicious** (el prestigio legítimo resetea XP a 0), y la XP baja se guarda normalmente.
+4. **Sin re-acusación**: una sighting sin salto nuevo no re-flaggea ni re-kickea (evita bucles de kick contra el mismo guid).
+5. **Bots SIEMPRE exentos** (filtro `^bot` + rango `0xb07…`), tanto en el script GSC como en el parser de la API.
+
+### Acción contra un suspicious
+
+- **`anti_unlock_autokick = false` (default)**: solo alerta — flag visible en `GET /api/admin/server/livestats` + log `[livestats] SUSPICIOUS ...`.
+- **`anti_unlock_autokick = true`**: `tell <cid> "<ANTI_UNLOCK_KICK_MSG>"` + `clientkick <cid>` vía RCON (mismo patrón del enforcer; writes de 1 intento, bots/conectando excluidos). Se cambia en vivo desde el panel (`POST /api/admin/server/anti-unlock {enabled}`) y persiste en la tabla `Setting` (sobrevive restarts).
+
+### Endpoints nuevos (JWT ADMIN)
+
+- `GET /api/admin/server/livestats` → `{ file, updatedAt, players: [{ guid, name, xp, level, prestige, kills, deaths, headshots, timePlayed, suspicious, reason, previousXp, delta }] }` (sin ingesta activa: `file: null, updatedAt: null, players: []`).
+- `GET /api/admin/server/anti-unlock` → `{ enabled }` · `POST /api/admin/server/anti-unlock` body `{ enabled: boolean }` → `{ enabled }`.
+
+> Nota de exposición: el perfil y el leaderboard ya leían `saveXp/saveLevel/savePrestige`; ahora esos campos se llenan TAMBIÉN en vivo por esta ingesta (guids con o sin cuenta vinculada). La fuente visible es "cloud save O live del server, la más reciente" (`saveParsedAt`).
+
 ## 5. Ejecutar
 
 ```powershell

@@ -357,11 +357,34 @@ Response **200** (nueva primero; máximo 10):
 
 Tras cada PUT que guarda un snapshot nuevo (`saved:true`), si incluye `iw4x.stat` **raíz**, el server lo parsea (`src/lib/save-parser/parse-stat-blob.ts`) y escribe el resultado en los Players vinculados a la cuenta (columnas `saveXp`/`saveLevel`/`savePrestige`/`saveParsedAt`; el save es por CUENTA: todos los GUIDs vinculados muestran la misma progresión). El parse **nunca puede fallar el upload** (try/catch total; errores → log debug). Semántica "latest wins": si el último blob no es parseable, los campos quedan `null`.
 
+#### ⚠️ Formato REAL del `iw4x.stat` en disco ≠ layout del parser (investigado 2026-11-08)
+
+El archivo `iw4x.stat` que el juego escribe en `players\` **NO es el buffer plano de 8192 bytes** que este parser entiende. Verificado contra el archivo REAL del dueño (build IW4x **r5318**, nov-2026) y el source oficial (`github.com/iw4x/iw4x-client`, tag `r5318` = commit `c29c0b2`):
+
+| Observación del archivo real | Evidencia |
+| ---- | ----- |
+| Tamaño **8208 bytes** (16 + 8192), no 8192 | Archivo real del dueño + 2.027 `.stat` históricos en su `players\` (2014–2026): TODOS miden 8208 |
+| Entropía de Shannon **≈ 7.98 bits/byte** en TODO el archivo (un blob de stats plano tiene runas largas de ceros → entropía baja) | Análisis del archivo real; solo ~40 bytes en cero de 8208 (≈ esperado para datos aleatorios) |
+| Keystream **único por escritura** (no clave estática ni derivada del steamid) | XOR entre pares cualesquiera de `.stat` (mismo steamid, distinta versión; `.bak` vs principal; cifrado vs `playerstats.txt` PLANO encontrado en el mismo dir) = ruido puro, 0 runas ≥ 8 |
+| int32LE en `[0..3]` cambia cada sesión (no es 155/159) | Snapshot del 6-nov: `21 6C 56 6F…`; del 8-nov: `C0 D7 0A F8…` |
+| Sin cifrado añadido por el mod: r5318 no toca el contenido del stat file | Grep completo del source (`Stats.cpp`, `StructuredData.cpp`, `QuickPatch.cpp`, `Steam/*`): hooks solo de NOMBRE de archivo (`SprintfLiveStorageFilename`, `GetStatsID`, `HashFilenameStub`); sin crypt. El `chacha20` del `iw4x.dll` es el PRNG de libtomcrypt (claves RSA/GUID), no stats |
+| El cifrado vive en el binario del MOTOR (`iw4mp.exe`), y el formato es anterior a IW4x | Los archivos `md202ef8d_*_<steamid>.stat` (mismo formato 8208, engine nativo) del dueño datan de **2014** (era aIW/MW2), 6 años antes de las builds actuales |
+
+`playerstats.txt` (8192 B, plano, hallado en el mismo `players\`) muestra el layout del buffer EN MEMORIA: `[0..3]` checksum/magic, `[4..7]` versión int32LE (155), luego los datos. Ese buffer plano es exactamente lo que circula por `svs_clients[].stats` en el server dedicado y por los statpackets `stats` del cliente — el parser existe para ESA representación (y queda como base si algún día se ingiere un dump plano), no para el archivo de disco.
+
+**Consecuencia práctica**: `parseStatBlob(<archivo real 8208>)` → `null` SIEMPRE (por tamaño; y por versión aunque alguien lo trunque a 8192). Los Players quedan con `save:null` → el UI muestra "—". Esto es el contrato fijado por los tests con el fixture `tests/fixtures/real-iw4x.stat` (copia del archivo real). **No "arreglar" el parser para aceptar el archivo real**: produciría campos inventados. Descifrarlo exigiría ingeniería inversa del crypto del engine (fuera de alcance, frágil entre builds).
+
+**Cómo obtener LVL de verdad (alternativas verificadas en el source r5318):**
+
+1. **GSC server-side (recomendado, en vivo)**: el server expone `SV_GetClientStat(clientNum, index)` como método GSC **`GetStat`** (y `SetStat`) — `Stats.cpp::AddScriptFunctions`. Los índices son LOS MISMOS que este parser (0–1999 bytes, 2000–3497 int32: `experience`=2300, prestigio=2325). Combinado con **`FileWrite(<path>, <string>, <mode>)`** (GSC/IO.cpp), un `.gsc` pequeño en el mod del server puede volcar XP/prestigio de los jugadores conectados a un archivo que la API lee/ingesta. En vivo, sin crypto, sin offline-files.
+2. **Dump de consola del cliente** (protocolo ya previsto con el dueño): comandos client-side `statGet <index>` existe en el juego (`Stats.cpp`) pero lee SOLO el controller local 0 — sirve para el DUEÑO volcando SU propio xp (`/statGet 2300`) en `console_mp.log`, no para terceros vía RCON.
+3. **Vía RCON: NO hay comando** que exponga stats de un cliente conectado. La lista completa de comandos SV (`Command::AddSV` en r5318: bans, bots, chat, logger, mapRotation, RconWhitelistAdd) no incluye lectura de stats; `statGet` vía RCON ejecutaría `LiveStorage_GetStat(0, …)` del PROPIO server (controller 0 → sin stats locales en un dedicado). `SV_GetClientStat` solo es alcanzable desde GSC (opción 1).
+
 **Confianza del layout** (fuentes verificadas: iw4x-client r5318, `Stats.cpp`/`StructuredData.cpp`/`Server.cpp`):
 
 | Dato | Valor | Confianza |
 | ---- | ----- | --------- |
-| Tamaño del blob | 8192 bytes exactos | ALTA |
+| Tamaño del blob (buffer EN MEMORIA; el archivo de disco mide 8208 y viene cifrado, ver arriba) | 8192 bytes exactos | ALTA (buffer) / N/A para el archivo |
 | Versión del def (bytes `[0..3]`, int32LE) | `155` normal; `159` posible tras migración de mods; >159 → blob del futuro → NO se parsea (`save:null`) | ALTA |
 | Fórmula índice→offset | índices 0–1999 → byte en `4+i`; índices 2000–3497 → int32LE en `2004+4*(i-2000)` | ALTA |
 | Bloque de clases | offset 3643 (v155) / 3963 (v159), 64 bytes × 15 clases; `name` string al inicio (32 bytes null-padded). Exposición conservadora: solo `slot`/`name`/`inUse` (sub-offsets internos MEDIA) | ALTA (offsets) / MEDIA (estructura interna) |
@@ -380,7 +403,7 @@ Tras cada PUT que guarda un snapshot nuevo (`saved:true`), si incluye `iw4x.stat
 | career (cada campo) | entero 0..10.000.000 → si no: null SOLO ese campo |
 | clase | `name` imprimible ASCII hasta el primer null → `inUse:true`; si hay bytes no-cero pero no decodifica limpio → `inUse:false` + `rawHex` (diagnóstico) |
 
-**Estado del proyecto / protocolo del dueño** (pendiente): para subir los índices MEDIA a confianza ALTA hay que correlacionar con valores reales. Protocolo: con la cuenta del dueño jugada, ejecutar en la **consola del juego** `/dumpPlayerData` y revisar `console_mp.log`; comparar los valores reales (xp, prestigio, kills…) contra los offsets/índices de arriba. Fixture real pendiente de que el dueño lo suba — hasta entonces la exposición es defensiva por diseño.
+**Estado del proyecto / protocolo del dueño** (pendiente): para subir los índices MEDIA a confianza ALTA hay que correlacionar con valores reales. Protocolo: con la cuenta del dueño jugada, ejecutar en la **consola del juego** `/dumpPlayerData` (o `/statGet 2300` / `/statGet 2325` para xp/prestigio, que imprimen en `console_mp.log`) y comparar los valores reales contra los offsets/índices de arriba. FIXTURE REAL DEL ARCHIVO: ya está en el repo (`tests/fixtures/real-iw4x.stat`) pero es el CONTENEDOR CIFRADO del engine (8208 B) — sirve para fijar el contrato `parseStatBlob → null`, no para validar índices. Hasta que el dueño aporte un dump PLANO (consola o GSC), la exposición es defensiva por diseño (perfil "—").
 
 **Dónde se expone:**
 
@@ -609,6 +632,45 @@ Errores: `400 VALIDATION_ERROR`, `401`, `403`, `404`, `409 GUID_ALREADY_LINKED` 
 #### Bootstrap de alertas (`npm run rebuild:identity`)
 
 Pipeline idempotente en orden: normaliza `User.displayNameNormalized` para usuarios existentes (colisiones históricas → sufijo `-2`/`-3` reportado, el displayName visible NO cambia) → `rebuildAliases` (alias + `isBot`) → siembra `IdentityAlert` históricas desde `PlayerAlias` con las mismas reglas de la ingesta. Re-ejecutar no duplica.
+
+---
+
+## Identity (guid.dat → GUID, launcher)
+
+El GUID de IW4x se DERIVA del contenido de `guid.dat` (protobuf `Certificate` con la clave ECC privada; `Auth::GetKeyHash` = primeros 8 bytes de SHA1 del punto público X9.63 en little-endian, ver `src/lib/identity/derive-guid.ts`). El launcher debe consultar estos endpoints ANTES de restaurar "el guid.dat de mi nube": si el archivo que va a restaurar no es de la cuenta del token, restaurarlo haría que la PC arranque con la identidad de OTRA persona (el robo de identidad clásico de PCs compartidas con el mismo `guid.dat` subido desde varias cuentas).
+
+### `POST /api/identity/guid-from-file` 🔒 JWT (usuario)
+
+Body: `{ "dataBase64": "<contenido CRUDO de un guid.dat en base64>" }`. Sanity: base64 válido cuyo decodificado pese 64 B–4 KB (un guid.dat real son ~200–300 B) → fuera de rango `400 VALIDATION_ERROR`. Contenido no derivable → `200` con `guid: null` (no es un error HTTP).
+
+Response **200**:
+
+```json
+{
+  "guid": "c103bb7531742427",      // hex lowercase 16 chars (formato del engine); null si no es derivable
+  "guidDecimal": "13908166186265486375", // el mismo GUID en decimal (formato Player.guid de la DB); null si no derivable
+  "ownedByMe": false,              // guid ∈ linkedGuids de la cuenta del token
+  "ownerNick": "admin"             // displayName del dueño REAL cuando el guid lo tiene OTRA cuenta; null si libre o mío
+}
+```
+
+Semántica para el launcher: `guid: null` → el archivo no es un guid.dat válido, no restaurar. `ownedByMe: true` → seguro de restaurar. `ownedByMe: false` + `ownerNick` → el archivo pertenece a otra persona (mostrar quién y NO restaurar). `ownedByMe: false` + `ownerNick: null` → guid válido y libre (todavía sin cuenta).
+
+Errores: `401`, `400 VALIDATION_ERROR` (base64 inválido o tamaño fuera del sanity).
+
+### `POST /api/identity/claim-fresh` 🔒 JWT (usuario, sin cuerpo)
+
+Flujo de CUARENTENA de identidad: la cuenta declara que espera un guid NUEVO (su `guid.dat` se contaminó: compartido en la nube entre cuentas, herencia cruzada de PC compartida, etc.). Efectos:
+
+1. Marca `User.claimFreshAt` (one-shot): mientras esté seteada, el AUTO-LINK por sesión acepta un guid NUEVO aunque la cuenta ya tenga guids viejos vinculados (sin la marca esas cuentas están fuera del auto-link — ver reglas en `tryAutoLinkBySession`). La marca se consume cuando el link nuevo se materializa.
+2. Limpia el `PlaySession.guid` colgante: la sesión activa deja de matchear por guids viejos/ajenos y solo aceptará el guid nuevo que nazca (que se sellará en la misma sesión al auto-linkarse).
+3. NO borra `AccountLink`s (decidir sobre links heredados es del usuario vía UI de vinculación o del admin).
+
+Response **200**: `{ "ok": true, "claimFreshAt": "<ISO>", "clearedSessionGuid": "<guid decimal>" | null, "linkedGuids": ["..."] }`.
+
+Errores: `401`.
+
+> **Tightening anti herencia cruzada** (auto-link por sesión, ingesta línea `J`): una cuenta que YA tiene guids vinculados y recibe un guid DISTINTO ya NO se auto-linkea aunque el nick matchee y haya sesión activa (antes se linkeaba si el guid entraba libre: así heredaba cuentas el guid de otra persona en la misma PC). La vía legítima para añadir un guid nuevo a una cuenta existente es la vinculación manual (`POST /api/link/complete`) o el flujo de cuarentena de arriba.
 
 ---
 
@@ -1177,6 +1239,8 @@ Jugadores conectados AHORA: `status()` + `getinfo()` combinados por rcon.
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
 | POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula (MULTI-GUID) |
 | DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
+| POST   | `/api/identity/guid-from-file` | ✅ | Deriva el GUID de un guid.dat (base64) y dice si es de la cuenta (`ownedByMe`) o de quién es (`ownerNick`) |
+| POST   | `/api/identity/claim-fresh` | ✅ | Cuarentena de identidad: la cuenta espera un guid NUEVO (auto-link one-shot + limpia session.guid colgante) |
 | GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable (SOLO-humanos por defecto; `includeBots=true` para ver bots; `sort=level` ordena por save parseado) |
 | GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor + `aliases` históricos + `save` (nivel/prestigio/xp del cloud save) |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
