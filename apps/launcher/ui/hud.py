@@ -39,7 +39,10 @@ def section_label(parent, text: str) -> ctk.CTkLabel:
 
 
 def ghost_button(parent, text: str, command, width: int = 96) -> ctk.CTkButton:
-    """Botón fantasma: fondo transparente + hairline, texto claro."""
+    """Botón fantasma: fondo transparente + hairline, texto claro.
+
+    Deshabilitado real: texto atenuado (nunca el gris por defecto de CTk).
+    """
     return ctk.CTkButton(
         parent,
         text=text,
@@ -50,6 +53,7 @@ def ghost_button(parent, text: str, command, width: int = 96) -> ctk.CTkButton:
         fg_color="transparent",
         hover_color=COLORS["panel2"],
         text_color=COLORS["text"],
+        text_color_disabled=COLORS["text_faint"],
         border_width=1,
         border_color=COLORS["border_strong"],
         corner_radius=RADIUS["btn"],
@@ -57,7 +61,10 @@ def ghost_button(parent, text: str, command, width: int = 96) -> ctk.CTkButton:
 
 
 def primary_button(parent, text: str, command, width: int = 140, height: int = 38):
-    """Botón de acción ámbar (único color de acción del sistema)."""
+    """Botón de acción ámbar (único color de acción del sistema).
+
+    El hover ámbar claro (#F5A430) es EXCLUSIVO del CTA primario.
+    """
     return ctk.CTkButton(
         parent,
         text=text,
@@ -68,8 +75,99 @@ def primary_button(parent, text: str, command, width: int = 140, height: int = 3
         fg_color=COLORS["accent"],
         hover_color=COLORS["accent_hover"],
         text_color=COLORS["on_accent"],
+        text_color_disabled=COLORS["text_faint"],
         corner_radius=RADIUS["btn"],
     )
+
+
+# --- Estados de botón (en vuelo / reposo / foco) ----------------------------
+# Reglas del HUD: el hover ámbar solo en el primario; un botón con una
+# petición en vuelo se deshabilita DE VERDAD (dim + no clickable) y muestra
+# su label de progreso; el foco de teclado es SIEMPRE una hairline ámbar.
+
+_REST_KEYS = ("fg_color", "hover_color", "border_color", "text_color", "width")
+
+
+def set_button_busy(btn: ctk.CTkButton, text: str,
+                    width: Optional[int] = None) -> None:
+    """Petición en vuelo: deshabilitado real (dim, no clickable) + progreso.
+
+    Guarda los colores (y el ancho) de reposo en el propio widget la primera
+    vez para que ``set_button_idle`` restaure el estado exacto (éxito o
+    error, da igual). ``width`` ensancha el botón si el label de progreso es
+    más largo que el de reposo (p. ej. PROBAR → PROBANDO…).
+    """
+    if not hasattr(btn, "_hud_rest"):
+        btn._hud_rest = {key: btn.cget(key) for key in _REST_KEYS}
+    if btn._hud_rest["fg_color"] == "transparent":
+        # Fantasma: se apagan hairline y texto, el fondo sigue transparente.
+        btn.configure(border_color=COLORS["border"],
+                      text_color_disabled=COLORS["text_faint"])
+    else:
+        # Relleno (CTA ámbar): el slot ámbar se atenúa a su fondo sutil.
+        btn.configure(fg_color=COLORS["accent_subtle"],
+                      hover_color=COLORS["accent_subtle"],
+                      text_color_disabled=COLORS["text_faint"])
+    if width is not None:
+        btn.configure(width=width)
+    btn.configure(state="disabled", text=text)
+
+
+def set_button_idle(btn: ctk.CTkButton, text: str) -> None:
+    """Restaura el botón a reposo (colores guardados + label normal)."""
+    rest = getattr(btn, "_hud_rest", None)
+    if rest:
+        btn.configure(**rest)
+    btn.configure(state="normal", text=text)
+
+
+def bind_focus_hairline(widget, resting: str, focused: str,
+                        widths: Optional[tuple] = None) -> None:
+    """Foco visible para navegación por teclado: hairline ámbar al enfocar.
+
+    ``widths=(reposo, foco)`` solo cuando el ancho cambia (botón primario:
+    descansa sin borde → 1px al enfocar). En inputs NO tocar el ancho: CTk
+    usa border_width también como padding interno del texto.
+    """
+    rw, fw = widths if widths is not None else (1, 1)
+    widget.bind(
+        "<FocusIn>",
+        lambda _e: widget.configure(border_width=fw, border_color=focused),
+    )
+    widget.bind(
+        "<FocusOut>",
+        lambda _e: widget.configure(border_width=rw, border_color=resting),
+    )
+
+
+def make_tab_focusable(btn: ctk.CTkButton) -> None:
+    """Que Tab llegue al botón: el canvas de CTk no es enfocable por defecto.
+
+    Los labels internos se marcan no-enfocables para que el botón consuma
+    UN solo stop del recorrido (el foco lo toma el canvas, que es quien
+    dispara el FocusIn del hairline).
+    """
+    try:
+        btn._canvas.configure(takefocus=True)
+        for label in (getattr(btn, "_text_label", None),
+                      getattr(btn, "_image_label", None)):
+            if label is not None:
+                label.configure(takefocus=0)
+    except Exception:
+        pass  # decorativo: si la API interna cambia, no rompe la UI
+
+
+def bind_ghost_focus(btn: ctk.CTkButton, resting_border: Optional[str] = None) -> None:
+    """Tab-stop + hairline de foco en un botón fantasma (descansa con borde)."""
+    make_tab_focusable(btn)
+    bind_focus_hairline(btn, resting_border or COLORS["border_strong"],
+                        COLORS["accent_border"], (1, 1))
+
+
+def bind_flat_focus(btn: ctk.CTkButton) -> None:
+    """Tab-stop + hairline de foco en botón SIN borde de reposo (CTA/texto)."""
+    make_tab_focusable(btn)
+    bind_focus_hairline(btn, COLORS["accent"], COLORS["accent_border"], (0, 1))
 
 
 def status_chip(parent, text: str, kind: str = "dim") -> ctk.CTkLabel:

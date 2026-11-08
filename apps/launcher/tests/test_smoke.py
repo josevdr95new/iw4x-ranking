@@ -34,6 +34,11 @@ Qué verifica:
   10. (GUI/stubs) autosave: tick con cambios sube, sin cambios NO consulta
                  la API (caché de hashes) y otro cambio vuelve a subir; el
                  cierre SIN juego vivo hace el guardado final SIEMPRE.
+  11. (GUI/stubs) navegación y estados de botones: el registro muestra
+                 "‹ VOLVER" y al pulsarlo vuelve al login conservando el
+                 nick; ENTRAR se deshabilita con "ENTRANDO…" durante el
+                 request (stub), un segundo submit no dispara otra petición
+                 y el botón se restaura al terminar (anti doble-submit).
 
 Híbridos que quedan aquí (con red/GUI o estado): pipeline stub de
 cloud-sync, todas las fases GUI, fases headless contra la API real y los
@@ -432,6 +437,119 @@ def phase_register_or_login() -> None:
 
     run_phase("registro/login desde el launcher",
               [step_wait_login, step_submit], build)
+
+
+def phase_navigation_busy() -> None:
+    """Fase GUI: audit de navegación + anti doble-submit en ENTRAR (stub).
+
+    - Registro: fantasma "‹ VOLVER" visible y, al pulsarlo, vuelta al login
+      conservando el nick ya tecleado (salida clara del registro).
+    - ENTRAR en vuelo: deshabilitado con label "ENTRANDO…"; un segundo submit
+      (click o Enter) NO dispara otra petición; al terminar el request (stub,
+      por error) el botón se restaura con su label y estado normales.
+    - Audit estático de salidas: ajustes → home ("‹ VOLVER") y home →
+      AJUSTES / CERRAR SESIÓN en cabecera.
+    """
+
+    def step_login_layout(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            f = app.login_frame
+            check("audit login: ENTRAR y enlace CREAR CUENTA mapeados",
+                  bool(f.action_btn.winfo_ismapped())
+                  and bool(f.toggle_link.winfo_ismapped()))
+            check("audit login: '‹ VOLVER' oculto en modo ENTRAR (solo existe en registro)",
+                  not f.back_btn.winfo_ismapped())
+            check("audit ajustes: fantasma '‹ VOLVER' con salida a la home",
+                  str(app.settings_frame.back_btn.cget("text")) == "‹ VOLVER")
+            check("audit home: salidas AJUSTES y CERRAR SESIÓN en la cabecera",
+                  str(app.home_frame.settings_btn.cget("text")) == "AJUSTES"
+                  and str(app.home_frame.logout_btn.cget("text")) == "CERRAR SESIÓN")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.login_frame, ok, timeout=10)
+
+    def step_register_back(app: App, done: Callable[[], None]) -> None:
+        f = app.login_frame
+        f.nick.delete(0, "end"); f.nick.insert(0, "NickConservado")
+        f._toggle_mode()  # login → CREAR CUENTA
+
+        def check_volver() -> None:
+            check("registro: '‹ VOLVER' visible al entrar a CREAR CUENTA",
+                  bool(f.back_btn.winfo_ismapped()),
+                  f"mgr={f.back_btn.winfo_manager()!r}")
+            check("registro: email visible y enlace CREAR CUENTA retirado "
+                  "(una sola ruta de retorno)",
+                  bool(f.email_box.winfo_ismapped())
+                  and not f.toggle_link.winfo_ismapped())
+            f.back_btn.invoke()  # pulso real del botón fantasma
+            app.after(150, check_de_vuelta)
+
+        def check_de_vuelta() -> None:
+            check("‹ VOLVER: pulso → vuelta al login (ENTRAR + enlace restaurado)",
+                  str(f.action_btn.cget("text")) == "ENTRAR"
+                  and not f.back_btn.winfo_ismapped()
+                  and not f.email_box.winfo_ismapped()
+                  and bool(f.toggle_link.winfo_ismapped()),
+                  f"btn={f.action_btn.cget('text')} "
+                  f"back_mgr={f.back_btn.winfo_manager()!r} "
+                  f"link_mapped={bool(f.toggle_link.winfo_ismapped())}")
+            check("‹ VOLVER: conserva el nick tecleado antes de arrepentirse",
+                  f.nick.get() == "NickConservado", repr(f.nick.get()))
+            done()
+
+        app.after(150, check_volver)
+
+    def step_busy_entrar(app: App, done: Callable[[], None]) -> None:
+        f = app.login_frame
+        f.nick.delete(0, "end"); f.nick.insert(0, "BusyCheck")
+        f.password.delete(0, "end"); f.password.insert(0, "busy-password-1")
+
+        calls = {"n": 0}
+        holder: List[Callable] = []
+
+        def stub_login(nick, password, on_done):  # NO lanza hilo ni HTTP
+            calls["n"] += 1
+            holder.append(on_done)
+
+        app.login = stub_login  # type: ignore[method-assign]
+        f._on_submit()
+
+        # En vuelo (todo síncrono dentro de _on_submit): disabled + ENTRANDO…
+        check("ENTRAR en vuelo: deshabilitado con label 'ENTRANDO…'",
+              str(f.action_btn.cget("text")) == "ENTRANDO…"
+              and str(f.action_btn.cget("state")) == "disabled"
+              and f._busy is True,
+              f"text={f.action_btn.cget('text')!r} "
+              f"state={f.action_btn.cget('state')!r}")
+        f._on_submit()  # doble submit en vuelo: el guard debe frenarlo
+        check("anti doble-submit: segundo submit (click/Enter) no dispara otra petición",
+              calls["n"] == 1, f"calls={calls['n']}")
+
+        # El request "termina" (stub) → restauración exacta (aquí, por error).
+        holder[0](NetworkError("stub: API caída"))
+
+        def check_restored() -> None:
+            check("ENTRAR restaurado tras el request (stub): label y estado normales",
+                  str(f.action_btn.cget("text")) == "ENTRAR"
+                  and str(f.action_btn.cget("state")) == "normal"
+                  and f._busy is False,
+                  f"text={f.action_btn.cget('text')!r} "
+                  f"state={f.action_btn.cget('state')!r}")
+            check("error del request (stub) queda pintado en el status",
+                  "stub: API caída" in str(f.status.cget("text")),
+                  repr(str(f.status.cget("text"))))
+
+        app.after(120, check_restored)
+
+        # Limpieza: el doble-submit no coló nada, pero el botón vuelve a ser
+        # operable para las fases siguientes (sin sesión, sin navegación).
+        app.after(240, done)
+
+    run_phase("navegación (VOLVER) + anti doble-submit",
+              [step_login_layout, step_register_back, step_busy_entrar],
+              lambda: (STORE_PATH.unlink(missing_ok=True),
+                       App(make_test_cfg(), ApiClient(API_URL),
+                           UserStore(STORE_PATH)))[1])
 
 
 def phase_autologin() -> None:
@@ -1548,7 +1666,7 @@ def main() -> int:
     # 2) Alta de la cuenta DESDE el launcher (registro; si ya existía, login).
     phase_register_or_login()
 
-    # 3) Contrato auth/link headless con la cuenta ya creada.
+    # 2) Contrato auth/link headless con la cuenta ya creada.
     if phase_api_auth_flow() is None:
         print("\nNo se pudo autenticar la cuenta de prueba: no se puede continuar.")
         return 1
@@ -1564,6 +1682,12 @@ def main() -> int:
     phase_flow_logic()
     phase_exit_hook()
     phase_autosave_close()
+
+    # AL FINAL: audit de navegación (VOLVER) + anti doble-submit de ENTRAR
+    # (stub). Su app arranca SIN sesión guardada (necesita la pantalla de
+    # login) y su build borra el token de prueba — dejarlo para el cierre
+    # evita romper auto-login/JUGAR/stats en cascada.
+    phase_navigation_busy()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

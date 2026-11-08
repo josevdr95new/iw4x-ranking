@@ -13,7 +13,17 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import customtkinter as ctk
 
 from api_client import user_is_linked
-from ui.hud import DotState, ghost_button, hairline, section_label, status_chip
+from ui.hud import (
+    DotState,
+    bind_flat_focus,
+    bind_ghost_focus,
+    ghost_button,
+    hairline,
+    section_label,
+    set_button_busy,
+    set_button_idle,
+    status_chip,
+)
 from ui.stats_panel import StatsPanel
 from ui.theme import COLORS, RADIUS, SP, font, section_text
 
@@ -59,12 +69,14 @@ class HomeFrame(ctk.CTkFrame):
         self.badge = status_chip(header, "  …  ", kind="accent")
         self.badge.configure(corner_radius=RADIUS["btn"])
         self.badge.pack(side="right", padx=(SP["s"], SP["xl"]), pady=SP["m"])
-        ghost_button(right, "AJUSTES", self.app.show_settings, width=92).pack(
-            side="left", padx=SP["xs"]
-        )
-        ghost_button(right, "CERRAR SESIÓN", self.app.logout, width=124).pack(
-            side="left", padx=SP["s"]
-        )
+        self.settings_btn = ghost_button(right, "AJUSTES", self.app.show_settings,
+                                         width=92)
+        self.settings_btn.pack(side="left", padx=SP["xs"])
+        bind_ghost_focus(self.settings_btn)
+        self.logout_btn = ghost_button(right, "CERRAR SESIÓN", self.app.logout,
+                                       width=124)
+        self.logout_btn.pack(side="left", padx=SP["s"])
+        bind_ghost_focus(self.logout_btn)
         hairline(self).pack(fill="x")
 
         # =================== Cuerpo ===================
@@ -113,9 +125,11 @@ class HomeFrame(ctk.CTkFrame):
             body, text=TEXT_LISTO, height=64, font=font(26, "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             text_color=COLORS["on_accent"], corner_radius=RADIUS["btn"],
+            text_color_disabled=COLORS["text_faint"],
             command=self.app.start_play,
         )
         self.play_btn.pack(fill="x", pady=(SP["m"], 0), ipady=2)
+        bind_flat_focus(self.play_btn)
 
         # =================== Consola (barra inferior terminal) ============
         hairline(self).pack(fill="x")
@@ -201,27 +215,27 @@ class HomeFrame(ctk.CTkFrame):
         self.status.configure(text=text, text_color=color)
 
     def set_playing(self, playing: bool) -> None:
-        """Estados del héroe: CONECTANDO (disabled) / LISTO (fin o abortado)."""
+        """Estados del héroe: CONECTANDO (dim, no clickable) / LISTO (fin)."""
         if playing:
-            self.play_btn.configure(state="disabled", text=TEXT_CONECTANDO)
+            set_button_busy(self.play_btn, TEXT_CONECTANDO)
             self.hud_state.set_state("conectando")
         else:
-            self.play_btn.configure(state="normal", text=TEXT_LISTO)
+            set_button_idle(self.play_btn, TEXT_LISTO)
             self.hud_state.set_state("listo")
 
     def set_deployed(self) -> None:
         """Éxito de lanzamiento: botón operativo y strip EN PARTIDA."""
-        self.play_btn.configure(state="normal", text=TEXT_LISTO)
+        set_button_idle(self.play_btn, TEXT_LISTO)
         self.hud_state.set_state("en_partida")
 
     def set_retry(self) -> None:
         """Tras un fallo con reintento: REINTENTAR + strip rojo."""
-        self.play_btn.configure(state="normal", text=TEXT_REINTENTAR)
+        set_button_idle(self.play_btn, TEXT_REINTENTAR)
         self.hud_state.set_state("fallo")
 
     def reset_hud(self) -> None:
         """Vuelve al estado LISTO (logout)."""
-        self.play_btn.configure(state="normal", text=TEXT_LISTO)
+        set_button_idle(self.play_btn, TEXT_LISTO)
         self.hud_state.set_state("listo")
 
     def stop_animations(self) -> None:

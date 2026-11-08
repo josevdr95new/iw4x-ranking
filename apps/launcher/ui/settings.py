@@ -12,7 +12,17 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from api_client import NetworkError
-from ui.hud import ghost_button, hairline, primary_button, section_label
+from ui.hud import (
+    bind_flat_focus,
+    bind_focus_hairline,
+    bind_ghost_focus,
+    ghost_button,
+    hairline,
+    primary_button,
+    section_label,
+    set_button_busy,
+    set_button_idle,
+)
 from ui.theme import COLORS, RADIUS, SP, font, section_text
 
 if TYPE_CHECKING:
@@ -42,6 +52,7 @@ class SettingsFrame(ctk.CTkFrame):
     def __init__(self, master, app: "App") -> None:
         super().__init__(master, fg_color=COLORS["bg"])
         self.app = app
+        self._busy = False  # guardado en curso (anti doble-submit)
 
         ctk.CTkLabel(
             self, text=section_text("AJUSTES"), font=font(20, "bold", mono=True),
@@ -131,10 +142,11 @@ class SettingsFrame(ctk.CTkFrame):
         hairline(inner).pack(fill="x", pady=(0, SP["m"]))
         actions = ctk.CTkFrame(inner, fg_color="transparent")
         actions.pack(fill="x", pady=(0, SP["s"]))
-        ghost_button(actions, "PROBAR CONEXIÓN API", self._test_api, width=170).pack(
-            side="left"
-        )
-        primary_button(actions, "GUARDAR", self._save, width=140).pack(side="right")
+        self.test_btn = ghost_button(actions, "PROBAR CONEXIÓN API", self._test_api,
+                                     width=170)
+        self.test_btn.pack(side="left")
+        self.save_btn = primary_button(actions, "GUARDAR", self._save, width=140)
+        self.save_btn.pack(side="right")
 
         # Resultado del test de conexión / guardado.
         self.feedback = ctk.CTkLabel(
@@ -144,9 +156,17 @@ class SettingsFrame(ctk.CTkFrame):
         self.feedback.pack(fill="x", pady=(0, SP["s"]))
 
         # --- Volver -----------------------------------------------------------
-        ghost_button(self, "← VOLVER", self.app.show_home, width=110).pack(
-            anchor="w", padx=SP["xl"], pady=SP["m"]
-        )
+        # Misma salida fantasma que el registro ("‹ VOLVER"): cada pantalla
+        # tiene una ruta de retorno clara (audit de navegación).
+        self.back_btn = ghost_button(self, "‹ VOLVER", self.app.show_home, width=110)
+        self.back_btn.pack(anchor="w", padx=SP["xl"], pady=SP["m"])
+
+        # --- Foco de teclado (hairline ámbar) en entradas y botones -----------
+        for entry in (self.api_url, self.game_path, self.autosave_minutes):
+            bind_focus_hairline(entry, COLORS["border"], COLORS["accent_border"])
+        bind_ghost_focus(self.test_btn)
+        bind_ghost_focus(self.back_btn)
+        bind_flat_focus(self.save_btn)
 
     # --- Ciclo de la pantalla ----------------------------------------------
     def load_from_config(self) -> None:
@@ -201,7 +221,11 @@ class SettingsFrame(ctk.CTkFrame):
             self.game_path.insert(0, chosen.replace("/", "\\"))
 
     def _test_api(self) -> None:
-        """GET /api/sync/status (público) para verificar conectividad."""
+        """GET /api/sync/status (público) para verificar conectividad.
+
+        Anti doble-submit: "PROBANDO…" y deshabilitado en vuelo; se restaura
+        al terminar (éxito o error).
+        """
         base = self.api_url.get().strip().rstrip("/")
         if not base.startswith(("http://", "https://")):
             self.feedback.configure(
@@ -210,11 +234,13 @@ class SettingsFrame(ctk.CTkFrame):
             )
             return
 
+        set_button_busy(self.test_btn, "PROBANDO…")
         self.feedback.configure(text="Probando conexión…", text_color=COLORS["text_dim"])
         self.app.test_api_connection(base, self._test_ok, self._test_fail)
 
     def _test_ok(self, info: dict) -> None:
         """Respuesta de /sync/status: mostramos el último sync si existe."""
+        set_button_idle(self.test_btn, "PROBAR CONEXIÓN API")
         last = info.get("lastSyncAt")
         extra = (
             f" Último sync: {str(last)[:19].replace('T', ' ')}." if last
@@ -226,6 +252,7 @@ class SettingsFrame(ctk.CTkFrame):
         log.info("Test de API OK: %s", info)
 
     def _test_fail(self, error: Exception) -> None:
+        set_button_idle(self.test_btn, "PROBAR CONEXIÓN API")
         msg = (
             str(error) if isinstance(error, NetworkError)
             else f"La API respondió con error: {getattr(error, 'message', error)}"
@@ -234,7 +261,14 @@ class SettingsFrame(ctk.CTkFrame):
         log.info("Test de API falló: %s", msg)
 
     def _save(self) -> None:
-        """Valida, persiste y aplica la configuración."""
+        """Valida, persiste y aplica la configuración.
+
+        Anti doble-submit: "GUARDANDO…" y deshabilitado mientras corre. El
+        flujo es síncrono y termina en la home; el estado se restaura SIEMPRE
+        (finally) para la próxima visita a Ajustes.
+        """
+        if self._busy:
+            return
         cfg = self.app.cfg
         base = self.api_url.get().strip().rstrip("/")
         if not base.startswith(("http://", "https://")):
@@ -244,27 +278,33 @@ class SettingsFrame(ctk.CTkFrame):
             )
             return
 
-        servers = cfg.servers
-        labels = [f"{s['name']}  ({s['address']})" for s in servers]
-        chosen = self.server_menu.get()
-        idx = labels.index(chosen) if chosen in labels else cfg.default_server
+        self._busy = True
+        set_button_busy(self.save_btn, "GUARDANDO…")
+        try:
+            servers = cfg.servers
+            labels = [f"{s['name']}  ({s['address']})" for s in servers]
+            chosen = self.server_menu.get()
+            idx = labels.index(chosen) if chosen in labels else cfg.default_server
 
-        cfg.set("api_url", base)
-        cfg.set("game_path", self.game_path.get().strip())
-        cfg.set("default_server", idx)
-        cfg.set("cloud_save", bool(self.cloud_save_check.get()))
-        # Auto-guardado: solo cuenta si el checkbox está activo; el valor es
-        # entero ≥0 (0 = desactivado). Basura en el entry → 0 (sin crash).
-        autosave_minutes = self._autosave_minutes_value()
-        if not self.autosave_check.get():
-            autosave_minutes = 0
-        cfg.set("autosave_minutes", autosave_minutes)
-        cfg.save()
+            cfg.set("api_url", base)
+            cfg.set("game_path", self.game_path.get().strip())
+            cfg.set("default_server", idx)
+            cfg.set("cloud_save", bool(self.cloud_save_check.get()))
+            # Auto-guardado: solo cuenta si el checkbox está activo; el valor es
+            # entero ≥0 (0 = desactivado). Basura en el entry → 0 (sin crash).
+            autosave_minutes = self._autosave_minutes_value()
+            if not self.autosave_check.get():
+                autosave_minutes = 0
+            cfg.set("autosave_minutes", autosave_minutes)
+            cfg.save()
 
-        # Aplicar en caliente: nuevo cliente con la URL actualizada.
-        self.app.apply_api_url(base)
-        self.app.refresh_home_servers()
-        self.feedback.configure(text="✔ Ajustes guardados.", text_color=COLORS["ok"])
-        log.info("Ajustes guardados: api_url=%s default_server=%s "
-                 "autosave_minutes=%s", base, idx, autosave_minutes)
-        self.app.show_home()
+            # Aplicar en caliente: nuevo cliente con la URL actualizada.
+            self.app.apply_api_url(base)
+            self.app.refresh_home_servers()
+            self.feedback.configure(text="✔ Ajustes guardados.", text_color=COLORS["ok"])
+            log.info("Ajustes guardados: api_url=%s default_server=%s "
+                     "autosave_minutes=%s", base, idx, autosave_minutes)
+            self.app.show_home()
+        finally:
+            self._busy = False
+            set_button_idle(self.save_btn, "GUARDAR")

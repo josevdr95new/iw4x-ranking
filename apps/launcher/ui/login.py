@@ -16,7 +16,18 @@ import customtkinter as ctk
 
 from api_client import ApiClient, ApiError, NetworkError
 from app_config import config_path, normalize_api_url
-from ui.hud import BracketCard, ghost_button, hairline, primary_button, section_label
+from ui.hud import (
+    BracketCard,
+    bind_flat_focus,
+    bind_focus_hairline,
+    bind_ghost_focus,
+    ghost_button,
+    hairline,
+    primary_button,
+    section_label,
+    set_button_busy,
+    set_button_idle,
+)
 from ui.theme import COLORS, RADIUS, SP, font, section_text, tracked
 
 if TYPE_CHECKING:  # evita import circular solo por tipado
@@ -35,6 +46,7 @@ class LoginFrame(ctk.CTkFrame):
         super().__init__(master, fg_color=COLORS["bg_deep"])
         self.app = app
         self._register_mode = False
+        self._busy = False  # petición de auth en vuelo (anti doble-submit)
 
         # --- Franja CONEXIÓN (ANTES de cualquier login) -----------------------
         self._build_conn_strip()
@@ -64,9 +76,17 @@ class LoginFrame(ctk.CTkFrame):
         # Campos: NICK siempre visible (credencial de entrada); el EMAIL solo
         # existe al CREAR la cuenta (gestión), en su propia caja oculta.
         self.nick = self._make_entry(body, "jose")
-        self._field(body, "NICK", self.nick, 0)
+        self.nick_caption = self._field(body, "NICK", self.nick, 0)
         self.password = self._make_entry(body, "••••••••", show="•")
         self._field(body, "CONTRASEÑA", self.password, 1)
+
+        # Salida clara del registro (audit de navegación): fantasma "‹ VOLVER"
+        # arriba de los campos, visible SOLO en modo CREAR CUENTA. Regresa al
+        # login conservando lo tecleado (los campos son compartidos entre
+        # modos). Fantasma a propósito: el ámbar es del CTA principal.
+        self.back_btn = ghost_button(body, "‹ VOLVER", self._back_to_login, width=110)
+        self.back_btn.pack(anchor="w", pady=(0, SP["xs"]), before=self.nick_caption)
+        self.back_btn.pack_forget()
 
         # Estado (errores de validación/red) — va justo tras los campos.
         self.status = ctk.CTkLabel(
@@ -106,6 +126,26 @@ class LoginFrame(ctk.CTkFrame):
         # Enter = enviar.
         for entry in (self.nick, self.password, self.email):
             entry.bind("<Return>", lambda _e: self._on_submit())
+
+        # --- Foco de teclado + hover coherentes --------------------------------
+        # Un solo lenguaje de foco: hairline ámbar tenue (accent_border) en
+        # TODO elemento enfocable; el hover ámbar CLARO sigue reservado al CTA
+        # primario (lo fija primary_button). El enlace inferior aclara su
+        # texto al hover (dim → claro). Tab llega a los botones (CTk no los
+        # hace enfocables por defecto).
+        bind_flat_focus(self.action_btn)
+        bind_flat_focus(self.toggle_link)
+        bind_ghost_focus(self.back_btn)
+        bind_ghost_focus(self.conn_test_btn)
+        bind_ghost_focus(self.conn_save_btn)
+        for entry in (self.nick, self.password, self.email):
+            bind_focus_hairline(entry, COLORS["border"], COLORS["accent_border"])
+        bind_focus_hairline(
+            self.conn_url_entry, COLORS["border_strong"], COLORS["accent_border"])
+        self.toggle_link.bind(
+            "<Enter>", lambda _e: self.toggle_link.configure(text_color=COLORS["text"]))
+        self.toggle_link.bind(
+            "<Leave>", lambda _e: self.toggle_link.configure(text_color=COLORS["text_dim"]))
 
         # Auto-test de la API al abrir el launcher (hilo de fondo: no
         # bloquea el render; el resultado llega por la cola de la App).
@@ -219,12 +259,17 @@ class LoginFrame(ctk.CTkFrame):
         self._conn_commit()  # cierra el editor inline si estaba abierto
         self._conn_test(self.conn_url_text())
 
-    def _conn_test(self, base: Optional[str] = None) -> None:
-        """GET {api}/api/health (timeout 3s) y actualiza el punto de estado."""
+    def _conn_test(self, base: Optional[str] = None, initiator: str = "test") -> None:
+        """GET {api}/api/health (timeout 3s) y actualiza el punto de estado.
+
+        ``initiator`` elige el label de progreso del botón que lanzó el test
+        (PROBAR → "PROBANDO…"; GUARDAR → "GUARDANDO…"). El otro botón se
+        deshabilita sin cambiar su label.
+        """
         url = normalize_api_url(base if base is not None else self.app.cfg.api_url)
         self.conn_url_label.configure(text=url)
         self._conn_set_state("test")
-        self._conn_buttons(False)
+        self._conn_buttons(False, initiator=initiator)
 
         def ok(_data) -> None:
             self._conn_set_state("ok")
@@ -248,12 +293,23 @@ class LoginFrame(ctk.CTkFrame):
         self.app.apply_api_url(url)
         self.conn_url_label.configure(text=url)
         log.info("api_url guardada desde login: %s", url)
-        self._conn_test(url)
+        self._conn_test(url, initiator="save")
 
-    def _conn_buttons(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self.conn_test_btn.configure(state=state)
-        self.conn_save_btn.configure(state=state)
+    def _conn_buttons(self, enabled: bool, initiator: str = "test") -> None:
+        """En vuelo: ambos deshabilitados + label de progreso; luego reposo.
+
+        El label de progreso es más largo que el de reposo: se ensancha el
+        botón en vuelo (set_button_busy) y el ancho vuelve al restaurar.
+        """
+        if enabled:
+            set_button_idle(self.conn_test_btn, "PROBAR")
+            set_button_idle(self.conn_save_btn, "GUARDAR")
+        elif initiator == "save":
+            set_button_busy(self.conn_test_btn, "PROBAR")
+            set_button_busy(self.conn_save_btn, "GUARDANDO…", width=122)
+        else:
+            set_button_busy(self.conn_test_btn, "PROBANDO…", width=112)
+            set_button_busy(self.conn_save_btn, "GUARDAR")
 
     # --- Constructores de campo (entry HUD) ---------------------------------
     @staticmethod
@@ -278,21 +334,43 @@ class LoginFrame(ctk.CTkFrame):
 
     # --- Comportamiento ---------------------------------------------------------
     def _toggle_mode(self) -> None:
-        """Alterna entre login (solo NICK) y creación (EMAIL + NICK + clave)."""
+        """Alterna entre login (solo NICK) y creación (EMAIL + NICK + clave).
+
+        NUNCA borra campos: entrar en registro y arrepentirse no pierde el
+        nick ya tecleado en el login.
+        """
         self._register_mode = not self._register_mode
         if self._register_mode:
             self.action_btn.configure(text="CREAR CUENTA")
-            self.toggle_link.configure(text="Ya tengo cuenta: entrar")
+            # Salida clara del registro: VOLVER arriba; el enlace inferior se
+            # retira para que exista UNA única ruta de retorno visible.
+            self.back_btn.pack(anchor="w", pady=(0, SP["xs"]),
+                              before=self.nick_caption)
+            self.toggle_link.pack_forget()
             # El email reaparece justo antes de la línea de estado.
             self.email_box.pack(fill="x", before=self.status)
         else:
             self.action_btn.configure(text="ENTRAR")
-            self.toggle_link.configure(text="¿No tienes cuenta? Crear cuenta")
+            self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["m"]))
+            self.back_btn.pack_forget()
             self.email_box.pack_forget()
         self.status.configure(text="")
 
+    def _back_to_login(self) -> None:
+        """‹ VOLVER (solo en registro): vuelve al login conservando campos."""
+        if self._busy:
+            return
+        if self._register_mode:
+            self._toggle_mode()
+
     def _on_submit(self) -> None:
-        """Valida el formulario y delega en App (petición en hilo de fondo)."""
+        """Valida el formulario y delega en App (petición en hilo de fondo).
+
+        Anti doble-submit: con una petición en vuelo ni el botón ni Enter
+        disparan otra — evita cuentas duplicadas por doble-click.
+        """
+        if self._busy:
+            return
         nick = self.nick.get().strip()
         password = self.password.get()
         if self._register_mode:
@@ -313,15 +391,16 @@ class LoginFrame(ctk.CTkFrame):
                 return
             self.app.login(nick, password, self._on_result)
 
-        self.action_btn.configure(state="disabled", text="Conectando…")
+        self._busy = True
+        set_button_busy(self.action_btn,
+                        "CREANDO…" if self._register_mode else "ENTRANDO…")
         self.status.configure(text="")
 
     def _on_result(self, error=None) -> None:
         """Callback desde el hilo principal tras la petición de auth."""
-        self.action_btn.configure(
-            state="normal",
-            text="CREAR CUENTA" if self._register_mode else "ENTRAR",
-        )
+        self._busy = False
+        set_button_idle(self.action_btn,
+                        "CREAR CUENTA" if self._register_mode else "ENTRAR")
         if error is None:
             self.status.configure(text="")
             return

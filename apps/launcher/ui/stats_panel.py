@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 
 import customtkinter as ctk
 
-from ui.hud import hairline
+from ui.hud import bind_ghost_focus, hairline
 from ui.theme import COLORS, RADIUS, SP, font
 
 log = logging.getLogger("ui.stats")
@@ -97,6 +97,7 @@ class StatsPanel(ctk.CTkFrame):
             command=on_manual_refresh,
         )
         self.refresh_btn.pack(side="right")
+        bind_ghost_focus(self.refresh_btn)
 
         # --- Línea de estado (cargando / error / CTA) -------------------------
         self.status_label = ctk.CTkLabel(
