@@ -48,11 +48,15 @@ from save_sync import (  # noqa: E402
     build_upload_files,
     decide_guid_action,
     decide_guid_validation,
+    decide_stat_action,
     decide_sync,
     guid_file_b64,
     local_save_files,
     quarantine_local_guid,
+    quarantine_stat_file,
     sha256_of,
+    stat_quarantine_root,
+    stat_rels,
 )
 
 RESULTS: list = []
@@ -173,6 +177,63 @@ def phase_guid_validation() -> None:
           str(b64))
     check("guid_file_b64: sin guid.dat local → None (sin validación posible)",
           guid_file_b64(str(tmp / "nope.dat")) is None)
+
+
+# ---------------------------------------------------------------------------
+# 1c. save_sync: aislamiento del SAVE DE PROGRESIÓN (fix unlockstats).
+def phase_stat_isolation() -> None:
+    print("\n=== Units: decide_stat_action / quarantine_stat_file (unlockstats) ===")
+
+    # --- Ramas puras (los checks de decide_guid_action siguen arriba, intactos)
+    check("stat: manifest CON stat + local → 'restore' (lo de tu nube es tuyo)",
+          decide_stat_action(True, True) == "restore")
+    check("stat: manifest CON stat SIN local → 'restore' (el sync lo baja)",
+          decide_stat_action(True, False) == "restore")
+    check("stat: manifest SIN stat + local → 'quarantine' (NO heredes "
+          "unlockstats ajeno)",
+          decide_stat_action(False, True) == "quarantine")
+    check("stat: manifest SIN stat y sin local → 'none' (el juego crea el "
+          "primero)",
+          decide_stat_action(False, False) == "none")
+
+    # --- stat_rels: base + mods del manifiesto + mods locales; configs fuera --
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-stat-iso-"))
+    gd = tmp / "gd"
+    (gd / "players" / "mods" / "m1").mkdir(parents=True)
+    (gd / "players" / "iw4x.stat").write_bytes(b"S-BASE")
+    (gd / "players" / "mods" / "m1" / "iw4x.stat").write_bytes(b"S-M1")
+    rels = stat_rels([{"path": "iw4x.stat"},
+                      {"path": "mods/m2/iw4x.stat"},   # en nube, sin local
+                      {"path": "iw4x_config.cfg"},      # NO es progresión
+                      {"path": "guid.dat"}],            # NO es progresión
+                     str(gd))
+    check("stat_rels: base + mod local + mod de nube (configs y guid fuera)",
+          rels == ["iw4x.stat", "mods/m1/iw4x.stat", "mods/m2/iw4x.stat"],
+          str(rels))
+
+    # --- quarantine_stat_file: mueve preservando la estructura del rel --------
+    root = tmp / "stat-q"
+    dest = quarantine_stat_file(str(gd / "players" / "iw4x.stat"), "iw4x.stat",
+                                user_id="u-9", root=root)
+    check("quarantine_stat: mueve el stat base a <userId>-<ts>/iw4x.stat",
+          dest is not None
+          and (dest / "iw4x.stat").read_bytes() == b"S-BASE"
+          and not (gd / "players" / "iw4x.stat").exists(),
+          str(dest))
+    dest2 = quarantine_stat_file(
+        str(gd / "players" / "mods" / "m1" / "iw4x.stat"),
+        "mods/m1/iw4x.stat", user_id="u-9", root=root)
+    check("quarantine_stat: el mod stat conserva su estructura mods/<mod>/",
+          dest2 is not None
+          and (dest2 / "mods" / "m1" / "iw4x.stat").read_bytes() == b"S-M1",
+          str(dest2))
+    check("quarantine_stat: sin archivo → None sin crear nada",
+          quarantine_stat_file(str(gd / "players" / "nope.stat"), "iw4x.stat",
+                               user_id="u-9", root=root) is None)
+    check("stat_quarantine_root: default bajo stat-quarantine",
+          str(stat_quarantine_root()).replace("/", "\\")
+          .endswith("stat-quarantine"),
+          str(stat_quarantine_root()))
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +887,7 @@ def main() -> int:
 
     phase_guid_isolation()
     phase_guid_validation()
+    phase_stat_isolation()
     phase_save_sync_pure()
     phase_command_args()
     phase_app_config()

@@ -173,6 +173,90 @@ def guid_file_b64(guid_path: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Aislamiento del SAVE DE PROGRESIÓN por cuenta (fix unlockstats)
+# ---------------------------------------------------------------------------
+def decide_stat_action(manifest_has_stat: bool, local_exists: bool) -> str:
+    """Decide qué hacer con UN save de progresión (``iw4x.stat``, pura).
+
+    Misma regla que ``decide_guid_action`` aplicada al progreso: el
+    ``players\\iw4x.stat`` es UN SOLO archivo para TODA la PC — sin esta
+    capa, la cuenta nueva de pepe arrancaba con el ``unlockstats`` que
+    admin dejó en el disco (caso real del dueño).
+
+    - manifest CON el stat → "restore": el sync baja el progreso de la
+      cuenta (lo que está en TU nube es tuyo; el blob es cifrado y no se
+      puede derivar dueño, así que la regla del manifiesto basta).
+    - manifest SIN stat + local existe → "quarantine": el local pertenece a
+      OTRO usuario de esta PC → se APARTA (stat-quarantine) y el usuario
+      arranca con save FRESCO (nivel 1) en vez de heredar progreso.
+    - manifest SIN stat y sin local → "none": el juego crea el primero.
+    """
+    if manifest_has_stat:
+        return "restore"
+    if local_exists:
+        return "quarantine"
+    return "none"
+
+
+def stat_quarantine_root() -> Path:
+    """Raíz de cuarentena de saves: %APPDATA%\\iw4x-ranking-launcher\\stat-quarantine."""
+    return app_data_dir() / "stat-quarantine"
+
+
+def quarantine_stat_file(path: str, rel: str, user_id: str = "",
+                         root: Optional[Path] = None) -> Optional[Path]:
+    """Mueve UN save de progresión ajeno a la cuarentena (SIEMPRE cerrado).
+
+    ``rel`` conserva la estructura: ``iw4x.stat`` (base) o
+    ``mods/<mod>/iw4x.stat`` (mods). Destino:
+    ``<root|stat-quarantine()>\\<userId>-<ts>\\<rel>``. La copia queda como
+    respaldo de restauración de seguridad (<10s sin save nuevo → repuesto).
+    None si no había nada que mover o el movimiento falló (best-effort:
+    jamás bloquea jugar).
+    """
+    src = Path(path)
+    if not src.is_file():
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest_dir = Path(root) if root is not None else stat_quarantine_root()
+    dest_dir = dest_dir / f"{user_id or 'sin-cuenta'}-{stamp}"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = dest_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(target))
+    except OSError:
+        log.warning("No se pudo cuarentenar el save %s (%s)", rel, src,
+                    exc_info=True)
+        return None
+    log.info("Save de progresión ajeno cuarentenado en %s", target)
+    return dest_dir
+
+
+def stat_rels(manifest_files: Any, game_dir: str) -> List[str]:
+    """Rels de saves de progresión a considerar (base + mods).
+
+    Unión de los que menciona el manifiesto y los presentes localmente
+    (mods enumerados de ``players\\mods``); los ``iw4x_config.cfg`` quedan
+    FUERA (son ajustes, no progresión). Orden estable para logs
+    deterministas.
+    """
+    rels = {"iw4x.stat"}
+    if isinstance(manifest_files, list):
+        for f in manifest_files:
+            if isinstance(f, dict):
+                rel = str(f.get("path") or "")
+                if rel == "iw4x.stat" or (
+                        rel.startswith("mods/") and rel.endswith("/iw4x.stat")):
+                    rels.add(rel)
+    for rel in local_save_files(game_dir):
+        if rel == "iw4x.stat" or (rel.startswith("mods/")
+                                  and rel.endswith("/iw4x.stat")):
+            rels.add(rel)
+    return sorted(rels)
+
+
+# ---------------------------------------------------------------------------
 # Puras: mapeo, hashes y decisión
 # ---------------------------------------------------------------------------
 def local_save_files(game_dir: str, mods: Optional[List[str]] = None,

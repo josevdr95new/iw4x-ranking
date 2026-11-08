@@ -26,8 +26,12 @@ Aislamiento de guid.dat por cuenta (fix cyber-café): en el pre-launch
    es ajeno: cuarentena + ``claim-fresh`` y el juego crea identidad fresca
    que el auto-link por sesión ata a esta cuenta. API caída → sin
    cuarentena (se conserva la local).
-Seguridad: si la sesión muere antes de crear identidad nueva (<10s y sin
-guid.dat nuevo), el cuarentenado se repone (best-effort).
+
+Aislamiento del SAVE DE PROGRESIÓN (fix unlockstats): ``decide_stat_action``
+aplica la MISMA regla por-nube al ``iw4x.stat`` base y a cada mod stat —
+es UN archivo por PC y sin esta capa pepe heredaba el unlockstats de
+admin. Cuarentena ANTES del sync (jamás sube progreso ajeno) y la misma
+restauración de seguridad (<10s sin archivos nuevos → repuestos).
 """
 from __future__ import annotations
 
@@ -43,9 +47,10 @@ from typing import Any, Callable, Dict, List, Optional
 from api_client import ApiClient, ApiError, NetworkError
 from logging_setup import app_data_dir
 from save_sync import (UPLOAD_LOCK, decide_guid_action,
-                       decide_guid_validation, default_guid_path,
-                       guid_file_b64, quarantine_local_guid,
-                       sync_after_session, sync_before_launch)
+                       decide_guid_validation, decide_stat_action,
+                       default_guid_path, guid_file_b64,
+                       quarantine_local_guid, quarantine_stat_file,
+                       stat_rels, sync_after_session, sync_before_launch)
 
 log = logging.getLogger("game_flow")
 
@@ -171,6 +176,7 @@ class GameFlow:
         user_id: str = "",
         guid_path: Optional[str] = None,
         quarantine_root_path: Optional[Path] = None,
+        stat_quarantine_root_path: Optional[Path] = None,
     ) -> None:
         self.api = api
         self.token = token
@@ -183,15 +189,18 @@ class GameFlow:
         self.display_name = display_name
         self.cloud_save = cloud_save
         self.user_id = user_id
-        # Rutas INYECTABLES (tests): nunca tocar el guid.dat real en pruebas.
+        # Rutas INYECTABLES (tests): nunca tocar guid.dat ni saves reales en
+        # pruebas.
         self.guid_path = guid_path or default_guid_path()
         self.quarantine_root_path = quarantine_root_path
+        self.stat_quarantine_root_path = stat_quarantine_root_path
         self._process: Optional[Any] = None  # handle de Popen del juego
         self._launched_at: Optional[float] = None  # monotonic del lanzamiento
 
-        # Cuarentena de identidad en curso (para la restauración de seguridad):
-        # {"file": ruta cuarentenada, "target": ruta original}.
-        self._quarantined: Optional[Dict[str, str]] = None
+        # Cuarentena de identidad/progreso EN CURSO (para la restauración de
+        # seguridad): [{"kind": "guid"|"stat", "file": cuarentenado,
+        # "target": ruta original}, ...]
+        self._quarantined: List[Dict[str, str]] = []
 
         # Cancelación (al cerrar la ventana o cerrar sesión).
         self._cancelled = threading.Event()
@@ -331,7 +340,7 @@ class GameFlow:
                 process.wait()
             except Exception:  # proceso ya recolectado: nada que esperar
                 pass
-            self._maybe_restore_quarantined_guid()
+            self._maybe_restore_quarantined_files()
             self.emit({"t": "game_closed", "flow": self})
         if not self._upload_enabled():
             return
@@ -362,7 +371,7 @@ class GameFlow:
         if not wait_process_exit(self._process, self.GAME_EXIT_WAIT):
             log.warning("El juego (PID %s) no confirmó su muerte a tiempo; "
                         "el cierre continúa", pid)
-        self._maybe_restore_quarantined_guid()
+        self._maybe_restore_quarantined_files()
         self._log("Juego cerrado: revisando tu progreso…")
         self._upload_once(budget=self.GAME_UPLOAD_BUDGET)
         if self._upload_result == "upload":
@@ -398,10 +407,11 @@ class GameFlow:
             self._log("⚠ No se pudo asegurar tu identidad en esta PC; "
                       "se conserva la identidad local.")
             return
-        self._quarantined = {
+        self._quarantined.append({
+            "kind": "guid",
             "file": str(dest / "guid.dat"),
             "target": str(self.guid_path),
-        }
+        })
         log.info("Identidad local cuarentenada (cuenta %s): %s",
                  self.user_id or "?", dest / "guid.dat")
         self._log("Identidad nueva creada para tu cuenta "
@@ -457,10 +467,11 @@ class GameFlow:
             self._log("⚠ No se pudo asegurar tu identidad en esta PC; "
                       "se conserva la identidad local.")
             return
-        self._quarantined = {
+        self._quarantined.append({
+            "kind": "guid",
             "file": str(dest / "guid.dat"),
             "target": str(self.guid_path),
-        }
+        })
         log.info("guid.dat ajeno cuarentenado (cuenta %s): %s",
                  self.user_id or "?", dest / "guid.dat")
         try:
@@ -474,47 +485,112 @@ class GameFlow:
         self._log(f"Ese guid.dat {tenia}. Se creará una identidad NUEVA "
                   "para tu cuenta.")
 
-    def _maybe_restore_quarantined_guid(self) -> None:
-        """Restauración de seguridad: reponer el cuarentenado (best-effort).
+    def _apply_stat_identity(self, manifest: Optional[Dict[str, Any]]) -> int:
+        """Aislamiento del SAVE DE PROGRESIÓN por cuenta (juego cerrado).
 
-        Si la sesión murió antes de crear identidad nueva (proceso vivo <10s
-        —o jamás llegó a abrirse— y sin guid.dat nuevo en la ruta original),
-        el guid.dat cuarentenado vuelve a su sitio y queda log claro. Una
-        sola evaluación por sesión (consume el estado).
+        Caso real (fix unlockstats): ``players\\iw4x.stat`` es UN SOLO
+        archivo para TODA la PC — la cuenta nueva de pepe arrancaba con el
+        ``unlockstats`` que admin dejó en el disco. Se aplica la MISMA regla
+        del guid (``decide_stat_action``) al stat base y a CADA mod stat:
+
+        - restore: el manifiesto de la cuenta trae ese stat → NADA (el sync
+          baja el progreso de la cuenta; lo de tu nube es tuyo — el blob es
+          cifrado, no se puede derivar dueño, la regla del manifiesto basta).
+        - quarantine: la nube NO lo tiene y el local existe → se APARTA
+          (stat-quarantine) ANTES del sync — así el sync JAMÁS sube a esta
+          cuenta el progreso ajeno — y el juego arranca con save FRESCO
+          (nivel 1). Log único exacto por pre-launch.
+        - none: nada que mover.
+
+        Los apartados entran en ``_quarantined`` (restauración de seguridad
+        si la sesión muere <10s sin save nuevo). Devuelve cuántos apartó.
+        En simulación no se toca nada.
         """
-        info = self._quarantined
-        if info is None:
-            return
-        self._quarantined = None
-        target = Path(info["target"])
+        if self.simulate:
+            return 0
         try:
-            if target.is_file():
-                return  # el juego ya creó/dejó su identidad: no se toca
+            rels = stat_rels((manifest or {}).get("files"), self.game_dir)
         except OSError:
+            return 0
+        en_nube = {str(f.get("path") or "") for f in (manifest or {}).get("files") or []
+                   if isinstance(f, dict)}
+        apartados = 0
+        for rel in rels:
+            local_path = Path(self.game_dir) / "players" / rel
+            try:
+                local_exists = local_path.is_file()
+            except OSError:
+                continue
+            if decide_stat_action(rel in en_nube, local_exists) != "quarantine":
+                continue
+            dest = quarantine_stat_file(
+                str(local_path), rel,
+                user_id=self.user_id,
+                root=self.stat_quarantine_root_path,
+            )
+            if dest is None:
+                continue  # best-effort: sin poder apartarlo, se conserva
+            self._quarantined.append({
+                "kind": "stat",
+                "file": str(dest / rel),
+                "target": str(local_path),
+            })
+            apartados += 1
+            log.info("Save de progresión ajeno apartado (cuenta %s): %s",
+                     self.user_id or "?", dest / rel)
+        if apartados:
+            self._log("Save de progresión de otro usuario apartado — "
+                      "empiezas desde cero (primera vez en esta PC)")
+        return apartados
+
+    def _maybe_restore_quarantined_files(self) -> None:
+        """Restauración de seguridad: repone los cuarentenados (best-effort).
+
+        Cubre guid.dat Y los saves de progresión apartados: si la sesión
+        murió antes de crear archivos nuevos (<10s —o jamás llegó a
+        abrirse— y sin archivo nuevo en la ruta original), CADA cuarentenado
+        vuelve a su sitio. Una sola evaluación por sesión (consume el
+        estado). Log por tipo: guid → "Tu identidad anterior fue repuesta…"
+        (exacto de siempre); stat → "Tu save anterior fue repuesto…".
+        """
+        entries = self._quarantined
+        if not entries:
             return
+        self._quarantined = []
         lived_ok = (
             self._launched_at is not None
             and (time.monotonic() - self._launched_at) >= GUID_RESTORE_WINDOW
         )
         if lived_ok:
-            return  # sesión larga sin guid: no reponer (el upload manda)
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            src = Path(info["file"])
-            if src.is_file():
-                shutil.copy2(src, target)
-                self._log("Tu identidad anterior fue repuesta: la sesión no "
-                          "llegó a crear una nueva.")
-        except OSError:
-            log.warning("No se pudo reponer el guid.dat cuarentenado",
-                        exc_info=True)
+            return  # sesión larga sin archivos nuevos: no reponer (el upload manda)
+        for info in entries:
+            target = Path(info["target"])
+            try:
+                if target.is_file():
+                    continue  # el juego ya creó/dejó su archivo: no se toca
+            except OSError:
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = Path(info["file"])
+                if src.is_file():
+                    shutil.copy2(src, target)
+                    if info.get("kind") == "stat":
+                        self._log("Tu save anterior fue repuesto: la sesión "
+                                  "no llegó a crear uno nuevo.")
+                    else:
+                        self._log("Tu identidad anterior fue repuesta: la "
+                                  "sesión no llegó a crear una nueva.")
+            except OSError:
+                log.warning("No se pudo reponer el archivo cuarentenado",
+                            exc_info=True)
 
     def _launch_game(self) -> bool:
         """Abre iw4x.exe conectando al server elegido. False si no se pudo."""
         # El nick del ranking es OBLIGATORIO: sin displayName no se lanza.
         if not (self.display_name or "").strip():
             self._failed(self.NO_NICK_MSG, retry=False)
-            self._maybe_restore_quarantined_guid()
+            self._maybe_restore_quarantined_files()
             return False
 
         cmd = build_game_args(
@@ -533,7 +609,7 @@ class GameFlow:
                 "Revísalo en Ajustes.",
                 retry=False,
             )
-            self._maybe_restore_quarantined_guid()
+            self._maybe_restore_quarantined_files()
             return False
 
         self._log(f"Abriendo juego… {subprocess.list2cmdline(cmd[1:])}")
@@ -543,7 +619,7 @@ class GameFlow:
             return True
         except OSError as exc:
             self._failed(f"No se pudo abrir el juego: {exc}", retry=True)
-            self._maybe_restore_quarantined_guid()
+            self._maybe_restore_quarantined_files()
             return False
 
     def _prepare_session(self) -> None:
@@ -569,6 +645,12 @@ class GameFlow:
             self._log("No se pudo verificar tu identidad en la nube; "
                       "se conserva la identidad local de esta PC.")
             return
+        # Aislamiento del SAVE DE PROGRESIÓN (iw4x.stat + mod stats): ANTES
+        # del sync — así el sync JAMÁS sube a esta cuenta el progreso ajeno
+        # que se acaba de apartar (caso unlockstats de admin heredado por
+        # pepe). Con el manifiesto caído (red) no hay decisión segura: se
+        # conserva TODO lo local (misma filosofía resiliente).
+        self._apply_stat_identity(manifest)
         try:
             backup_root = (app_data_dir() / "save-backups"
                            / time.strftime("%Y%m%d-%H%M%S"))

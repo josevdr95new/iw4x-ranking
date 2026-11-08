@@ -1608,7 +1608,7 @@ def phase_guid_quarantine_pipeline() -> None:
         guid.parent.mkdir(parents=True)
         guid.write_bytes(b"GUID-VIEJO-DE-OTRO-JUGADOR")
         return {"tmp": tmp, "gd": gd, "exe": exe, "guid": guid,
-                "qroot": tmp / "quarantine"}
+                "qroot": tmp / "quarantine", "sqroot": tmp / "stat-quarantine"}
 
     class FakeProc:
         """Doble del Popen del juego: PID falso, NUNCA un juego real."""
@@ -1639,7 +1639,8 @@ def phase_guid_quarantine_pipeline() -> None:
                         display_name="El Tester", cloud_save=True,
                         game_dir=str(esc["gd"]), user_id="u-777",
                         guid_path=str(esc["guid"]),
-                        quarantine_root_path=esc["qroot"])
+                        quarantine_root_path=esc["qroot"],
+                        stat_quarantine_root_path=esc["sqroot"])
         orig_popen = gf.subprocess.Popen
         gf.subprocess.Popen = (
             lambda cmd, **kw: FakeProc(cmd, create_guid, esc["guid"]))
@@ -1772,7 +1773,7 @@ def phase_guid_ownership() -> None:
         os.utime(gd / "players" / "iw4x.stat", (pasado, pasado))
         os.utime(guid, (pasado, pasado))
         return {"tmp": tmp, "gd": gd, "exe": exe, "guid": guid,
-                "qroot": tmp / "quarantine"}
+                "qroot": tmp / "quarantine", "sqroot": tmp / "stat-quarantine"}
 
     class FakeProc:
         """Doble del Popen del juego: PID falso, crea identidad FRESCA."""
@@ -1800,7 +1801,8 @@ def phase_guid_ownership() -> None:
                         display_name="El Tester", cloud_save=True,
                         game_dir=str(esc["gd"]), user_id="u-888",
                         guid_path=str(esc["guid"]),
-                        quarantine_root_path=esc["qroot"])
+                        quarantine_root_path=esc["qroot"],
+                        stat_quarantine_root_path=esc["sqroot"])
         orig_popen = gf.subprocess.Popen
         gf.subprocess.Popen = lambda cmd, **kw: FakeProc(cmd, esc["guid"])
         try:
@@ -1908,6 +1910,136 @@ def phase_guid_ownership() -> None:
           "la actual" in logs_c, str(logs_c))
     check("propiedad C: sin log de robo",
           not any("Ese guid.dat" in x for x in logs_c), str(logs_c))
+
+
+def phase_stat_isolation_pipeline() -> None:
+    """Fase lógica: aislamiento del SAVE DE PROGRESIÓN (fix unlockstats).
+
+    Caso REAL del dueño: admin ejecutó ``unlockstats`` (todo al máximo) y
+    pepe quedó al máximo también — ``players\\iw4x.stat`` es UN archivo por
+    PC y el aislamiento antiguo solo cubría guid.dat.
+
+    - A: cuenta NUEVA (nube sin stat) + local existente (el de admin) →
+      cuarentena en stat-quarantine INYECTADA + log exacto + el juego crea
+      stat FRESCO y el upload post-sesión sube ESE (jamás el de admin, ni
+      en el pre-launch ni después).
+    - B: la nube SÍ trae el stat de la cuenta → restore: el sync lo baja
+      sobre el local SIN cuarentena ni log (lo de tu nube es tuyo).
+
+    Rutas SIEMPRE inyectadas (game_dir y cuarentenas bajo %TEMP%: NUNCA el
+    save real ni %APPDATA%/%LOCALAPPDATA% reales).
+    """
+    print("\n=== Fase aislamiento del save de progresión → stat-quarantine (stubs) ===")
+    import base64
+    import hashlib
+    import os
+    import tempfile
+    from datetime import datetime, timezone
+
+    import game_flow as gf
+
+    ADMIN_STAT = b"STAT-DE-ADMIN-UNLOCK"
+    FRESH_STAT = b"STAT-FRESCO-NIVEL-1"
+    LOG_APARADO = ("Save de progresión de otro usuario apartado — empiezas "
+                   "desde cero (primera vez en esta PC)")
+
+    def make_escenario(name: str) -> Dict[str, Path]:
+        tmp = Path(tempfile.mkdtemp(prefix=f"iw4x-stat-{name}-"))
+        gd = tmp / "gd"
+        (gd / "players").mkdir(parents=True)
+        (gd / "players" / "iw4x.stat").write_bytes(ADMIN_STAT)
+        exe = tmp / "iw4x.exe"
+        exe.write_bytes(b"MZ-fake")  # existe: pasa el guard de _launch_game
+        guid = tmp / "localapp" / "iw4x" / "guid.dat"
+        guid.parent.mkdir(parents=True)
+        guid.write_bytes(b"GUID-LOCAL")
+        return {"tmp": tmp, "gd": gd, "exe": exe, "guid": guid,
+                "qroot": tmp / "quarantine", "sqroot": tmp / "stat-quarantine"}
+
+    class FakeProc:
+        """Doble del Popen del juego: identidad NUEVA + save FRESCO."""
+
+        def __init__(self, cmd, gd: Path, guid_path: Path):
+            self.pid = 424900
+            self.cmd = cmd
+            self._exited = False
+            guid_path.write_bytes(b"GUID-FRESCO")  # el juego crea identidad
+            (gd / "players" / "iw4x.stat").write_bytes(FRESH_STAT)  # y save
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self._exited = True
+
+    def correr(esc: Dict[str, Path], stub: StubApi):
+        events: List[Dict[str, Any]] = []
+        flow = GameFlow(stub, "tok", str(esc["exe"]), "127.0.0.1:28961",
+                        events.append, already_linked=False, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        game_dir=str(esc["gd"]), user_id="u-555",
+                        guid_path=str(esc["guid"]),
+                        quarantine_root_path=esc["qroot"],
+                        stat_quarantine_root_path=esc["sqroot"])
+        orig_popen = gf.subprocess.Popen
+        gf.subprocess.Popen = (
+            lambda cmd, **kw: FakeProc(cmd, esc["gd"], esc["guid"]))
+        try:
+            flow.run()
+        finally:
+            gf.subprocess.Popen = orig_popen
+        logs = [str(e.get("msg", "")) for e in events if e.get("t") == "log"]
+        return stub, events, logs
+
+    # --- A: nube SIN stat + local de admin → cuarentena + save fresco --------
+    esc_a = make_escenario("pepe")
+    stub_a = StubApi()  # nube VACÍA: la cuenta de pepe aún no tiene nada
+    stub_a, evs_a, logs_a = correr(esc_a, stub_a)
+    quars = list(esc_a["sqroot"].glob("u-555-*/iw4x.stat"))
+    check("stat A: el iw4x.stat de admin quedó apartado en stat-quarantine "
+          "(<userId>-<ts>)",
+          len(quars) == 1 and quars[0].read_bytes() == ADMIN_STAT,
+          str(list(esc_a["sqroot"].glob("*"))))
+    check("stat A: log exacto al apartar el save ajeno",
+          LOG_APARADO in logs_a, str(logs_a))
+    check("stat A: el upload post-sesión sube el stat FRESCO del juego "
+          "(jamás el de admin)",
+          stub_a.save_upload_calls >= 1
+          and stub_a._save_store.get("iw4x.stat") == FRESH_STAT,
+          repr(stub_a._save_store.get("iw4x.stat"))[:50])
+    check("stat A: flujo en éxito y SIN link/start (flujo simplificado)",
+          any(e["t"] == "success" for e in evs_a)
+          and stub_a.link_start_calls == 0, str([e["t"] for e in evs_a]))
+
+    # --- B: la nube trae el stat de la cuenta → restore, sin fricción --------
+    esc_b = make_escenario("restore")
+    stub_b = StubApi()
+    propio = b"STAT-DE-PEPE"
+    stub_b.save_upload("tok", [{
+        "path": "iw4x.stat",
+        "dataBase64": base64.b64encode(propio).decode(),
+        "sha256": hashlib.sha256(propio).hexdigest(),
+    }])
+    # Antefecha el local para que el server (2026-11-07T11:00Z) sea más
+    # nuevo → DOWNLOAD → el sync restaura el stat de la cuenta.
+    pasado = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc).timestamp()
+    os.utime(esc_b["gd"] / "players" / "iw4x.stat", (pasado, pasado))
+    os.utime(esc_b["guid"], (pasado, pasado))
+    stub_b, evs_b, logs_b = correr(esc_b, stub_b)
+    check("stat B: restore SIN cuarentena (lo de tu nube es tuyo)",
+          not list(esc_b["sqroot"].glob("*")),
+          str(list(esc_b["sqroot"].glob("*"))))
+    check("stat B: sin log de apartado",
+          LOG_APARADO not in logs_b, str(logs_b))
+    check("stat B: el sync restauró el stat de la cuenta (download)",
+          "Progreso listo (nivel y armas de tu cuenta) ✓" in logs_b,
+          str(logs_b))
+    check("stat B: flujo en éxito",
+          any(e["t"] == "success" for e in evs_b), str([e["t"] for e in evs_b]))
 
 
 def phase_hero_stop_button() -> None:
@@ -3034,6 +3166,7 @@ def main() -> int:
     phase_flow_logic()
     phase_guid_quarantine_pipeline()
     phase_guid_ownership()
+    phase_stat_isolation_pipeline()
     phase_hero_stop_button()
     phase_exit_hook()
     phase_autosave_close()
