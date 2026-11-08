@@ -56,6 +56,18 @@ export const SKILL = {
   STREAK_BONUS_PER: 2,
   /** Cap de racha que suma bonus (bestStreak ≥ 20 no sigue sumando). */
   STREAK_CAP: 20,
+  /**
+   * Bonus ELO de FIN DE PARTIDA (top-3 de kills entre HUMANOS). Se aplica como
+   * delta directo sobre el ELO base vía MatchBonusEvent (ver skill.service).
+   * Condiciones anti-abuso: partida ≥3 min de log, ≥2 humanos participantes,
+   * ≥5 kills para calificar, bots excluidos.
+   */
+  MATCH_BONUS_MIN_KILLS: 5,
+  MATCH_BONUS_MIN_HUMANS: 2,
+  MATCH_BONUS_MIN_DURATION_SEC: 180,
+  MATCH_BONUS_FIRST: 15,
+  MATCH_BONUS_SECOND: 10,
+  MATCH_BONUS_THIRD: 5,
 } as const;
 
 export function clampElo(elo: number): number {
@@ -112,6 +124,44 @@ export function killEloDelta(attackerElo: number, victimElo: number, event: EloE
 export function streakBonus(bestStreak: number): number {
   const streak = Math.min(Math.max(0, Math.trunc(bestStreak)), SKILL.STREAK_CAP);
   return streak * SKILL.STREAK_BONUS_PER;
+}
+
+/**
+ * FACTOR DE DECAY ELO CONTRA BOTS (anti-farmeo).
+ *
+ * Los bots son rivales fijos (~1000): sin decay, farmear bots daría ELO
+ * constante (~20/kill) y LEYENDA caería en pocas partidas. El decay escala con
+ * el skill ACTUAL del humano (el farmeo pierde valor a medida que subes):
+ *
+ *   botFactor(skill) = 1.0                                        si skill ≤ soft (1300)
+ *                    = 1 − (1 − min) × (skill − soft)/(hard − soft)  si soft < skill < hard
+ *                    = min (0.15)                                 si skill ≥ hard (2400)
+ *
+ * Env-configurable: BOT_ELO_DECAY_MIN / BOT_ELO_DECAY_SOFT / BOT_ELO_DECAY_HARD.
+ * Ejemplos (defaults): 1200 → 1.00 (~+20/kill) · 1800 → 0.614 (~+12) ·
+ * 2000 → 0.459 (~+9) · 2400 → 0.15 (~+3).
+ *
+ * Aplicación (skill.service): cuando el oponente del kill es un BOT, el delta
+ * del evento se multiplica por botFactor(skill VIGENTE del humano) y el bot
+ * gana/pierde ESE MISMO delta decayado (zero-sum). Contra HUMANOS el decay NO
+ * aplica (factor 1, ELO pleno solo jugando contra personas). El recompute:skill
+ * lo reproduce NATURALMENTE: el factor se calcula con el skill en memoria del
+ * momento del evento, y el reprocess secuencial reconstruye los mismos skills
+ * intermedios → mismos factores → mismo resultado.
+ *
+ * Determinista: depende solo de (skill vigente, soft, hard, min) — sin tiempo.
+ */
+export interface BotDecayOptions {
+  min: number;
+  soft: number;
+  hard: number;
+}
+
+export function botDecayFactor(skill: number, options: BotDecayOptions): number {
+  if (skill <= options.soft) return 1;
+  if (skill >= options.hard) return options.min;
+  const progress = (skill - options.soft) / (options.hard - options.soft);
+  return 1 - (1 - options.min) * progress;
 }
 
 /** Valor expuesto: ELO base (clampeado) + bonus de racha. */

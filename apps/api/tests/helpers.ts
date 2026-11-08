@@ -10,6 +10,7 @@ export function req(): request.Test {
 
 /** Borra todas las filas respetando las FKs. */
 export async function resetDb(): Promise<void> {
+  await prisma.matchBonusEvent.deleteMany();
   await prisma.killEvent.deleteMany();
   await prisma.session.deleteMany();
   await prisma.playerAlias.deleteMany();

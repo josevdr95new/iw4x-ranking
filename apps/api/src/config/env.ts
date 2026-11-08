@@ -89,6 +89,13 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
   /** Raíz de almacenamiento del cloud save por cuenta (default: <repo>/apps/api/storage/profiles). */
   PROFILE_STORAGE_DIR: z.string().min(1).optional(),
+  // ── Decay ELO contra BOTS (anti-farmeo: los bots son rivales fijos ~1000) ──
+  /** Factor mínimo de decay (skill ≥ BOT_ELO_DECAY_HARD → este factor). Default 0.15. */
+  BOT_ELO_DECAY_MIN: z.coerce.number().min(0).max(1).default(0.15),
+  /** Skill donde el decay EMPIEZA (≤ soft → factor 1.0, ELO pleno). Default 1300. */
+  BOT_ELO_DECAY_SOFT: z.coerce.number().int().min(1).default(1300),
+  /** Skill donde el decay llega al mínimo (≥ hard → factor min). Default 2400. */
+  BOT_ELO_DECAY_HARD: z.coerce.number().int().min(1).default(2400),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -154,6 +161,9 @@ export const env = {
   // Cloud save: rutas relativas se resuelven SIEMPRE contra la raíz del repo
   // (determinista, independiente del cwd del proceso).
   profileStorageDir: resolve(repoRoot, raw.PROFILE_STORAGE_DIR ?? resolve(repoRoot, 'apps', 'api', 'storage', 'profiles')),
+  botEloDecayMin: raw.BOT_ELO_DECAY_MIN,
+  botEloDecaySoft: raw.BOT_ELO_DECAY_SOFT,
+  botEloDecayHard: raw.BOT_ELO_DECAY_HARD,
 } as const;
 
 export type Env = typeof env;

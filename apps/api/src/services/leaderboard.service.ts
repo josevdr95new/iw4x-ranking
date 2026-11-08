@@ -3,7 +3,8 @@ import { prisma } from '../lib/prisma.js';
 import { parseWith } from '../middleware/validate.js';
 import { leaderboardQuerySchema } from '../dto/leaderboard.dto.js';
 import type { LeaderboardQuery } from '../dto/leaderboard.dto.js';
-import { getGlobalRanksByGuid } from './ranking.service.js';
+import { getGlobalRanksByGuid, getSkillGlobalRanksByGuid } from './ranking.service.js';
+import { MEDAL_LEGEND_MIN_SKILL, medalFor, type Medal } from '../lib/medals.js';
 
 export interface LeaderboardEntry {
   /** Posición GLOBAL (kills desc, empate name asc) — independiente de búsqueda/filtros/paginación. */
@@ -28,6 +29,8 @@ export interface LeaderboardEntry {
   lastConnection: string | null;
   /** true si el GUID tiene una cuenta web vinculada. */
   linked: boolean;
+  /** Medalla ELO derivada del skill actual (ver docs/API.md "Medallas ELO"). */
+  medal: Medal;
 }
 
 export interface LeaderboardResponse {
@@ -71,6 +74,11 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
   // búsqueda/filtros reduzcan el resultado o se esté en una página intermedia.
   const globalRanks = await getGlobalRanksByGuid(rows.map((row) => row.guid));
 
+  // globalRank por SKILL solo hace falta para las LEYENDAS (tier 8, skill ≥
+  // 2050): una sola query para los guids legendarios de la página (eficiente).
+  const legendGuids = rows.filter((row) => row.skill >= MEDAL_LEGEND_MIN_SKILL).map((row) => row.guid);
+  const skillRanks = await getSkillGlobalRanksByGuid(legendGuids);
+
   return {
     page: q.page,
     pageSize: q.pageSize,
@@ -92,6 +100,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       level: player.saveLevel ?? null,
       lastConnection: player.lastConnection?.toISOString() ?? null,
       linked: player.accountLinks.length > 0,
+      medal: medalFor(player.skill, skillRanks.get(player.guid) ?? null),
     })),
   };
 }

@@ -199,6 +199,36 @@ model KillEvent {
   @@index([skillProcessed, timeEpoch])
 }
 
+/// Bonus ELO de FIN DE PARTIDA (top-3 de kills entre humanos): 1º +15, 2º +10,
+/// 3º +5 (constantes MATCH_BONUS en src/services/skill/elo.ts). Una fila por
+/// jugador premiado y partida. Lo crea la ingesta del games_mp.log al detectar
+/// ShutdownGame (partida ≥3 min de log, ≥2 humanos participantes, ≥5 kills para
+/// calificar, bots excluidos). Consume `processSkillUpdates` igual que los
+/// KillEvent (mismo flag + orden cronológico) → `npm run recompute:skill`
+/// reproduce el bonus: mismo set de partidas → mismos eventos → mismo skill.
+model MatchBonusEvent {
+  id         Int     @id @default(autoincrement())
+  guid       String // premiado (humano; formato Player.guid decimal)
+  position   Int // 1 | 2 | 3
+  delta      Float // ELO directo aplicado (+15/+10/+5)
+  killsInMatch Int // kills del premiado en esa partida (≥5 para calificar)
+  humansInMatch Int // humanos que participaron en la partida (≥2 requeridos)
+  matchDurationSec Int // duración de la partida según prefijos de tiempo del log (≥180s)
+  map        String?
+  gametype   String?
+  server     String?
+  time       DateTime
+  timeEpoch  Int // epoch en segundos (mismo criterio que KillEvent)
+  // Flag de skill: mismo contrato que KillEvent.skillProcessed. Se procesa en
+  // el MISMO stream cronológico (timeEpoch ASC, id ASC): el bonus de una
+  // partida siempre ordena DESPUÉS de los kills de su partida (se crea al
+  // detectar ShutdownGame) y ANTES de los kills de la partida siguiente.
+  skillProcessed Boolean @default(false)
+
+  @@index([guid, timeEpoch])
+  @@index([skillProcessed, timeEpoch])
+}
+
 /// Penalidad de MODERACIÓN NATIVA (rcon IW4x, sin IW4MAdmin):
 /// warn/kick/tempban/ban/unban emitidos desde el panel o el enforcer.
 /// El guid del ofensor es decimal (formato Player.guid) o "botN" para bots

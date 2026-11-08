@@ -3,7 +3,8 @@ import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { clampInt, GUID_PATTERN } from '../lib/validation.js';
 import { weaponDisplayName } from '../lib/weapons.js';
-import { computeDefaultRank } from './ranking.service.js';
+import { MEDAL_LEGEND_MIN_SKILL, medalFor, type Medal } from '../lib/medals.js';
+import { computeDefaultRank, computeSkillGlobalRank } from './ranking.service.js';
 import { getPlayerAliases, type PlayerAliasDto } from './alias.service.js';
 import { MELEE_MOD } from './sync/gamelog.reader.js';
 
@@ -86,6 +87,12 @@ export interface PlayerProfileDto {
    * actuales todo jugador sincronizado tiene rank).
    */
   rank: number | null;
+  /**
+   * Medalla ELO derivada del skill ACTUAL (sin persistencia): tier 1-8, nombre,
+   * assetId, estrellas (1-5; null en LEYENDA) y, solo en LEYENDA, la posición
+   * global por skill + eliteTop12 (rank ≤ 12). Ver docs/API.md "Medallas ELO".
+   */
+  medal: Medal;
   recentEvents: KillEventDto[];
   byServer: Array<{ server: string; kills: number; deaths: number }>;
   /**
@@ -170,6 +177,14 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   const guid = assertValidGuid(guidRaw);
   const player = await getPlayerOrThrow(guid);
   const rank = await computeDefaultRank(player.kills, player.name);
+
+  // globalRank por SKILL solo hace falta si el jugador es LEYENDA (tier 8):
+  // medalla y posición comparten el mismo número expuesto (coherencia).
+  const skillRank =
+    player.skill >= MEDAL_LEGEND_MIN_SKILL
+      ? await computeSkillGlobalRank(player)
+      : null;
+  const medal = medalFor(player.skill, skillRank);
 
   const events = await prisma.killEvent.findMany({
     where: { OR: [{ originGuid: guid }, { targetGuid: guid }] },
@@ -257,6 +272,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   return {
     player: toPlayerDto(player, favoriteWeapon, favoriteMap, knifeKills, knifeDeaths),
     rank,
+    medal,
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),
     aliases,

@@ -1,33 +1,46 @@
 import { prisma } from '../../lib/prisma.js';
-import { SKILL, clampAndBonus, clampElo, killEloDelta, round2, streakBonus } from './elo.js';
+import { env } from '../../config/env.js';
+import { isBotGuid } from '../alias.service.js';
+import { SKILL, botDecayFactor, clampAndBonus, clampElo, killEloDelta, round2, streakBonus } from './elo.js';
 
 /**
- * Procesamiento INCREMENTAL del skill (ELO) sobre los KillEvents:
+ * Procesamiento INCREMENTAL del skill (ELO) sobre DOS streams de eventos:
+ *  - KillEvent (kills por evento: delta simétrico atacante↔víctima).
+ *  - MatchBonusEvent (bonus de fin de partida: top-3 de kills entre humanos,
+ *    delta directo al premiado; los crea la ingesta del log en ShutdownGame).
+ *
  *  - Solo toma eventos con `skillProcessed = false` (los nuevos de cada sync).
- *  - Orden de procesamiento: timeEpoch ASC, id ASC (determinista; el desempate
- *    por id soporta eventos cronológicos duplicados).
- *  - Mantiene el ELO en memoria POR LOTE y lo persiste (con el flag) en una
+ *  - Orden de procesamiento: (timeEpoch ASC, id ASC) sobre el STREAM COMBINADO
+ *    (determinista; el desempate por id soporta eventos cronológicos
+ *    duplicados). El bonus de una partida siempre ordena DESPUÉS de los kills
+ *    de su partida (se crea al detectar ShutdownGame, id mayor) y ANTES de los
+ *    kills de la partida siguiente → el merge respeta la cronología real.
+ *  - Mantiene el ELO en memoria POR LOTE y lo persiste (con los flags) en una
  *    transacción por lote → si el proceso muere a mitad, el lote pendiente se
  *    re-procesa entero (nada queda procesado sin skill aplicado).
  *  - Al final inicializa a 1000 a los players que no aparecen en ningún evento.
  *
  * RECOMPUTE FROM SCRATCH (bootstrap): como los eventos quedan con
  * `skillProcessed = false` por default, tras la migración el primer sync
- * procesa TODOS los KillEvent existentes en orden cronológico. Para forzarlo
- * de nuevo está `npm run recompute:skill` (src/scripts/recompute-skill.ts).
+ * procesa TODOS los eventos existentes en orden cronológico. Para forzarlo
+ * de nuevo está `npm run recompute:skill` (src/scripts/recompute-skill.ts):
+ * desmarca KillEvent Y MatchBonusEvent, reinicia skillElo y reproduce el
+ * histórico completo (kills + bonus) → mismo skill final.
  */
 
 const SKILL_EVENT_BATCH = 2_000;
+/** Los bonus son ~3 por partida: un lote pequeño basta. */
+const MATCH_BONUS_BATCH = 500;
 
 export interface SkillProcessResult {
-  /** Eventos que se marcaron como procesados (incluye no-kill y teamkill). */
+  /** Eventos que se marcaron como procesados (incluye no-kill, teamkill y bonus). */
   processed: number;
   batches: number;
   /** Players inicializados a 1000 (no participan de ningún evento). */
   initialized: number;
 }
 
-interface EventRow {
+interface KillEventRow {
   id: number;
   originGuid: string;
   targetGuid: string | null;
@@ -38,32 +51,74 @@ interface EventRow {
   damage: number;
 }
 
+interface MatchBonusEventRow {
+  id: number;
+  guid: string;
+  delta: number;
+}
+
+/** Evento unificado del stream de skill, con su clave de orden (timeEpoch, id). */
+type SkillEvent =
+  | ({ kind: 'kill'; timeEpoch: number } & KillEventRow)
+  | ({ kind: 'match-bonus'; timeEpoch: number } & MatchBonusEventRow);
+
+function sortKey(event: SkillEvent): [number, number] {
+  return [event.timeEpoch, event.id];
+}
+
+function compareEvents(a: SkillEvent, b: SkillEvent): number {
+  const [aEpoch, aId] = sortKey(a);
+  const [bEpoch, bId] = sortKey(b);
+  return aEpoch - bEpoch || aId - bId;
+}
+
 export async function processSkillUpdates(): Promise<SkillProcessResult> {
   let processed = 0;
   let batches = 0;
 
   for (;;) {
-    const batch = await prisma.killEvent.findMany({
-      where: { skillProcessed: false },
-      orderBy: [{ timeEpoch: 'asc' }, { id: 'asc' }],
-      take: SKILL_EVENT_BATCH,
-      select: {
-        id: true,
-        originGuid: true,
-        targetGuid: true,
-        isKill: true,
-        isTeamkill: true,
-        headshot: true,
-        hitloc: true,
-        damage: true,
-      },
-    });
-    if (batch.length === 0) break;
+    // Dos streams pendientes, cada uno ordenado cronológicamente. El lote es el
+    // STREAM COMBINADO ordenado por (timeEpoch, id): el bonus de una partida
+    // siempre ordena DESPUÉS de los kills de su partida (se crea al detectar
+    // ShutdownGame, id mayor en el mismo epoch de ingesta) y ANTES de los kills
+    // de la partida siguiente. Sin filtros: la matemática ELO aplica clamp y
+    // redondeo INLINE por evento, así el resultado es independiente de por
+    // dónde caiga el límite de lote (mismo invariante que los KillEvent).
+    const [kills, bonuses] = await Promise.all([
+      prisma.killEvent.findMany({
+        where: { skillProcessed: false },
+        orderBy: [{ timeEpoch: 'asc' }, { id: 'asc' }],
+        take: SKILL_EVENT_BATCH,
+        select: {
+          id: true,
+          timeEpoch: true,
+          originGuid: true,
+          targetGuid: true,
+          isKill: true,
+          isTeamkill: true,
+          headshot: true,
+          hitloc: true,
+          damage: true,
+        },
+      }),
+      prisma.matchBonusEvent.findMany({
+        where: { skillProcessed: false },
+        orderBy: [{ timeEpoch: 'asc' }, { id: 'asc' }],
+        take: MATCH_BONUS_BATCH,
+        select: { id: true, timeEpoch: true, guid: true, delta: true },
+      }),
+    ]);
+    if (kills.length === 0 && bonuses.length === 0) break;
     batches += 1;
 
-    await processBatch(batch as EventRow[]);
+    const batch: SkillEvent[] = [
+      ...kills.map((event) => ({ kind: 'kill' as const, ...event })),
+      ...bonuses.map((event) => ({ kind: 'match-bonus' as const, ...event })),
+    ].sort(compareEvents);
+
+    await processBatch(batch);
     processed += batch.length;
-    if (batch.length < SKILL_EVENT_BATCH) break;
+    if (kills.length < SKILL_EVENT_BATCH && bonuses.length < MATCH_BONUS_BATCH) break;
   }
 
   // Players que NO participan de ningún evento: skill inicial 1000.
@@ -75,11 +130,15 @@ export async function processSkillUpdates(): Promise<SkillProcessResult> {
   return { processed, batches, initialized: initialized.count };
 }
 
-async function processBatch(batch: EventRow[]): Promise<void> {
+async function processBatch(batch: SkillEvent[]): Promise<void> {
   const guids = new Set<string>();
   for (const event of batch) {
-    guids.add(event.originGuid);
-    if (event.targetGuid !== null && event.targetGuid !== '') guids.add(event.targetGuid);
+    if (event.kind === 'kill') {
+      guids.add(event.originGuid);
+      if (event.targetGuid !== null && event.targetGuid !== '') guids.add(event.targetGuid);
+    } else {
+      guids.add(event.guid);
+    }
   }
 
   const rows = await prisma.player.findMany({
@@ -100,6 +159,12 @@ async function processBatch(batch: EventRow[]): Promise<void> {
   // independientemente de cómo caigan los límites de lote (partiduras de lote distintos → mismo skill).
   const clampRound = (value: number): number => round2(clampElo(value));
   for (const event of batch) {
+    if (event.kind === 'match-bonus') {
+      // Bonus de fin de partida: delta DIRECTO al premiado (top-3 de kills).
+      elo.set(event.guid, clampRound((elo.get(event.guid) ?? SKILL.START) + event.delta));
+      continue;
+    }
+
     if (!event.isKill) continue; // evento no letal: no mueve ELO (solo se marca procesado)
 
     const victimGuid = event.targetGuid === '' ? null : event.targetGuid;
@@ -119,19 +184,39 @@ async function processBatch(batch: EventRow[]): Promise<void> {
     }
 
     const victimElo = elo.get(victimGuid) ?? SKILL.START;
-    const delta = killEloDelta(originElo, victimElo, {
+    let delta = killEloDelta(originElo, victimElo, {
       isKill: event.isKill,
       isTeamkill: event.isTeamkill,
       headshot: event.headshot,
       hitloc: event.hitloc,
       damage: event.damage,
     });
+
+    // DECAY CONTRA BOTS (anti-farmeo): si UNO de los dos lados del kill es un
+    // bot, el delta del evento se escala por botFactor(skill VIGENTE del
+    // HUMANO) — con factor 1 por debajo de 1300, lineal hasta 0.15 en 2400+
+    // (env BOT_ELO_DECAY_*). El bot gana/pierde el MISMO delta decayado
+    // (zero-sum). Contra HUMANOS el decay NO aplica: ELO pleno solo jugando
+    // contra personas. Bot-vs-bot tampoco (no hay humano que farmee).
+    // El factor usa el skill EN MEMORIA del momento del evento → el recompute
+    // secuencial (recompute:skill) reproduce el decay naturalmente.
+    const originIsBot = isBotGuid(event.originGuid);
+    const victimIsBot = isBotGuid(victimGuid);
+    if (originIsBot !== victimIsBot) {
+      const humanElo = elo.get(originIsBot ? victimGuid : event.originGuid) ?? SKILL.START;
+      delta *= botDecayFactor(humanElo, {
+        min: env.botEloDecayMin,
+        soft: env.botEloDecaySoft,
+        hard: env.botEloDecayHard,
+      });
+    }
+
     elo.set(event.originGuid, clampRound(originElo + delta));
     elo.set(victimGuid, clampRound(victimElo - delta));
   }
 
-  // Persistencia atómica del lote: skill + flag de eventos.
-  const operations: Array<ReturnType<typeof prisma.player.create | typeof prisma.player.update | typeof prisma.killEvent.updateMany>> = [];
+  // Persistencia atómica del lote: skill + flags de eventos (por tipo).
+  const operations: Array<ReturnType<typeof prisma.player.create | typeof prisma.player.update | typeof prisma.killEvent.updateMany | typeof prisma.matchBonusEvent.updateMany>> = [];
   for (const guid of guids) {
     const row = rowByGuid.get(guid);
     const newElo = clampRound(elo.get(guid) ?? SKILL.START);
@@ -151,11 +236,23 @@ async function processBatch(batch: EventRow[]): Promise<void> {
       }),
     );
   }
-  operations.push(
-    prisma.killEvent.updateMany({
-      where: { id: { in: batch.map((event) => event.id) } },
-      data: { skillProcessed: true },
-    }),
-  );
+  const batchKillIds = batch.filter((event): event is Extract<SkillEvent, { kind: 'kill' }> => event.kind === 'kill').map((event) => event.id);
+  if (batchKillIds.length > 0) {
+    operations.push(
+      prisma.killEvent.updateMany({
+        where: { id: { in: batchKillIds } },
+        data: { skillProcessed: true },
+      }),
+    );
+  }
+  const batchBonusIds = batch.filter((event) => event.kind === 'match-bonus').map((event) => event.id);
+  if (batchBonusIds.length > 0) {
+    operations.push(
+      prisma.matchBonusEvent.updateMany({
+        where: { id: { in: batchBonusIds } },
+        data: { skillProcessed: true },
+      }),
+    );
+  }
   await prisma.$transaction(operations);
 }

@@ -5,6 +5,7 @@ import { errMessage } from '../../lib/errors.js';
 import { isBotGuid, upsertPlayerAlias } from '../alias.service.js';
 import { reportIdentityAlert } from '../identity.service.js';
 import { tryAutoLinkBySession } from '../play-session.service.js';
+import { awardMatchBonus, type MatchPlayerTally } from '../skill/match-bonus.js';
 
 /**
  * Lector del games_mp.log del servidor dedicado IW4x.
@@ -132,6 +133,19 @@ export type GameLogEvent =
 
 /** Prefijo de tiempo de juego al inicio de cada línea: "  0:04 ", "12:03 ", etc. */
 const TIME_PREFIX = /^\s*\d{1,4}:\d{2}\s?/;
+
+/**
+ * Segundos del prefijo de tiempo de juego de UNA línea ("  0:04 K;..." → 4,
+ * "12:03 ..." → 723). Es el reloj DE PARTIDA del engine (resetea a 0:00 en cada
+ * InitGame), no hora real: la diferencia entre el prefijo del InitGame y el del
+ * ShutdownGame es la DURACIÓN DE LA PARTIDA según el log (la usa el bonus
+ * top-3 para exigir partidas ≥3 min). null si la línea no trae prefijo válido.
+ */
+export function parseLogTimeSeconds(rawLine: string): number | null {
+  const match = /^\s*(\d{1,4}):(\d{2})\s?/.exec(rawLine);
+  if (match === null) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
 
 export const HEADSHOT_HITLOCS = new Set(['head', 'helmet']);
 
@@ -343,6 +357,7 @@ export interface GameLogIngestResult {
   ok: boolean;
   playersSynced: number; // upserts de Player (conexiones/kills/deaths/daño)
   killEventsSynced: number; // KillEvent insertados
+  matchBonusEventsSynced: number; // MatchBonusEvent insertados (bonus top-3 al ShutdownGame)
   aliasesUpserted: number; // apariciones de alias (J + K) aplicadas a PlayerAlias
   identityAlertsUpserted: number; // alertas de identidad (impersonación de nick) creadas/actualizadas
   autoLinksSynced: number; // AccountLinks creados por sesión activa del launcher (auto-link)
@@ -505,6 +520,7 @@ export async function ingestGameLog(path: string, server: string | null): Promis
     ok: false,
     playersSynced: 0,
     killEventsSynced: 0,
+    matchBonusEventsSynced: 0,
     aliasesUpserted: 0,
     identityAlertsUpserted: 0,
     autoLinksSynced: 0,
@@ -543,6 +559,20 @@ export async function ingestGameLog(path: string, server: string | null): Promis
   const now = new Date();
   const touched = new Set<string>(); // guids que requieren recompute de derivados
 
+  // ── Estado de la PARTIDA en curso (para el bonus top-3 de fin de partida) ──
+  // Entre InitGame y ShutdownGame: kills/deaths/nick por HUMANO (el tally NUNCA
+  // guarda bots) + el segundo de log del InitGame (duración de la partida).
+  // El ShutdownGame premia (awardMatchBonus) y resetea el estado.
+  let matchStartSec: number | null = null;
+  let matchTally = new Map<string, MatchPlayerTally>();
+  /** Registra actividad humana en la partida (J/K): crea fila y refresca el nick. */
+  const noteHuman = (guid: string, name: string | null): void => {
+    if (isBotGuid(guid)) return;
+    const row = matchTally.get(guid) ?? { kills: 0, deaths: 0, name: name ?? '' };
+    if (name) row.name = name;
+    matchTally.set(guid, row);
+  };
+
   for (const line of chunk.lines) {
     if (line.trim() === '') continue;
     let event: GameLogEvent | null | 'ignored';
@@ -566,14 +596,47 @@ export async function ingestGameLog(path: string, server: string | null): Promis
       if (event.kind === 'initgame') {
         currentMap = event.map;
         currentGametype = event.gametype;
+        // Nueva partida: reset del tally y marca del segundo de log de inicio
+        // (el InitGame define el origen de la duración para el bonus top-3).
+        matchStartSec = parseLogTimeSeconds(line);
+        matchTally = new Map();
       } else if (event.kind === 'shutdown') {
         const closed = await closeAllSessions(now);
         result.sessionsClosed += closed.length;
         for (const guid of closed) touched.add(guid); // sus derivados (timePlayed) deben recomputarse
+        // BONUS TOP-3 DE FIN DE PARTIDA (ver src/services/skill/match-bonus.ts):
+        // exige partida ≥3 min de LOG (InitGame visto + ShutdownGame; si el
+        // reader arrancó a mitad de partida NO hay bonus) y ≥2 humanos. El
+        // tally solo trae humanos con ≥5 kills para calificar; bots excluidos.
+        try {
+          const shutdownSec = parseLogTimeSeconds(line);
+          const duration =
+            matchStartSec !== null && shutdownSec !== null ? Math.max(0, shutdownSec - matchStartSec) : null;
+          const awards = await awardMatchBonus(matchTally, {
+            matchDurationSec: duration,
+            map: currentMap,
+            gametype: currentGametype,
+            server,
+          });
+          if (awards.length > 0) {
+            result.matchBonusEventsSynced += awards.length;
+            const nickOf = (guid: string): string => matchTally.get(guid)?.name || guid;
+            console.log(
+              `[GameLog] Bonus top-3 partida: ${awards
+                .map((award) => `${award.position}º ${nickOf(award.guid)} +${award.delta}`)
+                .join(', ')}`,
+            );
+          }
+        } catch (err) {
+          result.warnings.push(`[GameLog] bonus top-3 no aplicado: ${errMessage(err)}`);
+        }
+        matchStartSec = null;
+        matchTally = new Map();
       } else if (event.kind === 'connect') {
         const { opened } = await applyConnect(event, server, currentMap, currentGametype, now);
         if (opened) result.sessionsOpened += 1;
         result.playersSynced += 1;
+        noteHuman(event.guid, event.name); // participante humano de la partida (bonus top-3)
         // Historial de alias: cada J cuenta una aparición del (guid, name).
         if (await upsertPlayerAlias({ guid: event.guid, name: event.name, server, when: now })) {
           result.aliasesUpserted += 1;
@@ -622,6 +685,17 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         const killerGuid = isSuicide ? null : event.killerGuid;
         const victimGuid = event.victimGuid;
         const headshot = event.hitloc !== null && HEADSHOT_HITLOCS.has(event.hitloc.toLowerCase());
+
+        // Tally del bonus top-3: kills del killer humano, deaths del humano
+        // que muere (los bots NUNCA entran al tally: noteHuman los filtra).
+        if (killerGuid !== null) noteHuman(killerGuid, event.killerName);
+        noteHuman(victimGuid, event.victimName);
+        if (killerGuid !== null && !isBotGuid(killerGuid)) {
+          matchTally.get(killerGuid)!.kills += 1;
+        }
+        if (!isBotGuid(victimGuid)) {
+          matchTally.get(victimGuid)!.deaths += 1;
+        }
 
         if (killerGuid !== null) {
           // Kill real: kills/headshot/daño para el KILLER; death para la VÍCTIMA.
