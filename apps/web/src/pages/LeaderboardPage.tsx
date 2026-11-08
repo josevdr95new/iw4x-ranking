@@ -385,7 +385,7 @@ export function LeaderboardPage() {
                     <SortableHeader label="K/D" field="kd" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
                   <th scope="col" className="hidden w-[8%] px-3 py-2.5 text-right lg:table-cell" aria-sort={sort === "skill" ? (order === "desc" ? "descending" : "ascending") : undefined}>
-                    <SortableHeader label="Skill" field="skill" activeField={sort} activeOrder={order} onSort={handleSort} />
+                    <SortableHeader label="ELO" field="skill" ariaLabel="elo" activeField={sort} activeOrder={order} onSort={handleSort} />
                   </th>
                   <th scope="col" className="w-[10%] px-3 py-2.5 text-right" aria-sort={sort === "timePlayed" ? (order === "desc" ? "descending" : "ascending") : undefined}>
                     <SortableHeader label="Tiempo" field="timePlayed" activeField={sort} activeOrder={order} onSort={handleSort} />
@@ -491,7 +491,7 @@ export function LeaderboardPage() {
                         {" "}· {formatDuration(player.timePlayed)}
                         {player.skill !== null && player.skill !== undefined && (
                           <>
-                            {" "}· Skill {formatSkill(player.skill)}
+                            {" "}· ELO {formatSkill(player.skill)}
                           </>
                         )}
                       </p>

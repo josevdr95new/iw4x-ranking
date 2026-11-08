@@ -473,7 +473,7 @@ export function PlayerPage() {
           </div>
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">
-              Skill
+              ELO
               <Info
                 size={12}
                 strokeWidth={1.75}
@@ -512,7 +512,7 @@ export function PlayerPage() {
         </dl>
         <p className="border-t border-border bg-surface px-4 pb-3 pt-2">
           <span className="type-caption text-text-2">
-            Skill · ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por
+            ELO interno: pondera la fuerza del rival, headshots, daño y penalidades por
             mata-equipo.
           </span>
         </p>
