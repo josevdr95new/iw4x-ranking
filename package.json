@@ -19,6 +19,7 @@
     "db:push": "npm run db:push --workspace apps/api",
     "seed:admin": "npm run seed:admin --workspace apps/api",
     "db:clean": "npm run db:clean --workspace apps/api",
+    "db:zero": "npm run db:zero --workspace apps/api",
     "sync": "npm run sync --workspace apps/api",
     "mock:db": "tsx scripts/mock-iw4madmin.ts",
     "mock:refresh-connections": "tsx scripts/mock-refresh-connections.ts",

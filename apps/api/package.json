@@ -13,6 +13,7 @@
     "sync": "tsx src/scripts/run-sync.ts",
     "recompute:skill": "tsx src/scripts/recompute-skill.ts",
     "recount:stats": "tsx scripts/recount-stats.ts",
+    "db:zero": "tsx scripts/recount-stats.ts --zero",
     "rebuild:aliases": "tsx src/scripts/rebuild-aliases.ts",
     "rebuild:identity": "tsx src/scripts/rebuild-identity.ts",
     "promote:admin": "tsx src/scripts/promote-admin.ts",

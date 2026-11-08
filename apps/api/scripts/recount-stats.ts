@@ -21,9 +21,29 @@
 // vía `VACUUM INTO` (snapshot consistente aunque la DB esté abierta por la API;
 // fallback: copia de archivo). Restaura copiando el backup sobre dev.db.
 //
+// ── MODO ZERO (npm run db:zero): reset TOTAL de datos de juego ──────────────
+// DIFERENTE del recount: NO re-ingiere nada. Borra TODO lo derivado de juego
+// (KillEvent, Session, PlayerAlias, Player —TODOS, vinculados incluidos—,
+// Penalty, IdentityAlert, LinkAttempt, SyncRun) y fija el cursor del gamelog al
+// EOF ACTUAL del archivo (byteOffset = tamaño del log ahora): el histórico con
+// sus líneas viejas de probes/pruebas queda IGNORADO para siempre; solo cuentan
+// las líneas NUEVAS que el server escriba desde la próxima partida.
+//
+// SE CONSERVA: User (cuentas), AccountLink (vínculos guid↔cuenta — quedan
+// "colgando" sin Player a propósito: la FK se relaja SOLO durante el wipe
+// (PRAGMA foreign_keys OFF→ON) y se cura sola cuando el jugador nace de nuevo
+// con su próxima aparición en el log; el auto-link/re-alerta sigue apuntando al
+// guid), SyncState (cursor de la fuente IW4MAdmin), cloud-saves
+// (storage/profiles: el filesystem NO se toca) y configuración.
+// El skill/ELO NO requiere recompute: sin players, los próximos eventos
+// inicializan ELO nuevo desde 1000.
+// Backup previo: <prismaDir>/backups/dev.db.zero-<timestamp> (VACUUM INTO).
+//
 // Uso:  npm run recount:stats          (recuento real)
 //       npm run recount:stats -- --dry (no borra nada; solo imprime el plan)
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+//       npm run db:zero                (reset TOTAL de datos de juego)
+//       npm run db:zero -- --dry       (no borra nada; solo imprime el plan)
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,16 +122,23 @@ function resolveDbFile(): string {
 }
 
 /** Backup consistente: VACUUM INTO (snapshot aunque haya otro proceso escribiendo). */
-async function backupDatabase(dbFile: string, backupDir: string, stamp: string): Promise<string> {
+async function backupDatabase(
+  dbFile: string,
+  backupDir: string,
+  stamp: string,
+  // Etiqueta del modo en el nombre del archivo y en los logs ('recount' | 'zero').
+  label = 'recount',
+): Promise<string> {
+  const logPrefix = `[${label === 'zero' ? 'db:zero' : 'recount:stats'}]`;
   mkdirSync(backupDir, { recursive: true });
-  const backupPath = resolve(backupDir, `${basename(dbFile)}.recount-${stamp}`);
+  const backupPath = resolve(backupDir, `${basename(dbFile)}.${label}-${stamp}`);
   try {
     // Escapa comillas simples para el literal SQL.
     await prisma.$executeRawUnsafe(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
     return backupPath;
   } catch (err) {
     // Fallback: copia directa de archivo (incluye -wal/-shm si existen).
-    console.warn(`[recount:stats] VACUUM INTO falló (${err instanceof Error ? err.message : String(err)}); copiando archivo...`);
+    console.warn(`${logPrefix} VACUUM INTO falló (${err instanceof Error ? err.message : String(err)}); copiando archivo...`);
     copyFileSync(dbFile, backupPath);
     for (const suffix of ['-wal', '-shm']) {
       if (existsSync(dbFile + suffix)) copyFileSync(dbFile + suffix, backupPath + suffix);
@@ -391,12 +418,275 @@ export async function recountStats(options: RecountStatsOptions = {}): Promise<R
   return result;
 }
 
-// ── CLI (solo cuando se ejecuta directamente: npm run recount:stats) ────────
+// ── MODO ZERO: reset TOTAL de datos de juego (npm run db:zero) ──────────────
+
+export interface ZeroStatsOptions {
+  /** Ruta del games_mp.log. Default: env.gameLogPath. */
+  logPath?: string | null;
+  /** --dry: NO borra ni escribe nada; solo imprime lo que haría. */
+  dry?: boolean;
+  /** Dir destino del backup. Default: <apps/api>/prisma/backups. */
+  backupDir?: string;
+}
+
+/** Filas borradas por tabla (datos de juego). */
+export interface ZeroWipedCounts {
+  killEvents: number;
+  players: number;
+  aliases: number;
+  penalties: number;
+  identityAlerts: number;
+  linkAttempts: number;
+  syncRuns: number;
+  /** Sesiones de JUEGO (FK → Player: mueren con su jugador; los tokens web son JWT stateless y no viven en la DB). */
+  sessions: number;
+}
+
+/** Tablas/recursos que el modo zero NUNCA toca (conteos tras el reset). */
+export interface ZeroPreservedCounts {
+  users: number;
+  accountLinks: number;
+  syncStates: number;
+  /** Directorios de cloud-save bajo PROFILE_STORAGE_DIR (solo lectura; el filesystem NO se toca). */
+  storageDirs: number;
+}
+
+export interface ZeroCursorInfo {
+  source: string | null;
+  /** byteOffset del cursor ANTES del zero (null = no existía fila). */
+  offsetBefore: string | null;
+  /** byteOffset fijado (EOF del log ahora) o actual (null = sin fila y sin log). */
+  offsetAfter: string | null;
+  /** true si el cursor se re-fijó al EOF en esta corrida. */
+  pinned: boolean;
+}
+
+export interface ZeroStatsResult {
+  ok: boolean;
+  dry: boolean;
+  logPath: string | null;
+  logExists: boolean;
+  logBytes: number;
+  backupPath: string | null;
+  wiped: ZeroWipedCounts;
+  preserved: ZeroPreservedCounts;
+  /** GUIDs de los AccountLink conservados (identidad del dueño intacta). */
+  linkedGuids: string[];
+  /** AccountLink temporalmente sin Player (estado esperado: se cura con la próxima aparición del guid en el log). */
+  danglingLinks: Array<{ userId: number; guid: string }>;
+  cursor: ZeroCursorInfo;
+  /** PRAGMA foreign_keys reactivado tras el wipe. */
+  fkRestored: boolean;
+  warnings: string[];
+}
+
+/** Conteo actual de las tablas de datos de juego (para el plan dry y el antes/después). */
+async function countGameTables(): Promise<ZeroWipedCounts> {
+  const [killEvents, players, aliases, penalties, identityAlerts, linkAttempts, syncRuns, sessions] = await Promise.all([
+    prisma.killEvent.count(),
+    prisma.player.count(),
+    prisma.playerAlias.count(),
+    prisma.penalty.count(),
+    prisma.identityAlert.count(),
+    prisma.linkAttempt.count(),
+    prisma.syncRun.count(),
+    prisma.session.count(),
+  ]);
+  return { killEvents, players, aliases, penalties, identityAlerts, linkAttempts, syncRuns, sessions };
+}
+
+/** Conteos de lo CONSERVADO + guids vinculados + dirs de cloud-save (solo lectura). */
+async function collectPreserved(): Promise<{ counts: ZeroPreservedCounts; guids: string[] }> {
+  const [users, accountLinks, syncStates, links] = await Promise.all([
+    prisma.user.count(),
+    prisma.accountLink.count(),
+    prisma.syncState.count(),
+    prisma.accountLink.findMany({ select: { guid: true }, orderBy: [{ id: 'asc' }] }),
+  ]);
+  const storageRoot = env.profileStorageDir;
+  let storageDirs = 0;
+  if (existsSync(storageRoot)) {
+    for (const entry of readdirSync(storageRoot)) {
+      if (/^\d+$/.test(entry)) storageDirs += 1;
+    }
+  }
+  return { counts: { users, accountLinks, syncStates, storageDirs }, guids: links.map((l) => l.guid) };
+}
+
+/** AccountLink cuya Player ya no existe (esperado tras el zero; se cura con la próxima aparición). */
+async function danglingAccountLinks(): Promise<Array<{ userId: number; guid: string }>> {
+  return prisma.$queryRawUnsafe<Array<{ userId: number; guid: string }>>(
+    'SELECT al."userId" AS userId, al."guid" AS guid FROM "AccountLink" al ' +
+      'LEFT JOIN "Player" p ON p."guid" = al."guid" WHERE p."guid" IS NULL ORDER BY al."id" ASC',
+  );
+}
+
+/**
+ * RESET TOTAL de datos de juego: backup → wipe (KillEvent, Session, PlayerAlias,
+ * Penalty, IdentityAlert, LinkAttempt, Player, SyncRun) + cursor del gamelog al
+ * EOF ACTUAL → FK restaurada. NO re-ingesta nada: el histórico del log queda
+ * ignorado y solo contarán las líneas NUEVAS desde ahora. Con dry=true solo
+ * reporta el plan y NO escribe nada.
+ */
+export async function zeroStats(options: ZeroStatsOptions = {}): Promise<ZeroStatsResult> {
+  const logPath = options.logPath ?? env.gameLogPath ?? null;
+  const dry = options.dry ?? false;
+  const backupDir = options.backupDir ?? resolve(paths.apiRoot, 'prisma', 'backups');
+
+  const result: ZeroStatsResult = {
+    ok: false,
+    dry,
+    logPath,
+    logExists: false,
+    logBytes: 0,
+    backupPath: null,
+    wiped: { killEvents: 0, players: 0, aliases: 0, penalties: 0, identityAlerts: 0, linkAttempts: 0, syncRuns: 0, sessions: 0 },
+    preserved: { users: 0, accountLinks: 0, syncStates: 0, storageDirs: 0 },
+    linkedGuids: [],
+    danglingLinks: [],
+    cursor: { source: null, offsetBefore: null, offsetAfter: null, pinned: false },
+    fkRestored: true,
+    warnings: [],
+  };
+
+  if (logPath && existsSync(logPath)) {
+    result.logExists = true;
+    result.logBytes = statSync(logPath).size;
+  } else {
+    result.warnings.push(
+      logPath
+        ? `el log no existe (${logPath}): el cursor NO se re-fija al EOF (queda como esté; el histórico que ya cubre su offset actual sigue ignorado).`
+        : 'GAME_LOG_PATH no configurado: el cursor no se toca (nada que fijar al EOF).',
+    );
+  }
+
+  // Estado ANTES (en la corrida real estos contadores se sobrescriben con las
+  // filas EFECTIVAMENTE borradas por el deleteMany).
+  result.wiped = await countGameTables();
+  const preserved = await collectPreserved();
+  result.preserved = preserved.counts;
+  result.linkedGuids = preserved.guids;
+
+  const sourceKey = logPath !== null ? `gamelog:${logPath}` : null;
+  const cursorRow = sourceKey !== null
+    ? await prisma.logIngestState.findUnique({ where: { source: sourceKey } })
+    : null;
+  result.cursor = {
+    source: sourceKey,
+    offsetBefore: cursorRow?.byteOffset?.toString() ?? null,
+    offsetAfter: cursorRow?.byteOffset?.toString() ?? null,
+    pinned: false,
+  };
+
+  // ── DRY: solo el plan ────────────────────────────────────────────────
+  if (dry) {
+    result.ok = true;
+    return result;
+  }
+
+  // ── 1. Backup previo (misma convención que recount, con etiqueta zero) ──
+  const dbFile = resolveDbFile();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  result.backupPath = await backupDatabase(dbFile, backupDir, stamp, 'zero');
+  console.log(`[db:zero] backup: ${result.backupPath}`);
+
+  // ── 2. Wipe + cursor→EOF, ATÓMICO en una transacción ─────────────────
+  // PRAGMA foreign_keys=OFF solo durante el wipe: AccountLink tiene FK
+  // onDelete: Cascade hacia Player.guide — sin esto, borrar los players
+  // CASCADearía los vínculos del dueño. El vínculo queda colgando a propósito
+  // y se cura cuando el jugador nace de nuevo (mismo guid) con su próxima
+  // aparición en el log. Prisma usa UNA conexión por SQLite: el pragma persiste
+  // entre queries y SIEMPRE se reactiva en el finally.
+  await prisma.$executeRawUnsafe('PRAGMA foreign_keys = OFF');
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Orden seguro: hijos antes que padres (Session/Alias colgan de Player).
+      result.wiped.killEvents = (await tx.killEvent.deleteMany()).count;
+      result.wiped.sessions = (await tx.session.deleteMany()).count;
+      result.wiped.aliases = (await tx.playerAlias.deleteMany()).count;
+      result.wiped.penalties = (await tx.penalty.deleteMany()).count;
+      result.wiped.identityAlerts = (await tx.identityAlert.deleteMany()).count;
+      result.wiped.linkAttempts = (await tx.linkAttempt.deleteMany()).count;
+      result.wiped.players = (await tx.player.deleteMany()).count;
+      result.wiped.syncRuns = (await tx.syncRun.deleteMany()).count;
+
+      // ── 3. Cursor del gamelog → EOF ACTUAL (el histórico queda ignorado).
+      if (sourceKey !== null && result.logExists) {
+        const eof = BigInt(result.logBytes);
+        await tx.logIngestState.upsert({
+          where: { source: sourceKey },
+          create: { source: sourceKey, byteOffset: eof, linesParsed: 0, linesIgnored: 0, currentMap: null, currentGametype: null, lastRunAt: null },
+          update: { byteOffset: eof, linesParsed: 0, linesIgnored: 0, currentMap: null, currentGametype: null, lastRunAt: null },
+        });
+        result.cursor = { source: sourceKey, offsetBefore: cursorRow?.byteOffset?.toString() ?? null, offsetAfter: eof.toString(), pinned: true };
+      }
+      // SyncState (cursor de la fuente IW4MAdmin) y LogIngestState de otras
+      // fuentes: SIN tocar (conservados a propósito).
+    });
+  } finally {
+    await prisma.$executeRawUnsafe('PRAGMA foreign_keys = ON');
+    const fkNow = await prisma.$queryRawUnsafe<Array<{ foreign_keys: bigint }>>('PRAGMA foreign_keys');
+    result.fkRestored = String(fkNow[0]?.foreign_keys ?? 0n) === '1';
+    if (!result.fkRestored) result.warnings.push('PRAGMA foreign_keys NO quedó reactivado: revisar la conexión antes de seguir escribiendo.');
+  }
+  console.log(
+    `[db:zero] wipe: ${result.wiped.killEvents} killEvents, ${result.wiped.sessions} sessions, ${result.wiped.aliases} aliases, ` +
+      `${result.wiped.players} players, ${result.wiped.penalties} penalties, ${result.wiped.identityAlerts} identityAlerts, ` +
+      `${result.wiped.linkAttempts} linkAttempts, ${result.wiped.syncRuns} syncRuns`,
+  );
+
+  // ── 4. Verificación: tablas de juego a 0 + FK viva + vínculos colgando ──
+  const after = await countGameTables();
+  const allZero = Object.values(after).every((n) => n === 0);
+  if (!allZero) result.warnings.push(`tras el wipe quedaron filas de juego: ${JSON.stringify(after)}`);
+  if (result.fkRestored) {
+    result.danglingLinks = await danglingAccountLinks();
+    if (result.danglingLinks.length > 0) {
+      console.log(`[db:zero] ${result.danglingLinks.length} AccountLink(s) temporalmente sin Player (se cura con la próxima aparición del guid en el log): ${result.danglingLinks.map((l) => l.guid).join(', ')}`);
+    }
+  }
+
+  result.ok = allZero && result.fkRestored && (result.cursor.pinned || !result.logExists);
+  return result;
+}
+
+/** Resumen legible del modo zero para la CLI. */
+function logZeroSummary(result: ZeroStatsResult): void {
+  console.log(`[db:zero] ok=${result.ok} dry=${result.dry} log=${result.logPath ?? '(sin GAME_LOG_PATH)'}${result.logExists ? ` (${result.logBytes} bytes)` : ' (no existe)'}`);
+  console.log('[db:zero] BORRADOS (filas por tabla):');
+  for (const [table, n] of Object.entries(result.wiped)) console.log(`[db:zero]   ${table}: ${n}`);
+  console.log('[db:zero] CONSERVADOS:');
+  for (const [table, n] of Object.entries(result.preserved)) console.log(`[db:zero]   ${table}: ${n}`);
+  if (result.linkedGuids.length > 0) console.log(`[db:zero]   AccountLink guids: ${result.linkedGuids.join(', ')}`);
+  if (result.cursor.source !== null) {
+    console.log(`[db:zero] cursor: ${result.cursor.offsetBefore ?? '(sin fila)'} → ${result.cursor.offsetAfter ?? '(sin fila)'} (source=${result.cursor.source}, pinned=${result.cursor.pinned})`);
+  }
+  if (result.backupPath !== null) console.log(`[db:zero] backup en: ${result.backupPath}`);
+  if (result.warnings.length > 0) {
+    console.log(`[db:zero] warnings (${result.warnings.length}):`);
+    for (const warning of result.warnings) console.log(`  - ${warning}`);
+  }
+}
+
+
+// ── CLI (solo cuando se ejecuta directamente: npm run recount:stats / db:zero) ──
 const isDirectRun = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isDirectRun) {
+  const zero = process.argv.includes('--zero');
   const dry = process.argv.includes('--dry');
   void (async () => {
+    if (zero) {
+      console.log(dry
+        ? '[db:zero] MODO DRY: no se borrará ni escribirá nada (solo el plan).'
+        : '[db:zero] RESET TOTAL: se borrarán TODOS los datos de juego y el cursor saltará al EOF del log (backup previo). NO se re-ingiere el histórico.');
+      console.log('[db:zero] Recomendado con el server y la API APAGADOS (ventana sin ingesta concurrente). Se conservan: User, AccountLink, SyncState, cloud-saves y configuración.');
+      const result = await zeroStats({ dry });
+      logZeroSummary(result);
+      await prisma.$disconnect();
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
     console.log(dry ? '[recount:stats] MODO DRY: no se borrará ni escribirá nada.' : '[recount:stats] RECUENTO REAL: se borrará y re-ingestará el histórico (backup previo).');
     console.log('[recount:stats] Recomendado ejecutarlo con el server idealmente vacío (el scheduler del dev:api puede ingestar en paralelo; el script verifica y reintenta igualmente).');
     const result = await recountStats({ dry });

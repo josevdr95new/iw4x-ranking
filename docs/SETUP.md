@@ -158,6 +158,15 @@ npm run recount:stats -- --dry # NO borra nada: solo imprime el plan
 
 > ⚠️ Ejecutar idealmente con el server VACÍO: si la partida está en curso, el scheduler del dev:api puede ingestar en paralelo durante el wipe+reingesta. El script lo detecta (verificación absoluta contra el log) y reintenta solo, pero la corrida limpia es la garantía. `npm run recompute:skill` sigue existiendo para recalcular SOLO el ELO sin tocar stats.
 
+#### RESET vs RECUENTO vs LIMPIEZA (`db:zero` / `recount:stats` / `db:clean`)
+
+| Comando | Qué hace | Cuándo usarlo |
+| ------- | -------- | ------------- |
+| `npm run db:zero` | **RESET TOTAL de datos de juego**: borra `KillEvent`, `Session`, `PlayerAlias`, `Player` (todos), `Penalty`, `IdentityAlert`, `LinkAttempt` y `SyncRun`; fija el cursor del log al **EOF actual** → el histórico del `games_mp.log` queda **IGNORADO** y solo cuentan las líneas NUEVAS. **Conserva**: `User` (cuentas), `AccountLink` (vínculos guid↔cuenta; quedan colgando y se curan solos cuando el guid reaparece), `SyncState`, cloud-saves y configuración. Backup previo (`dev.db.zero-<timestamp>`). `--dry` soportado. El skill no requiere recompute: los players nacen de nuevo con ELO 1000. | Empezar el conteo **desde cero** para la próxima partida (ideal con server y API apagados). NO re-cuenta nada del histórico. |
+| `npm run recount:stats` | **RE-CUENTA el histórico completo** del `games_mp.log` con el parser vigente: rewinda el cursor a 0, re-ingesta TODO el archivo, recalcula el skill ELO from scratch y verifica los counters contra el log (con reintento). Conserva `User`, `AccountLink` y los players vinculados (counters a 0 y re-poblados). Backup previo. `--dry` soportado. | Tras cambiar la semántica del parser (ej. fix víctima-primero) o cuando los agregados de `Player` quedan inconsistentes con los `KillEvent`. MANTIENE el histórico del log como fuente. |
+| `npm run db:clean` | **Limpieza QUIRÚRGICA e idempotente** de datos de prueba conocidos: guids TESTPROBE específicos, usuarios `*.test.local`, sus dependientes y storage huérfano. NUNCA toca players reales, bots, partidas ni el admin por defecto. | Borrar artefactos de un probe/prueba concreta SIN resetear el resto de los datos. |
+
+
 ## 4D. Modo log remoto (server 192.168.2.251:28960)
 
 Para ingestar stats del **server real de la comunidad**, que corre en OTRA máquina (`192.168.2.251:28960`, subred `192.168.2.x` — este PC está en `192.168.3.x`), hay dos opciones:
