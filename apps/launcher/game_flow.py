@@ -1,4 +1,4 @@
-"""Flujo JUGAR: vincular cuenta ↔ GUID y abrir el juego.
+"""Flujo JUGAR: preparar identidad/progreso y abrir el juego.
 
 Corre en un hilo de fondo para no congelar la UI y se comunica mediante
 eventos (dicts) a través de un callback ``emit``:
@@ -8,19 +8,27 @@ eventos (dicts) a través de un callback ``emit``:
   {"t": "failed",  "msg": "...", "retry": bool}      → fin con error (retry
                                                       habilita el botón)
 
-Vinculación AUTOMÁTICA por nombre: en cada poll se busca un candidato cuyo
-nick normalizado coincida con el displayName de la cuenta (``pick_candidate``)
-y se confirma sin preguntar nada. Si nadie coincide se sigue esperando hasta
-el timeout. No hay diálogo de selección.
+Flujo SIMPLIFICADO (decisión del dueño): JUGAR → juego abre → el launcher se
+queda en la home normal. NO hay pantalla de espera de candidatos ni polling
+de vinculación: la identidad la vincula el SERVER solo (auto-link por sesión
+de juego — ``POST /api/play/session``, que lanza la App). Los logs de la
+consola sustituyen a la pantalla de verificación.
 
-Compatible con el modelo multi-GUID: si el usuario ya tiene ``linkedGuids``
-la UI salta la verificación y solo abre el juego.
+Aislamiento de guid.dat por cuenta (fix cyber-café): en el pre-launch
+(SIEMPRE con el juego cerrado) se ejecuta ``decide_guid_action``:
+- manifest con guid.dat → el sync ya restauró la identidad de la cuenta.
+- manifest sin guid.dat Y con guid.dat local → CUARENTENA: el local (de otro
+  jugador de esta PC) se mueve a %APPDATA%\\iw4x-ranking-launcher\\guid-quarantine\\<userId>-<ts>\\
+  y el juego crea una identidad nueva y propia para esta cuenta.
+- manifest sin guid.dat y sin local → nada (el juego crea el primero).
+Seguridad: si la sesión muere antes de crear identidad nueva (<10s y sin
+guid.dat nuevo), el cuarentenado se repone (best-effort).
 """
 from __future__ import annotations
 
 import logging
 import os
-import re
+import shutil
 import subprocess
 import threading
 import time
@@ -29,49 +37,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from api_client import ApiClient, ApiError, NetworkError
 from logging_setup import app_data_dir
-from save_sync import (UPLOAD_LOCK, default_guid_path, sync_after_session,
+from save_sync import (UPLOAD_LOCK, decide_guid_action, default_guid_path,
+                       quarantine_local_guid, sync_after_session,
                        sync_before_launch)
 
 log = logging.getLogger("game_flow")
 
 EventCallback = Callable[[Dict[str, Any]], None]
-
-# Códigos de color de Quake (^1, ^7, ^a…) que el server mete en los nicks.
-_COLOR_CODE_RE = re.compile(r"\^[0-9a-zA-Z]")
-
-
-def strip_color_codes(name: str) -> str:
-    """Quita códigos de color ^X de un nick proveniente del server."""
-    return _COLOR_CODE_RE.sub("", str(name or ""))
-
-
-def candidate_matches(candidate_name: str, display_name: str) -> bool:
-    """¿El nick del candidato coincide con el displayName de la cuenta?
-
-    Normalización: se eliminan los códigos de color ^X del nick del server
-    y se compara trim + lower. Función pura, testeable.
-    """
-    nick = strip_color_codes(candidate_name).strip().lower()
-    expected = (display_name or "").strip().lower()
-    return bool(nick) and bool(expected) and nick == expected
-
-
-def pick_candidate(candidates, display_name):
-    """Elige el candidato a confirmar según el nick de la cuenta (pura).
-
-    - Normaliza cada ``name`` (códigos ^X fuera, trim, lower) y se queda con
-      los que coinciden con ``display_name``.
-    - Si hay varios con el mismo nick, desambigua por recencia: gana el de
-      ``lastConnection`` más alta (ISO-8601 ordena lexicográficamente).
-    - Devuelve el candidate dict elegido o None si nadie coincide.
-    """
-    matches = [c for c in (candidates or [])
-               if candidate_matches(c.get("name"), display_name)]
-    if not matches:
-        return None
-    if len(matches) == 1:
-        return matches[0]
-    return max(matches, key=lambda c: str(c.get("lastConnection") or ""))
 
 
 def build_game_args(
@@ -152,12 +124,30 @@ def wait_process_exit(process: Any, timeout: float, poll: float = 0.1) -> bool:
         time.sleep(poll)
 
 
+# Ventana (s) bajo la cual una sesión muerta cuenta como "falló antes de
+# crear identidad": se repone el guid.dat cuarentenado.
+GUID_RESTORE_WINDOW = 10.0
+
+
 class GameFlow:
-    """Un intento de 'jugar' (con o sin vinculación pendiente)."""
+    """Un intento de 'jugar' (sync + identidad + abrir el juego)."""
 
     # Presupuestos del cierre del launcher (siempre activo, sin toggle).
     GAME_EXIT_WAIT = 5.0       # espera (s) a que el proceso muera tras el kill
     GAME_UPLOAD_BUDGET = 10.0  # presupuesto (s) de la subida antes de cerrar
+
+    # Mensaje oficial cuando la cuenta no tiene displayName (defensa: el
+    # registro ya lo exige). Sin nick no hay partida — decisión del dueño.
+    NO_NICK_MSG = (
+        "Tu cuenta no tiene nombre visible: actualízalo en Mi Cuenta (web) "
+        "antes de jugar."
+    )
+
+    # Log de lanzamiento: sustituye a la (eliminada) pantalla de verificación.
+    LAUNCH_MSG = (
+        "Juego iniciado con tu nick. Tu identidad se vincula "
+        "automáticamente al entrar al server."
+    )
 
     def __init__(
         self,
@@ -169,11 +159,12 @@ class GameFlow:
         *,
         already_linked: bool = False,
         simulate: bool = False,
-        poll_interval: int = 10,
-        poll_max_seconds: int = 180,
         display_name: str = "",
         cloud_save: bool = True,
         game_dir: str = "",
+        user_id: str = "",
+        guid_path: Optional[str] = None,
+        quarantine_root_path: Optional[Path] = None,
     ) -> None:
         self.api = api
         self.token = token
@@ -183,11 +174,18 @@ class GameFlow:
         self.emit = emit
         self.already_linked = already_linked
         self.simulate = simulate
-        self.poll_interval = poll_interval
-        self.poll_max_seconds = poll_max_seconds
         self.display_name = display_name
         self.cloud_save = cloud_save
+        self.user_id = user_id
+        # Rutas INYECTABLES (tests): nunca tocar el guid.dat real en pruebas.
+        self.guid_path = guid_path or default_guid_path()
+        self.quarantine_root_path = quarantine_root_path
         self._process: Optional[Any] = None  # handle de Popen del juego
+        self._launched_at: Optional[float] = None  # monotonic del lanzamiento
+
+        # Cuarentena de identidad en curso (para la restauración de seguridad):
+        # {"file": ruta cuarentenada, "target": ruta original}.
+        self._quarantined: Optional[Dict[str, str]] = None
 
         # Cancelación (al cerrar la ventana o cerrar sesión).
         self._cancelled = threading.Event()
@@ -234,7 +232,9 @@ class GameFlow:
         except NetworkError as exc:
             self._failed(str(exc), retry=True)
         except ApiError as exc:
-            self._failed(self._api_error_text(exc), retry=True)
+            self._failed(
+                f"La API respondió {exc.status}: {exc.message}", retry=True
+            )
         except Exception:  # rara vez: no queremos matar la app
             log.exception("Fallo inesperado en el flujo JUGAR")
             self._failed("Ocurrió un error inesperado. Mira el log para detalles.", retry=True)
@@ -252,8 +252,7 @@ class GameFlow:
         log.info("[flow] éxito: %s", msg)
         self.emit({"t": "success", "msg": msg, "linked": linked})
 
-    @staticmethod
-    def _transport_error_text(exc: Exception) -> str:
+    def _transport_error_text(self, exc: Exception) -> str:
         """Mensaje en español para WARNING de sync (red o API)."""
         if isinstance(exc, NetworkError):
             return str(exc)
@@ -298,7 +297,7 @@ class GameFlow:
             with UPLOAD_LOCK:  # JAMÁS dos PUTs de saves concurrentes
                 self._upload_result = sync_after_session(
                     self.api, self.token, self.game_dir, log=self._log,
-                    guid_path=default_guid_path(),
+                    guid_path=self.guid_path,
                 )
         except (NetworkError, ApiError, OSError) as exc:
             self._upload_result = "error"
@@ -315,33 +314,39 @@ class GameFlow:
         que la subida solo ocurre cuando el proceso YA murió. NUNCA bloquea
         jugar ni toca nada en modo simulación. Si el launcher cerró el juego
         primero, el guard de ``_upload_once`` evita la doble subida.
+
+        Cuando el proceso muere emite SIEMPRE ``{"t": "game_closed", "flow":
+        self}`` — también con cloud-sync apagado: es la señal con la que la
+        UI devuelve el botón héroe a JUGAR cuando el juego se cierra solo.
         """
+        process = self._process
+        if process is not None:
+            try:
+                process.wait()
+            except Exception:  # proceso ya recolectado: nada que esperar
+                pass
+            self._maybe_restore_quarantined_guid()
+            self.emit({"t": "game_closed", "flow": self})
         if not self._upload_enabled():
             return
-        process = self._process
-        if process is None:
-            return
-        try:
-            process.wait()
-        except Exception:  # proceso ya recolectado: nada que esperar
-            pass
         self._log("Juego cerrado: revisando tu progreso…")
         self._upload_once()
 
-    def stop_game_for_exit(self) -> None:
-        """Cierre del launcher con juego vivo: kill tree → muerte → upload.
+    def stop_game_for_exit(self, reason: str = "Launcher cerrado") -> None:
+        """Cierre del launcher (o botón DETENER) con juego vivo: kill → subida.
 
         Comportamiento SIEMPRE (decisión del dueño, sin toggle). SOLO toca el
         árbol del PID que ESTE flujo lanzó — jamás por nombre de proceso (el
         server dedicado también es iw4x.exe). Presupuesto duro: ≤5s esperando
-        la muerte + ≤10s de subida; después el cierre continúa sí o sí.
-        Si el juego ya murió solo NO hace nada: el flujo post-sesión normal
-        (``_await_game_and_upload``) se encarga y el upload no se duplica.
+        la muerte + ≤10s de subida. Si el juego ya murió solo NO hace nada:
+        el flujo post-sesión normal (``_await_game_and_upload``) se encarga y
+        el upload no se duplica. ``reason`` personaliza el log (el botón
+        DETENER lo llama sin cerrar el launcher).
         """
         if not self.game_running():
             return
         pid = self.game_pid()
-        self._log("Launcher cerrado: juego detenido.")
+        self._log(f"{reason}: juego detenido.")
         killed = bool(pid) and kill_tree(pid)
         if pid and not killed:
             try:
@@ -351,40 +356,92 @@ class GameFlow:
         if not wait_process_exit(self._process, self.GAME_EXIT_WAIT):
             log.warning("El juego (PID %s) no confirmó su muerte a tiempo; "
                         "el cierre continúa", pid)
+        self._maybe_restore_quarantined_guid()
         self._log("Juego cerrado: revisando tu progreso…")
         self._upload_once(budget=self.GAME_UPLOAD_BUDGET)
         if self._upload_result == "upload":
             self._log("Progreso subido a tu cuenta ✓")
 
-    @staticmethod
-    def _api_error_text(exc: ApiError) -> str:
-        """Traduce los códigos del envelope a frases para el jugador."""
-        if exc.code == "USER_ALREADY_LINKED":
-            return "Tu identidad ya está verificada."
-        if exc.code == "GUID_ALREADY_LINKED":
-            return (
-                "Ese GUID ya pertenece a otra cuenta — no puedes vincularlo. "
-                "Si es tu PC compartida, cada jugador debe crear y usar SU "
-                "propia cuenta."
-            )
-        if exc.code == "PLAYER_NOT_FOUND":
-            return "La API no reconoce ese jugador. ¿Corriste el sync?"
-        if exc.code == "UNAUTHORIZED":
-            return "Tu sesión expiró. Inicia sesión de nuevo."
-        return exc.message
+    # --- Identidad (guid.dat) por cuenta -------------------------------------
+    def _apply_guid_identity(self, manifest: Optional[Dict[str, Any]]) -> None:
+        """Ejecuta ``decide_guid_action`` en el pre-launch (juego cerrado).
 
-    # Mensaje oficial cuando la cuenta no tiene displayName (defensa: el
-    # registro ya lo exige). Sin nick no hay partida — decisión del dueño.
-    NO_NICK_MSG = (
-        "Tu cuenta no tiene nombre visible: actualízalo en Mi Cuenta (web) "
-        "antes de jugar."
-    )
+        Solo el caso "quarantine" mueve algo: el local (identidad de OTRO
+        jugador de esta PC) va a la cuarentena y el juego, al arrancar sin
+        guid.dat, crea uno nuevo y propio que el upload post-sesión sube a
+        ESTA cuenta. "restore" ya lo resolvió el sync (download del manifest)
+        y "none" no tiene nada que mover. En simulación no se toca nada y si
+        el manifiesto no se pudo leer (red caída) NO se cuarentena: ante
+        incertidumbre se conserva la identidad local.
+        """
+        if self.simulate:
+            return
+        try:
+            local_exists = Path(self.guid_path).is_file()
+        except OSError:
+            return
+        action = decide_guid_action(manifest, local_exists)
+        if action != "quarantine":
+            return
+        dest = quarantine_local_guid(
+            self.guid_path,
+            user_id=self.user_id,
+            root=self.quarantine_root_path,
+        )
+        if dest is None:
+            self._log("⚠ No se pudo asegurar tu identidad en esta PC; "
+                      "se conserva la identidad local.")
+            return
+        self._quarantined = {
+            "file": str(dest / "guid.dat"),
+            "target": str(self.guid_path),
+        }
+        log.info("Identidad local cuarentenada (cuenta %s): %s",
+                 self.user_id or "?", dest / "guid.dat")
+        self._log("Identidad nueva creada para tu cuenta "
+                  "(primera vez en esta PC)")
+
+    def _maybe_restore_quarantined_guid(self) -> None:
+        """Restauración de seguridad: reponer el cuarentenado (best-effort).
+
+        Si la sesión murió antes de crear identidad nueva (proceso vivo <10s
+        —o jamás llegó a abrirse— y sin guid.dat nuevo en la ruta original),
+        el guid.dat cuarentenado vuelve a su sitio y queda log claro. Una
+        sola evaluación por sesión (consume el estado).
+        """
+        info = self._quarantined
+        if info is None:
+            return
+        self._quarantined = None
+        target = Path(info["target"])
+        try:
+            if target.is_file():
+                return  # el juego ya creó/dejó su identidad: no se toca
+        except OSError:
+            return
+        lived_ok = (
+            self._launched_at is not None
+            and (time.monotonic() - self._launched_at) >= GUID_RESTORE_WINDOW
+        )
+        if lived_ok:
+            return  # sesión larga sin guid: no reponer (el upload manda)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            src = Path(info["file"])
+            if src.is_file():
+                shutil.copy2(src, target)
+                self._log("Tu identidad anterior fue repuesta: la sesión no "
+                          "llegó a crear una nueva.")
+        except OSError:
+            log.warning("No se pudo reponer el guid.dat cuarentenado",
+                        exc_info=True)
 
     def _launch_game(self) -> bool:
         """Abre iw4x.exe conectando al server elegido. False si no se pudo."""
         # El nick del ranking es OBLIGATORIO: sin displayName no se lanza.
         if not (self.display_name or "").strip():
             self._failed(self.NO_NICK_MSG, retry=False)
+            self._maybe_restore_quarantined_guid()
             return False
 
         cmd = build_game_args(
@@ -403,37 +460,53 @@ class GameFlow:
                 "Revísalo en Ajustes.",
                 retry=False,
             )
+            self._maybe_restore_quarantined_guid()
             return False
 
         self._log(f"Abriendo juego… {subprocess.list2cmdline(cmd[1:])}")
         try:
             self._process = subprocess.Popen(cmd, cwd=str(exe.parent))
+            self._launched_at = time.monotonic()
             return True
         except OSError as exc:
             self._failed(f"No se pudo abrir el juego: {exc}", retry=True)
+            self._maybe_restore_quarantined_guid()
             return False
 
-    def _confirm_guid(self, guid: str) -> bool:
-        """Confirma la vinculación con {guid}. True si el flujo terminó aquí."""
-        self._log(f"Confirmando GUID {guid}…")
-        try:
-            data = self.api.link_confirm(self.token, guid)
-        except ApiError as exc:
-            if exc.status == 409 and exc.code == "USER_ALREADY_LINKED":
-                # La cuenta ya tenía GUID: para el jugador es un éxito.
-                self._success("Tu identidad ya estaba verificada ✓", linked=True)
-                return True
-            self._failed(self._api_error_text(exc), retry=True)
-            return True
-        except NetworkError as exc:
-            self._failed(str(exc), retry=True)
-            return True
+    def _prepare_session(self) -> None:
+        """PRE-lanzamiento: cloud-sync + aislamiento de identidad.
 
-        name = data.get("name") or "?"
-        server = data.get("server") or "—"
-        self._log(f"Identidad verificada ✓  Jugador: {name} · GUID: {guid} · Server: {server}")
-        self._success("Identidad verificada ✓", linked=True)
-        return True
+        El manifiesto se consulta UNA vez y se comparte entre el sync y la
+        decisión del guid.dat. NUNCA bloquea jugar: cualquier error se
+        loggea como WARNING y se continúa. En simulación no se toca disco.
+        """
+        manifest: Optional[Dict[str, Any]] = None
+        if self.simulate:
+            self._log("Sincronización de progreso omitida (simulado).")
+            return
+        if not (self.cloud_save and self.game_dir):
+            return
+        try:
+            manifest = self.api.save_manifest(self.token)
+        except (NetworkError, ApiError, OSError) as exc:
+            self._log(f"⚠ Sincronización de progreso omitida: "
+                      f"{self._transport_error_text(exc)}")
+            # Sin manifiesto no hay decisión segura de identidad: ante
+            # incertidumbre se conserva la identidad local tal cual.
+            self._log("No se pudo verificar tu identidad en la nube; "
+                      "se conserva la identidad local de esta PC.")
+            return
+        try:
+            backup_root = (app_data_dir() / "save-backups"
+                           / time.strftime("%Y%m%d-%H%M%S"))
+            sync_before_launch(self.api, self.token, self.game_dir,
+                               log=self._log, backup_root=backup_root,
+                               guid_path=self.guid_path, manifest=manifest)
+        except (NetworkError, ApiError, OSError) as exc:
+            self._log(f"⚠ Sincronización de progreso omitida: "
+                      f"{self._transport_error_text(exc)}")
+        # SIEMPRE con el juego cerrado (estamos en pre-launch).
+        self._apply_guid_identity(manifest)
 
     def _run(self) -> None:
         # Validación dura del nick: el juego SIEMPRE abre con el displayName.
@@ -442,102 +515,21 @@ class GameFlow:
             return
 
         self._log(f"Preparando conexión al server {self.server_address}…")
+        self._prepare_session()
 
-        # Cloud-sync PRE-lanzamiento: dejar el progreso de la cuenta listo en
-        # disco. En simulación no se toca nada. NUNCA bloquea jugar: cualquier
-        # error se loggea como WARNING y se continúa.
-        if self.simulate:
-            self._log("Sincronización de progreso omitida (simulado).")
-        elif self.cloud_save and self.game_dir:
-            try:
-                backup_root = (app_data_dir() / "save-backups"
-                               / time.strftime("%Y%m%d-%H%M%S"))
-                sync_before_launch(self.api, self.token, self.game_dir,
-                                   log=self._log, backup_root=backup_root,
-                                   guid_path=default_guid_path())
-            except (NetworkError, ApiError, OSError) as exc:
-                self._log(f"⚠ Sincronización de progreso omitida: "
-                          f"{self._transport_error_text(exc)}")
-
-        # 0) Cuenta ya verificada: no hay flujo de identidad, solo jugamos.
+        # Cuenta ya verificada: mensaje directo; sin identidad, el server la
+        # auto-vincula por sesión de juego (sin pantalla de verificación).
         if self.already_linked:
             self._log("Tu identidad ya está verificada: solo abrimos el juego.")
-            if not self._launch_game():
-                return
-            self._success(
-                f"Juego abierto. Conectando a {self.server_address}… ¡suerte!",
-                linked=True,
-            )
-            self._await_game_and_upload()
-            return
 
-        # 1) Verificar identidad contra la API (sin diálogos: por nombre).
-        self._log("Verificando tu identidad contra la API…")
-        self.api.link_start(self.token)
-
-        # 2) Lanzar el juego.
+        # Lanzar el juego.
         if not self._launch_game():
             return
-        self._log("Esperando tu conexión en el server…")
-
-        # 3) Polling: cada poll busca un candidato con NUESTRO nick y lo
-        #    confirma automáticamente (pick_candidate desambigua por recencia).
-        deadline = time.monotonic() + self.poll_max_seconds
-        attempt = 0
-        while time.monotonic() < deadline and not self._cancelled.is_set():
-            attempt += 1
-            try:
-                data = self.api.link_candidates(self.token)
-            except ApiError as exc:
-                if exc.status == 409 and exc.code == "USER_ALREADY_LINKED":
-                    self._success("Tu identidad ya estaba verificada ✓", linked=True)
-                    self._await_game_and_upload()
-                    return
-                raise
-
-            candidates = data.get("candidates") or []
-            picked = pick_candidate(candidates, self.display_name)
-
-            if picked is not None:
-                guid = str(picked.get("guid", ""))
-                nick = strip_color_codes(str(picked.get("name", "")))
-                same_nick = sum(
-                    1 for c in candidates
-                    if candidate_matches(c.get("name"), self.display_name)
-                )
-                if same_nick > 1:
-                    self._log(
-                        f"Varios jugadores con tu nick '{nick}' en el server: "
-                        f"elegimos el de conexión más reciente (GUID {guid})."
-                    )
-                else:
-                    self._log(f"Identidad detectada en el server: {nick} (GUID {guid})")
-                self._confirm_guid(guid)  # siempre termina el flujo
-                self._await_game_and_upload()
-                return
-
-            # Nadie con nuestro nick (aunque haya otros jugadores): seguimos.
-            remaining = max(0, int(deadline - time.monotonic()))
-            self._log(
-                f"Aún no te vemos en el server… intento {attempt} "
-                f"(quedan {remaining}s)"
-            )
-
-            # sleep fragmentado para reaccionar rápido a cancel().
-            slept = 0.0
-            while slept < self.poll_interval:
-                if self._cancelled.is_set():
-                    break
-                step = min(0.5, self.poll_interval - slept)
-                time.sleep(step)
-                slept += step
-
-        if self._cancelled.is_set():
-            self._failed("Verificación de identidad cancelada.", retry=False)
-        else:
-            nick = (self.display_name or "").strip() or "tu nick"
-            self._failed(
-                f"No vimos entrar a nadie con tu nick ({nick}). "
-                "¿Entraste al server? El juego debe abrirse con el nick de tu cuenta.",
-                retry=True,
-            )
+        self._log(self.LAUNCH_MSG)
+        self._success(
+            ("Juego abierto. Conectando a "
+             f"{self.server_address}… ¡suerte!") if self.already_linked
+            else self.LAUNCH_MSG,
+            linked=self.already_linked,
+        )
+        self._await_game_and_upload()

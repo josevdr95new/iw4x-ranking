@@ -244,6 +244,7 @@ class DotState(ctk.CTkLabel):
         "listo": "● LISTO PARA DESPLEGAR",
         "conectando": "● CONECTANDO",
         "en_partida": "● EN PARTIDA",
+        "deteniendo": "● DETENIENDO",
         "fallo": "● SIN CONEXIÓN AL SERVER",
     }
 
@@ -264,6 +265,7 @@ class DotState(ctk.CTkLabel):
             "listo": COLORS["ok"],
             "en_partida": COLORS["ok"],
             "conectando": COLORS["accent"],
+            "deteniendo": COLORS["danger"],
             "fallo": COLORS["danger"],
         }.get(state, COLORS["text_dim"])
         self.configure(text_color=color)

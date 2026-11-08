@@ -3,6 +3,16 @@
 Visual: terminal de acceso HUD — tarjeta con brackets de esquina, labels
 mono en mayúsculas, acción única ámbar. Cero gradientes.
 
+LOGIN COMPACTO (decisión del dueño): la columna completa (franja CONEXIÓN +
+campos + botones + enlace "¿No tienes cuenta? Crear cuenta") cabe en la
+geometría mínima (980x640) SIN maximizar ni scroll:
+- paddings verticales reducidos;
+- franja CONEXIÓN colapsable: la caption "// CONEXIÓN //" es clickeable y
+  expande/colapsa el detalle (URL + PROBAR/GUARDAR + ruta del config);
+  colapsada por defecto tras el primer éxito de conexión;
+- si AUN así no cabe (pantallas <720px de alto), el contenido vive en un
+  Canvas con Scrollbar vertical funcional (también con la rueda del ratón).
+
 Franja CONEXIÓN (arriba del formulario): la API es editable y probable
 ANTES de cualquier login — con la API mal configurada no se puede ni
 entrar, así que el ajuste no puede vivir solo en Ajustes (tras login).
@@ -10,6 +20,7 @@ entrar, así que el ajuste no puede vivir solo en Ajustes (tras login).
 from __future__ import annotations
 
 import logging
+import tkinter as tk
 from typing import TYPE_CHECKING, Optional
 
 import customtkinter as ctk
@@ -37,6 +48,7 @@ log = logging.getLogger("ui.login")
 
 FIELD_W = 320
 CONN_TIMEOUT = 3  # segundos: el test de /api/health no puede colgar el login
+WHEEL_STEP = 3    # "unidades" de scroll por muesca de la rueda
 
 
 class LoginFrame(ctk.CTkFrame):
@@ -47,30 +59,39 @@ class LoginFrame(ctk.CTkFrame):
         self.app = app
         self._register_mode = False
         self._busy = False  # petición de auth en vuelo (anti doble-submit)
+        self._conn_expanded = False  # estado real tras el primer pack (abajo)
+        self._scroll_active = False
 
         # --- Franja CONEXIÓN (ANTES de cualquier login) -----------------------
+        # Fuera del área con scroll: siempre visible y accesible.
         self._build_conn_strip()
+
+        # --- Área de contenido con scroll de emergencia -----------------------
+        # Normalmente todo cabe (login compacto); en pantallas muy bajas el
+        # Canvas habilita la Scrollbar + rueda del ratón.
+        self._build_scroll_area()
+        content = self._scroll_inner
 
         # --- Bloque de identidad (display) -----------------------------------
         ctk.CTkLabel(
-            self, text=section_text("TERMINAL DE JUGADOR"),
+            content, text=section_text("TERMINAL DE JUGADOR"),
             font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
-        ).pack(pady=(SP["xl"], SP["s"]))
+        ).pack(pady=(SP["l"], SP["xs"]))
         ctk.CTkLabel(
-            self, text=tracked("IW4X RANKING"), font=font(30, "bold", mono=True),
+            content, text=tracked("IW4X RANKING"), font=font(30, "bold", mono=True),
             text_color=COLORS["text"],
         ).pack()
-        hairline(self, COLORS["accent_border"]).pack(
-            fill="x", padx=120, pady=(SP["m"], SP["s"])
+        hairline(content, COLORS["accent_border"]).pack(
+            fill="x", padx=120, pady=(SP["s"], SP["xs"])
         )
         ctk.CTkLabel(
-            self, text="Entra con tu nick de jugador para jugar y vincular tu GUID",
+            content, text="Entra con tu nick de jugador para jugar y vincular tu GUID",
             font=font(12), text_color=COLORS["text_dim"],
-        ).pack(pady=(0, SP["s"]))
+        ).pack(pady=(0, SP["xs"]))
 
         # --- Tarjeta HUD con brackets ----------------------------------------
-        card = BracketCard(self, accent=True)
-        card.pack(padx=SP["xl"], pady=SP["s"])
+        card = BracketCard(content, accent=True)
+        card.pack(padx=SP["xl"], pady=(SP["xs"], 0))
         body = card.inner
 
         # Campos: NICK siempre visible (credencial de entrada); el EMAIL solo
@@ -107,9 +128,9 @@ class LoginFrame(ctk.CTkFrame):
             body, "ENTRAR", self._on_submit, width=FIELD_W, height=44
         )
         self.action_btn.configure(font=font(14, "bold", mono=True))
-        self.action_btn.pack(fill="x", padx=SP["l"], pady=(SP["m"], 0))
+        self.action_btn.pack(fill="x", padx=SP["l"], pady=(SP["s"], 0))
 
-        hairline(body).pack(fill="x", padx=SP["l"], pady=(SP["m"], 0))
+        hairline(body).pack(fill="x", padx=SP["l"], pady=(SP["s"], 0))
 
         self.toggle_link = ctk.CTkButton(
             body,
@@ -121,7 +142,7 @@ class LoginFrame(ctk.CTkFrame):
             corner_radius=RADIUS["btn"],
             command=self._toggle_mode,
         )
-        self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["m"]))
+        self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["s"]))
 
         # Enter = enviar.
         for entry in (self.nick, self.password, self.email):
@@ -151,19 +172,26 @@ class LoginFrame(ctk.CTkFrame):
         # bloquea el render; el resultado llega por la cola de la App).
         self._conn_test()
 
-    # ================== Franja CONEXIÓN ==================
+    # ================== Franja CONEXIÓN (colapsable) ==================
     def _build_conn_strip(self) -> None:
-        """Franja HUD con la dirección de la API: ver/probar/guardar sin login."""
+        """Franja HUD con la dirección de la API: ver/probar/guardar sin login.
+
+        Compacta: la caption "// CONEXIÓN //" es clickeable y expande/colapsa
+        el detalle. Colapsada muestra solo el marcador + punto de estado.
+        """
         strip = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=2)
-        strip.pack(fill="x", padx=SP["l"], pady=(SP["l"], 0))
+        strip.pack(fill="x", padx=SP["l"], pady=(SP["s"], 0))
         self.conn_strip = strip
         inner = ctk.CTkFrame(strip, fg_color="transparent")
-        inner.pack(fill="x", padx=SP["m"], pady=(SP["s"], SP["s"]))
+        inner.pack(fill="x", padx=SP["m"], pady=(SP["xs"], SP["xs"]))
 
-        # Fila 1: marcador de sección + punto de estado.
+        # Fila 1: marcador de sección (CLIC = expandir/colapsar) + punto.
         row1 = ctk.CTkFrame(inner, fg_color="transparent")
         row1.pack(fill="x")
-        section_label(row1, "CONEXIÓN").pack(side="left")
+        self.conn_caption = section_label(row1, "CONEXIÓN")
+        self.conn_caption.configure(cursor="hand2")
+        self.conn_caption.pack(side="left")
+        self.conn_caption.bind("<Button-1>", lambda _e: self.toggle_conn())
         self.conn_state = ctk.CTkLabel(
             row1, text="● PROBANDO…", font=font(10, "bold", mono=True),
             text_color=COLORS["accent"], anchor="e",
@@ -172,7 +200,6 @@ class LoginFrame(ctk.CTkFrame):
 
         # Fila 2: caption + URL (label → click → entry) + acciones.
         row2 = ctk.CTkFrame(inner, fg_color="transparent")
-        row2.pack(fill="x", pady=(SP["xs"], 0))
         ctk.CTkLabel(
             row2, text="API", font=font(9, "bold", mono=True),
             text_color=COLORS["text_dim"],
@@ -199,18 +226,45 @@ class LoginFrame(ctk.CTkFrame):
         self.conn_test_btn.pack(side="right", padx=(SP["s"], 0))
         self.conn_save_btn = ghost_button(row2, "GUARDAR", self._conn_save, width=100)
         self.conn_save_btn.pack(side="right")
+        self.conn_row2 = row2  # se muestra/oculta con el colapso
 
         # Fila 3: ruta EXACTA del config (dim) para editarlo a mano.
         self.conn_path_label = ctk.CTkLabel(
             inner, text=f"config: {config_path()}", font=font(9, mono=True),
             text_color=COLORS["text_faint"], anchor="w",
         )
-        self.conn_path_label.pack(fill="x", pady=(SP["xs"], 0))
+        self.conn_row3 = self.conn_path_label  # idem
 
         # Edición inline: Enter/FocusOut aplican (normalizando), Escape cancela.
         self.conn_url_entry.bind("<Return>", lambda _e: self._conn_commit())
         self.conn_url_entry.bind("<FocusOut>", lambda _e: self._conn_commit())
         self.conn_url_entry.bind("<Escape>", lambda _e: self._conn_cancel())
+
+        # Estado inicial EXPANDIDO (la API puede estar mal: verla ayuda).
+        self.set_conn_expanded(True)
+
+    def set_conn_expanded(self, expanded: bool) -> None:
+        """Muestra/oculta el detalle de la franja CONEXIÓN (URL + acciones).
+
+        Colapsada queda solo la caption clickeable + punto de estado: la
+        columna de login gana ~60px verticales. Es idempotente.
+        """
+        expanded = bool(expanded)
+        if expanded == self._conn_expanded:
+            return
+        self._conn_expanded = expanded
+        if expanded:
+            self.conn_row2.pack(fill="x", pady=(SP["xs"], 0))
+            self.conn_row3.pack(fill="x", pady=(SP["xs"], 0))
+        else:
+            self.conn_row2.pack_forget()
+            self.conn_row3.pack_forget()
+            # El contenido se acorta: volver arriba para ver el formulario.
+            self.reset_scroll()
+
+    def toggle_conn(self) -> None:
+        """Click en la caption: alterna el detalle de la franja."""
+        self.set_conn_expanded(not self._conn_expanded)
 
     # --- Estado del punto -----------------------------------------------------
     def _conn_set_state(self, kind: str, text: Optional[str] = None) -> None:
@@ -230,6 +284,8 @@ class LoginFrame(ctk.CTkFrame):
 
     def _conn_edit(self) -> None:
         """Click en la URL → entry editable inline con la URL actual."""
+        if not self._conn_expanded:
+            self.set_conn_expanded(True)
         if self.conn_url_entry.winfo_ismapped():
             return
         self.conn_url_entry.delete(0, "end")
@@ -264,7 +320,8 @@ class LoginFrame(ctk.CTkFrame):
 
         ``initiator`` elige el label de progreso del botón que lanzó el test
         (PROBAR → "PROBANDO…"; GUARDAR → "GUARDANDO…"). El otro botón se
-        deshabilita sin cambiar su label.
+        deshabilita sin cambiar su label. Tras el PRIMER éxito la franja se
+        colapsa sola (login compacto; la caption la reabre con un click).
         """
         url = normalize_api_url(base if base is not None else self.app.cfg.api_url)
         self.conn_url_label.configure(text=url)
@@ -274,10 +331,12 @@ class LoginFrame(ctk.CTkFrame):
         def ok(_data) -> None:
             self._conn_set_state("ok")
             self._conn_buttons(True)
+            self.set_conn_expanded(False)  # primer éxito → colapsada
 
         def fail(_exc: Exception) -> None:
             self._conn_set_state("fail")
             self._conn_buttons(True)
+            self.set_conn_expanded(True)  # sin conexión: el detalle visible
             log.info("Test de conexión falló contra %s", url)
 
         # Cliente dedicado: timeout corto para no colgar la pantalla.
@@ -311,6 +370,65 @@ class LoginFrame(ctk.CTkFrame):
             set_button_busy(self.conn_test_btn, "PROBANDO…", width=112)
             set_button_busy(self.conn_save_btn, "GUARDAR")
 
+    # ================== Área de contenido (scroll de emergencia) ==========
+    def _build_scroll_area(self) -> None:
+        """Canvas + Scrollbar vertical para pantallas MUY bajas (<720px).
+
+        La columna de login cabe en la geometría mínima (980x640) sin
+        scroll; si la ventana se acorta más que el contenido, aparece la
+        Scrollbar (y la rueda del ratón hace scroll en toda el área).
+        """
+        self._canvas = tk.Canvas(
+            self, bg=COLORS["bg_deep"], highlightthickness=0, bd=0,
+        )
+        self._vbar = ctk.CTkScrollbar(self, command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vbar.set)
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._scroll_inner = ctk.CTkFrame(self._canvas, fg_color="transparent")
+        self._canvas_window = self._canvas.create_window(
+            (0, 0), window=self._scroll_inner, anchor="nw",
+        )
+        self._scroll_inner.bind("<Configure>", lambda _e: self._sync_scroll())
+        self._canvas.bind("<Configure>", lambda _e: self._sync_scroll())
+        # Rueda del ratón: bind_all (vía el Canvas tk plano — CTk no permite
+        # bind_all en sus widgets) con guard: solo actúa con el login en
+        # pantalla; el resto de widgets (consola de la home) conservan su
+        # scroll propio.
+        self._canvas.bind_all("<MouseWheel>", self._on_wheel, add="+")
+
+    def _sync_scroll(self) -> None:
+        """Recalcula scrollregion, ancho del contenido y visibilidad del bar."""
+        canvas = self._canvas
+        content_h = self._scroll_inner.winfo_reqheight()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfigure(
+            self._canvas_window,
+            width=canvas.winfo_width(),
+            height=max(content_h, canvas.winfo_height()),
+        )
+        needs = content_h > canvas.winfo_height() + 1
+        if needs and not self._scroll_active:
+            self._scroll_active = True
+            self._vbar.pack(side="right", fill="y")
+        elif not needs and self._scroll_active:
+            self._scroll_active = False
+            self._vbar.pack_forget()
+            canvas.yview_moveto(0)
+
+    def _on_wheel(self, event) -> None:
+        """Rueda del ratón sobre el login (ignorada si no está en pantalla)."""
+        if self.app.current_frame is not self or not self._scroll_active:
+            return
+        step = -WHEEL_STEP if event.delta > 0 else WHEEL_STEP
+        self._canvas.yview_scroll(step, "units")
+
+    def reset_scroll(self) -> None:
+        """Vuelve arriba (al mostrar la pantalla o al colapsar la CONEXIÓN)."""
+        try:
+            self._canvas.yview_moveto(0)
+        except Exception:
+            pass
+
     # --- Constructores de campo (entry HUD) ---------------------------------
     @staticmethod
     def _make_entry(parent, placeholder: str, show: str = "") -> ctk.CTkEntry:
@@ -328,7 +446,7 @@ class LoginFrame(ctk.CTkFrame):
             text_color=COLORS["text_dim"], anchor="w",
         )
         caption_label.pack(fill="x", padx=SP["l"],
-                           pady=((SP["l"] if row == 0 else SP["s"]), 2))
+                           pady=((SP["s"] if row == 0 else SP["xs"]), 2))
         entry.pack(fill="x", padx=SP["l"])
         return caption_label
 
@@ -351,10 +469,12 @@ class LoginFrame(ctk.CTkFrame):
             self.email_box.pack(fill="x", before=self.status)
         else:
             self.action_btn.configure(text="ENTRAR")
-            self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["m"]))
+            self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["s"]))
             self.back_btn.pack_forget()
             self.email_box.pack_forget()
         self.status.configure(text="")
+        self._sync_scroll()
+        self.reset_scroll()
 
     def _back_to_login(self) -> None:
         """‹ VOLVER (solo en registro): vuelve al login conservando campos."""

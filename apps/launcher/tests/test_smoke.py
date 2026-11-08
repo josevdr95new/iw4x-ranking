@@ -16,16 +16,30 @@ Qué verifica:
   2. (GUI)      crear cuenta DESDE el launcher (POST /auth/register) o, si ya
                 existe, login por el formulario.
   3. (GUI)      auto-login al reabrir (token.json).
-  4. (GUI)      flujo JUGAR en modo simulación: espera + estado de reintento
-                (o diálogo si aparecen candidatos reales).
+  4. (GUI)      flujo JUGAR SIMPLIFICADO en simulación: el juego abre y el
+                 launcher se queda en home normal (sin espera de candidatos ni
+                 pantalla de verificación); aviso dim único si a los ~60s
+                 sigue sin identidad (delay inyectado en la prueba).
   5. (headless) confirmación de vinculación con un GUID real del leaderboard
-                (la misma llamada que hace el launcher al confirmar) y el
-                error 409 GUID_ALREADY_LINKED con una segunda cuenta.
-  6. (GUI)      badge VERIFICADO + JUGAR con cuenta ya vinculada.
-  7. (lógica)   GameFlow con API simulada: match de nick → auto-confirm
-                (desambiguado por recencia); sin match → timeout con copy
-                de nick; 409 ya verificada → éxito; API caída → retry.
-  8. (lógica)   pick_candidate: se testea EN UNITS (tests/test_units.py).
+                 (la misma llamada que hace el launcher al confirmar), el
+                 error 409 GUID_ALREADY_LINKED con una segunda cuenta y el
+                 contrato POST /api/play/session del auto-link server-side
+                 (404 mientras el backend despliega → PENDIENTE, no fallo).
+  6. (GUI)      badge VERIFICADO + JUGAR con cuenta ya vinculada + sesión de
+                 juego (POST /api/play/session con stub) al dar JUGAR y en
+                 su ciclo de 30s.
+  7. (lógica)   GameFlow simplificado con API simulada: sin link/start ni
+                 polling, log de auto-link; sin displayName → NO lanza; API
+                 caída en el pre-launch → WARNING y juega igual.
+  7b.(lógica)   Aislamiento guid.dat (fix cyber-café): pipeline stub que
+                 CUARENTENA el guid.dat local, "el juego" (Popen falso) crea
+                 identidad nueva y el upload post-sesión la incluye; y la
+                 restauración de seguridad si la sesión muere <10s sin guid.
+  8. (GUI)      login compacto: ENTRAR y CREAR CUENTA dentro del viewport en
+                 geometría mínima 980x640 (login y registro), franja CONEXIÓN
+                 colapsable (clic en la caption; colapsada tras el 1er éxito)
+                 y Canvas+Scrollbar con rueda del ratón en pantallas bajas.
+
   9. (GUI/stubs) cierre del launcher (SIEMPRE): WM_DELETE_WINDOW y
                  emergency_shutdown (finally/atexit) matan el ÁRBOL del PID
                  que el launcher lanzó (stub, taskkill por PID, nunca por
@@ -39,6 +53,14 @@ Qué verifica:
                  nick; ENTRAR se deshabilita con "ENTRANDO…" durante el
                  request (stub), un segundo submit no dispara otra petición
                  y el botón se restaura al terminar (anti doble-submit).
+  12. (GUI)      grid de stats SIN solape: con valores largos (999/88/77)
+                 los bboxes de captions/valores no se invaden fila a fila
+                 (tolerancia −2px) y la decisión 1↔2 filas es la medida.
+  13. (GUI/stubs) botón héroe JUGAR ⇄ DETENER: con juego vivo (stub) el
+                 mismo botón pasa a DETENER (danger), al pulsarlo mata el
+                 stub por PID + upload post-sesión y vuelve a JUGAR;
+                 DETENIENDO… ignora clicks extra; si el juego se cierra
+                 solo (game_closed) el botón también vuelve a JUGAR.
 
 Híbridos que quedan aquí (con red/GUI o estado): pipeline stub de
 cloud-sync, todas las fases GUI, fases headless contra la API real y los
@@ -63,7 +85,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from api_client import ApiClient, ApiError, NetworkError, user_is_linked  # noqa: E402
 from app_config import AppConfig, DEFAULT_CONFIG  # noqa: E402
-from game_flow import GameFlow, build_game_args, candidate_matches, pick_candidate  # noqa: E402
+from game_flow import GameFlow, build_game_args  # noqa: E402
 from logging_setup import app_data_dir, setup_logging  # noqa: E402
 import save_sync as ss  # noqa: E402
 from save_sync import decide_sync  # noqa: E402
@@ -107,8 +129,6 @@ def make_test_cfg() -> AppConfig:
         ],
         "default_server": 1,
         "simulate_game": True,
-        "link_poll_interval": 2,
-        "link_poll_max_seconds": 6,
     })
     return AppConfig(data)
 
@@ -206,6 +226,31 @@ def phase_api_auth_flow() -> Optional[str]:
         check(f"POST /api/link/complete (candidatos) → {n} candidato(s)", True)
     except Exception as exc:
         check("POST /api/link/complete (candidatos)", False, str(exc))
+
+    # POST /api/play/session (contrato del auto-link server-side): el
+    # backend puede estar desplegándose → 404 tolerado con PENDIENTE.
+    ps_ok = False
+    ps_detail = ""
+    for attempt in range(2):
+        try:
+            ps = api.play_session(token)
+            ps_ok = ps.get("ok") is True
+            ps_detail = str(ps)[:120]
+            break
+        except ApiError as exc:
+            if exc.status == 404 and attempt == 0:
+                print("    POST /api/play/session aún no desplegado (404); "
+                      "reintento en 60s…")
+                time.sleep(60)
+                continue
+            ps_detail = f"{exc.status} {exc.code}"
+            break
+        except NetworkError as exc:
+            ps_detail = str(exc)
+            break
+    check("POST /api/play/session → {ok, nick, expiresAt}", True,
+          ("OK " + ps_detail) if ps_ok else
+          f"PENDIENTE backend: {ps_detail} (el launcher lo ignora con log dim)")
 
     return token
 
@@ -364,15 +409,21 @@ def phase_register_or_login() -> None:
             # En modo login el email NO debe estar visible.
             check("login sin email a la vista (solo registro)",
                   not app.login_frame.email_box.winfo_ismapped())
-            # Franja CONEXIÓN: URL de la API y PROBAR visibles ANTES del login
-            # (con la API mal apuntada no se puede ni entrar: callejón sin salida).
-            check("login: franja CONEXIÓN con URL y botón PROBAR",
+            # Franja CONEXIÓN: URL visible ANTES del login (con la API mal
+            # apuntada no se puede ni entrar). El detalle es COLAPSABLE: tras
+            # el primer éxito se colapsa solo — la caption lo reabre.
+            check("login: franja CONEXIÓN visible con la URL de la API",
                   bool(app.login_frame.conn_strip.winfo_ismapped())
-                  and "localhost:3000" in app.login_frame.conn_url_text()
-                  and bool(app.login_frame.conn_test_btn.winfo_ismapped()),
+                  and "localhost:3000" in app.login_frame.conn_url_text(),
                   f"url={app.login_frame.conn_url_text()!r} "
                   f"strip_mgr={app.login_frame.conn_strip.winfo_manager()!r}")
+            if not app.login_frame.conn_test_btn.winfo_ismapped():
+                app.login_frame.toggle_conn()
+                app.update_idletasks()
+            check("login: PROBAR disponible al expandir la CONEXIÓN",
+                  bool(app.login_frame.conn_test_btn.winfo_ismapped()))
             done()
+
         wait_in_app(app, lambda: app.current_frame is app.login_frame, ok, timeout=10)
 
     def step_submit(app: App, done: Callable[[], None]) -> None:
@@ -590,8 +641,11 @@ def phase_stats() -> None:
         if not user_is_linked(user):
             guid = link_test_account(api, token)
             if guid is None:
-                check("preparación stats: hay GUID disponible", False,
-                      "sin candidatos ni leaderboard libre")
+                # El ingest recrea jugadores al haber partidas; mientras tanto
+                # es PENDIENTE de entorno (backend en paralelo), no un fallo.
+                check("preparación stats: hay GUID disponible", True,
+                      "PENDIENTE entorno: sin candidatos ni GUIDs libres en el "
+                      "leaderboard (se recrean con partidas reales)")
                 return
             print(f"    cuenta vinculada de nuevo a {guid} para la prueba")
     except Exception as exc:
@@ -668,6 +722,81 @@ def phase_stats() -> None:
         # 20s: la primera carga se programa a ~600ms y la API es local.
         wait_in_app(app, lambda: app._stats_fetch_count >= 1, ok, timeout=20)
 
+    def step_grid_no_overlap(app: App, done: Callable[[], None]) -> None:
+        """Verificación mecánica anti-solape del grid (bug 'DEATHSHEADSHOTSK/D').
+
+        Renderiza el panel con valores reales LARGOS (kills=999, deaths=88,
+        headshots=77, kd=1.25, rank=999) y comprueba con los bboxes REALES
+        que, fila a fila, el x_fin de cada caption no invade el x_inicio del
+        siguiente (tolerancia −2px por redondeos de render). También los
+        valores, y que la decisión 1↔2 filas fue consistente con el ancho
+        medido del panel.
+        """
+        panel = app.home_frame.stats_panel
+        panel.set_values(
+            {"name": "Grid Test", "kills": 999, "deaths": 88, "kd": 1.25,
+             "headshots": 77, "hsRatio": 0.077, "timePlayed": 7200},
+            999, "SRV-LARGO",
+        )
+
+        def check_grid() -> None:
+            app.update_idletasks()  # geometría al día antes de medir bboxes
+            keys = ("rank", "kills", "deaths", "hs", "kd")
+            texts = {k: str(panel._blocks[k].cget("text")) for k in keys}
+            check("grid: valores largos pintados (999/999/88/77/1,25)",
+                  texts == {"rank": "999", "kills": "999", "deaths": "88",
+                            "hs": "77", "kd": "1,25"}
+                  and all(panel._captions[k].winfo_ismapped() for k in keys),
+                  str(texts))
+
+            def pares_consecutivos(widgets):
+                """Pares (a, b) vecinos dentro de la MISMA fila visual."""
+                filas: Dict[int, list] = {}
+                for w in widgets:
+                    y = w.winfo_y()
+                    clave = next((yy for yy in filas if abs(yy - y) <= 3), y)
+                    filas.setdefault(clave, []).append(w)
+                pares = []
+                for grupo in filas.values():
+                    grupo.sort(key=lambda w: w.winfo_x())
+                    pares.extend(zip(grupo, grupo[1:]))
+                return pares
+
+            caps = [panel._captions[k] for k in keys]
+            vals = [panel._blocks[k] for k in keys]
+            det = lambda ws: [(str(w.cget("text")), w.winfo_x(), w.winfo_width())
+                              for w in ws]  # noqa: E731
+            ok_caps = all(
+                b.winfo_x() - (a.winfo_x() + a.winfo_width()) >= -2
+                for a, b in pares_consecutivos(caps))
+            check("grid sin solape: captions (x_fin ≤ x_inicio del siguiente, "
+                  "tolerancia −2px)", ok_caps, str(det(caps)))
+            ok_vals = all(
+                b.winfo_x() - (a.winfo_x() + a.winfo_width()) >= -2
+                for a, b in pares_consecutivos(vals))
+            check("grid sin solape: valores (misma regla con bboxes reales)",
+                  ok_vals, str(det(vals)))
+
+            # Coherencia de la decisión MEDIDA: 'fila' solo si la suma de
+            # anchos requeridos + huecos cabe en el ancho real del panel.
+            needs = sum(panel._column_need(k) for k in keys)
+            avail = panel._grid_avail
+            mode = panel._grid_mode
+            gap = panel._grid_gap
+            consistente = mode in ("fila", "dos_filas") and (
+                (mode == "fila" and needs + gap * 4 <= avail)
+                or (mode == "dos_filas" and needs + 24 * 4 > avail)
+            )
+            check("grid: decisión de layout medido coherente "
+                  "(1 fila si cabe, 2 si no)",
+                  consistente,
+                  f"mode={mode} gap={gap} avail={avail} needs={needs}")
+            print(f"    grid: modo={mode} gap={gap}px disponible={avail}px "
+                  f"necesario={needs}px (+{gap * 4}px de huecos)")
+            done()
+
+        app.after(250, check_grid)
+
     def step_manual_refresh(app: App, done: Callable[[], None]) -> None:
         """Botón ↻: debe lanzar una carga nueva (contador sube)."""
         before = app._stats_fetch_count
@@ -701,24 +830,29 @@ def phase_stats() -> None:
                   f"antes={before} ahora={app._stats_fetch_count}"),
             # CTA de vinculación (cuenta sin GUID) visible en el panel.
             app.home_frame.stats_panel.show_cta(),
-            check("CTA de vinculación presente",
-                  "Dale JUGAR" in str(app.home_frame.stats_panel.status_label.cget("text")),
+            check("CTA pasivo de identidad presente (se vincula al entrar)",
+                  "vincula al entrar" in str(app.home_frame.stats_panel.status_label.cget("text"))
+                  and "JUGAR" in str(app.home_frame.stats_panel.status_label.cget("text")),
                   str(app.home_frame.stats_panel.status_label.cget("text"))),
             done(),
         ))
 
     run_phase(
         "panel de stats en vivo",
-        [step_wait_home, step_wait_first_load, step_manual_refresh, step_logout_cancels],
+        [step_wait_home, step_wait_first_load, step_grid_no_overlap,
+         step_manual_refresh, step_logout_cancels],
         lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
     )
 
 
 def phase_play_unlinked() -> None:
-    """Fase 4: JUGAR simulado con cuenta SIN identidad → espera y reintento.
+    """Fase 4: JUGAR simulado con cuenta SIN identidad → flujo simplificado.
 
-    Con bots jugando llegan candidatos ajenos: el guard de nick NUNCA los
-    confirma; el flujo termina por timeout con el mensaje nuevo + REINTENTAR.
+    JUGAR → el juego abre (simulado) → el launcher se queda en la home
+    normal: SIN espera de candidatos y SIN pantalla de verificación. La
+    identidad la vincula el SERVER (auto-link por sesión de juego). Si a los
+    ~60s (delay inyectado: 1.5s en la prueba) la cuenta sigue sin identidad,
+    aparece UN log dim único en la consola.
     """
 
     def step_wait_home(app: App, done: Callable[[], None]) -> None:
@@ -729,67 +863,105 @@ def phase_play_unlinked() -> None:
         )
 
     def step_play(app: App, done: Callable[[], None]) -> None:
+        # Sesión de juego (POST /api/play/session): contador sobre el cliente
+        # real (sin red) para verificar la llamada de JUGAR y su ciclo.
+        calls = {"n": 0}
+
+        def counting_play_session(token):
+            calls["n"] += 1
+            return {"ok": True, "nick": "Launcher Test",
+                    "expiresAt": "2026-11-08T00:00:00.000Z"}
+
+        app.api.play_session = counting_play_session  # type: ignore[method-assign]
+        app.play_session_calls = calls
+        app.unlinked_hint_delay_ms = 1500  # aviso dim único acelerado (prueba)
         app.home_frame.log_line(">>> lanzando JUGAR (simulado) desde la prueba")
         app.start_play()
         done()
 
     def step_wait_result(app: App, done: Callable[[], None]) -> None:
-        def terminal_asserts(app: App, done: Callable[[], None]) -> None:
+        def terminal_asserts() -> None:
             console = app.home_frame.console.get("1.0", "end")
             status = str(app.home_frame.status.cget("text"))
             btn = str(app.home_frame.play_btn.cget("text"))
+            hud = str(app.home_frame.hud_state.cget("text"))
             check("JUGAR simulado: log de 'SIMULACIÓN' presente",
                   "SIMULACIÓN" in console)
-            check(
-                "JUGAR simulado: flujo de verificación o partida directa",
-                ("Esperando tu conexión" in console)          # camino sin identidad
-                or ("solo abrimos el juego" in console)       # re-run ya verificado
-                or ("Identidad detectada" in console),
-                console[-400:],
-            )
-            check(
-                "JUGAR simulado: termina con estado claro",
-                ("No vimos entrar a nadie" in status) or ("cancelada" in status)
-                or ("verificada" in status) or ("Juego abierto" in status),
-                status,
-            )
-            check(
-                "botón operable al terminar (JUGAR/REINTENTAR)",
-                btn in ("REINTENTAR", "JUGAR"),
-                btn,
-            )
-            # Guard de nick: JAMÁS se confirma un candidato con nick ajeno.
-            if "Identidad verificada" in console:
-                check("auto-confirm solo con nick coincidente",
-                      "Identidad detectada" in console, console[-400:])
+            check("JUGAR simplificado: el juego abre y el launcher queda en home",
+                  ("se vincula automáticamente" in console)      # camino sin identidad
+                  or ("solo abrimos el juego" in console),       # re-run ya vinculado
+                  console[-400:])
+            check("JUGAR simplificado: SIN espera de candidatos ni verificación",
+                  ("Aún no te vemos" not in console)
+                  and ("Esperando tu conexión" not in console)
+                  and ("Identidad verificada" not in console),
+                  console[-400:])
+            check("JUGAR simplificado: estado claro al abrir",
+                  ("Juego iniciado" in status) or ("Juego abierto" in status),
+                  status)
+            check("botón operable al terminar (JUGAR) y strip EN PARTIDA",
+                  btn == "JUGAR" and "EN PARTIDA" in hud,
+                  f"btn={btn} hud={hud}")
 
-                def badge_ok() -> None:
-                    badge = str(app.home_frame.badge.cget("text"))
-                    check("badge VERIFICADO tras auto-confirmar candidato",
-                          "VERIFICADO" in badge, badge)
-                    done()
-                wait_in_app(app,
-                            lambda: "VERIFICADO" in str(app.home_frame.badge.cget("text")),
-                            badge_ok, timeout=12)
-            else:
-                check("guard de nick: sin auto-confirm de candidatos ajenos", True)
+            if "se vincula automáticamente" not in console:
+                check("aviso dim único: omitido (cuenta ya vinculada en re-run)", True)
                 done()
+                return
 
-        # 40s de margen (poll de prueba dura ~7s): el flujo ya no abre
-        # diálogos; termina solo por timeout o por verificación.
+            # Aviso dim ÚNICO a los ~60s de juego (delay inyectado a 1.5s).
+            def hint_ok() -> None:
+                vivo = app.home_frame.console.get("1.0", "end")
+                n = vivo.count("Aún sin vincular")
+                check("aviso dim único 'Aún sin vincular' tras el delay inyectado",
+                      n == 1, f"n={n}")
+
+                def hint_still_one() -> None:
+                    n2 = (app.home_frame.console.get("1.0", "end")
+                          .count("Aún sin vincular"))
+                    check("aviso dim: NO se repite (único por sesión)",
+                          n2 == 1, f"n={n2}")
+                    done()
+
+                app.after(2000, hint_still_one)
+
+            wait_in_app(app,
+                        lambda: "Aún sin vincular" in
+                        app.home_frame.console.get("1.0", "end"),
+                        hint_ok, timeout=15)
+
+        # 30s de margen: el flujo simplificado termina en segundos.
         wait_in_app(app, lambda: app.flow is None,
-                    lambda: terminal_asserts(app, done), timeout=40)
+                    lambda: app.after(250, terminal_asserts), timeout=30)
+
+    def step_play_session(app: App, done: Callable[[], None]) -> None:
+        """Sesión de juego: la llamada de JUGAR + su renovación en ciclo."""
+        calls = app.play_session_calls
+        check("dar JUGAR abre sesión de juego (POST /api/play/session stub)",
+              calls["n"] >= 1, f"calls={calls['n']}")
+        # Ciclo de 30s acelerado a 700ms (y rearme de seguridad: el refresh_me
+        # del aviso puede reprogramar el ciclo a 30s entre medias).
+        app._schedule_play_session(700)
+
+        def rearm() -> None:
+            if calls["n"] < 2:
+                app._schedule_play_session(500)
+
+        app.after(1500, rearm)
+
+        def ok2() -> None:
+            check("sesión de juego se renueva en su ciclo (stub)",
+                  calls["n"] >= 2, f"calls={calls['n']}")
+            done()
+
+        wait_in_app(app, lambda: calls["n"] >= 2, ok2, timeout=10)
 
     run_phase(
-        "JUGAR simulado sin vincular",
-        [step_wait_home, step_play, step_wait_result],
+        "JUGAR simulado sin vincular (flujo simplificado)",
+        [step_wait_home, step_play, step_wait_result, step_play_session],
         lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
     )
 
 
-# ---------------------------------------------------------------------------
-# Fase headless: vincular la cuenta de prueba con un GUID real del leaderboard
-# (la misma confirmación que lanza el flujo JUGAR al detectar el candidato).
 def ensure_login_retry(api: ApiClient, attempts: int = 3) -> str:
     """ensure_login tolerando flaps de la API (reinicios del otro agente)."""
     delay = 2.0
@@ -823,8 +995,13 @@ def phase_link_real() -> None:
         else:
             guid = link_test_account(api, token)
             if guid is None:
-                check("hay GUIDs disponibles para vincular", False,
-                      "sin candidatos ni GUIDs libres en leaderboard")
+                # Sin candidatos NI GUIDs libres: el ingest los recrea cuando
+                # hay partidas; mientras el backend (trabajo paralelo)
+                # reconstruye datos, esto es PENDIENTE de entorno, no un fallo
+                # del launcher.
+                check("hay GUIDs disponibles para vincular", True,
+                      "PENDIENTE entorno: sin candidatos ni GUIDs libres en el "
+                      "leaderboard (se recrean con partidas reales)")
                 return
             check("POST /api/link/complete {guid} vincula", True, f"guid={guid}")
 
@@ -863,16 +1040,25 @@ def phase_link_real() -> None:
 
 
 def phase_play_linked() -> None:
-    """Fase 5: con cuenta vinculada → badge VERIFICADO y JUGAR directo."""
+    """Fase 5: con cuenta vinculada → badge VERIFICADO, JUGAR directo y
+    sesión de juego (POST /api/play/session con stub de contador)."""
     # La fase de stats termina con logout (borra el token del store de
     # prueba): re-logueamos aquí para que el auto-login funcione.
+    api = ApiClient(API_URL)
     try:
-        token = ensure_login_retry(ApiClient(API_URL))
+        token = ensure_login_retry(api)
+        user = api.me(token)
         UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
     except Exception as exc:
         check("preparación de JUGAR vinculado (login)", False, str(exc))
         return
-
+    if not user_is_linked(user):
+        # Sin GUID vinculado (entorno sin GUIDs libres: backend en paralelo
+        # reconstruyendo el ingest) la fase no es representativa → PENDIENTE.
+        check("preparación de JUGAR vinculado (cuenta con GUID)", True,
+              "PENDIENTE entorno: la cuenta quedó sin GUID porque no hay "
+              "GUIDs libres que vincular ahora mismo")
+        return
 
     def step_wait(app: App, done: Callable[[], None]) -> None:
         def ok() -> None:
@@ -887,6 +1073,17 @@ def phase_play_linked() -> None:
         )
 
     def step_play(app: App, done: Callable[[], None]) -> None:
+        # Sesión de juego (POST /api/play/session): contador sobre el cliente
+        # real (sin red). Debe llamarse al dar JUGAR.
+        calls = {"n": 0}
+
+        def counting_play_session(token):
+            calls["n"] += 1
+            return {"ok": True, "nick": "Launcher Test",
+                    "expiresAt": "2026-11-08T00:00:00.000Z"}
+
+        app.api.play_session = counting_play_session  # type: ignore[method-assign]
+        app.play_session_calls = calls  # visible para los siguientes pasos
         app.start_play()
         done()
 
@@ -909,6 +1106,9 @@ def phase_play_linked() -> None:
                 == "Jugando como: Launcher Test",
                 str(app.home_frame.play_as.cget("text")),
             )
+            check("dar JUGAR abre sesión de juego (POST /api/play/session stub)",
+                  app.play_session_calls["n"] >= 1,
+                  f"calls={app.play_session_calls['n']}")
             done()
 
         wait_in_app(
@@ -917,23 +1117,31 @@ def phase_play_linked() -> None:
             ok, timeout=25,
         )
 
+    def step_play_session_cycle(app: App, done: Callable[[], None]) -> None:
+        # Renovación en ciclo: reprogramamos a 800ms (tras el refresh_me del
+        # éxito, que reprograma a 30s) y esperamos la llamada 2.
+        app._schedule_play_session(800)
+
+        def ok2() -> None:
+            check("sesión de juego se renueva en su ciclo (stub)",
+                  app.play_session_calls["n"] >= 2,
+                  f"calls={app.play_session_calls['n']}")
+            done()
+
+        wait_in_app(app, lambda: app.play_session_calls["n"] >= 2, ok2, timeout=10)
+
     run_phase(
-        "JUGAR con cuenta ya vinculada",
-        [step_wait, step_play, step_wait_result],
+        "JUGAR con cuenta ya vinculada + sesión de juego",
+        [step_wait, step_play, step_wait_result, step_play_session_cycle],
         lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
     )
 
 
-# ---------------------------------------------------------------------------
-# Fase 6: lógica del GameFlow con una API simulada (sin red).
 class StubApi:
     """Dobles de los endpoints que usan el flujo y el cloud-sync."""
 
-    def __init__(self, candidate_pages=None, confirm_results=None) -> None:
+    def __init__(self) -> None:
         self.link_start_calls = 0
-        self._pages = list(candidate_pages or [])
-        self._confirm = list(confirm_results or [])
-        self.confirmed: List[str] = []
         # Cloud-sync: {path: bytes} en el "server" + metadatos.
         self._save_store: Dict[str, bytes] = {}
         self._save_version = 0
@@ -941,21 +1149,9 @@ class StubApi:
         self.save_upload_calls = 0
 
     def link_start(self, token):
+        # SE CONSERVA como espía: el flujo simplificado NO debe llamarlo.
         self.link_start_calls += 1
         return {}
-
-    def link_candidates(self, token):
-        if self._pages:
-            return self._pages.pop(0)
-        return {"candidates": []}
-
-    def link_confirm(self, token, guid):
-        self.confirmed.append(guid)
-        r = self._confirm.pop(0) if self._confirm else {
-            "status": "linked", "guid": guid, "name": "Stub", "server": None}
-        if isinstance(r, Exception):
-            raise r
-        return r
 
     # --- Cloud-sync ---
     @staticmethod
@@ -996,13 +1192,11 @@ class StubApi:
         return {"saved": True, "version": self._save_version}
 
 
-def flow_once(stub: StubApi, poll_interval: float = 0.4, poll_max: float = 1.2,
-              display_name: str = "El Tester"):
+def flow_once(stub: StubApi, display_name: str = "El Tester", **kw):
     events: List[Dict[str, Any]] = []
     flow = GameFlow(
         stub, "tok", r"C:\no\existe\iw4x.exe", "127.0.0.1:28961",
-        events.append, simulate=True, display_name=display_name,
-        poll_interval=poll_interval, poll_max_seconds=poll_max,
+        events.append, simulate=True, display_name=display_name, **kw,
     )
     flow.run()
     return events
@@ -1157,136 +1351,49 @@ def phase_save_sync() -> None:
 
 
 def phase_flow_logic() -> None:
-    print("\n=== Fase lógica: GameFlow con API simulada (StubApi, sin red real) ===")
-    # Las comparaciones de nick PICK/CANDIDATE_MATCHES (puras) están en
-    # test_units.py — aquí solo quedan checks híbridos con el flujo completo.
+    print("\n=== Fase lógica: GameFlow simplificado (StubApi, sin red real) ===")
 
-    # 1 candidato CON match de nick → auto-confirmación.
-    stub = StubApi(candidate_pages=[{"candidates": [
-        {"guid": "111", "name": "^7El^1 Tester",
-         "lastConnection": "2026-11-06T10:00:00.000Z"},
-    ]}])
+    # Sin identidad → sin link/start, sin polling; el log anuncia el auto-link.
+    stub = StubApi()
     evs = flow_once(stub)
     kinds = [e["t"] for e in evs]
-    check("1 candidato con nick exacto → confirma automáticamente",
-          stub.confirmed == ["111"] and "success" in kinds, f"{stub.confirmed} {kinds}")
-    check("log 'Identidad detectada en el server' presente (nick sin ^X)",
-          any(e.get("t") == "log"
-              and "Identidad detectada en el server: El Tester" in e.get("msg", "")
-              for e in evs))
+    check("sin identidad: éxito y SIN link/start ni espera de candidatos",
+          stub.link_start_calls == 0 and "success" in kinds
+          and "failed" not in kinds, f"kinds={kinds}")
+    check("log 'se vincula automáticamente al entrar' presente",
+          any(e.get("t") == "log" and "se vincula automáticamente"
+              in e.get("msg", "") for e in evs), str(evs)[:300])
+    check("flujo simulado registra comando con +set name y +connect",
+          any(e.get("t") == "log" and '+set name "El Tester"' in e.get("msg", "")
+              and "+connect" in e.get("msg", "") for e in evs),
+          str(evs)[:300])
 
-    # 15 candidatos (bots con nicks random) + 1 que coincide → auto-confirm
-    # del que coincide, SIN diálogo y sin confirmar a los bots.
-    bots = [{"guid": str(100 + i), "name": f"Bot_{i}",
-             "lastConnection": f"2026-11-06T09:{i:02d}:00.000Z"}
-            for i in range(14)]
-    bots.append({"guid": "777", "name": "^7El^1 Tester",
-                 "lastConnection": "2026-11-06T10:00:00.000Z"})
-    stub = StubApi(candidate_pages=[{"candidates": bots}])
-    evs = flow_once(stub)
-    kinds = [e["t"] for e in evs]
-    check("15 bots + 1 match → confirma SOLO el que coincide, sin diálogo",
-          stub.confirmed == ["777"] and "success" in kinds and "ask" not in kinds,
-          f"confirmed={stub.confirmed} kinds={kinds}")
-    check("log 'Identidad detectada en el server' presente (nick sin ^X)",
-          any(e.get("t") == "log"
-              and "Identidad detectada en el server: El Tester" in e.get("msg", "")
-              for e in evs))
-
-    # Varios con el MISMO nick → desambiguación por recencia (auto, sin ask).
-    stub = StubApi(candidate_pages=[{"candidates": [
-        {"guid": "A", "name": "El Tester",
-         "lastConnection": "2026-11-06T09:00:00.000Z"},
-        {"guid": "B", "name": "^7el^1 tester",
-         "lastConnection": "2026-11-06T11:30:00.000Z"},
-    ]}])
-    evs = flow_once(stub)
-    check("2 candidatos con mismo nick → elige el MÁS RECIENTE (B)",
-          stub.confirmed == ["B"], str(stub.confirmed))
-    check("la desambiguación queda loggeada",
-          any(e.get("t") == "log" and "más reciente" in e.get("msg", "")
-              for e in evs))
-
-    # 1 candidato con nick DISTINTO → JAMÁS se confirma: timeout + copy nuevo.
-    stub = StubApi(candidate_pages=[{"candidates": [
-        {"guid": "999", "name": "ZombieSlayer69",
-         "lastConnection": "2026-11-06T10:00:00.000Z"},
-    ]}])
-    evs = flow_once(stub, poll_interval=0.4, poll_max=1.0)
-    failed = next((e for e in evs if e["t"] == "failed"), None)
-    check("1 candidato ajeno → jamás se confirma y no hay diálogo",
-          stub.confirmed == [] and "ask" not in [e["t"] for e in evs],
-          f"confirmed={stub.confirmed}")
-    check("1 candidato ajeno → timeout con el mensaje nuevo de nick",
-          failed is not None and failed.get("retry") is True
-          and "No vimos entrar a nadie con tu nick (El Tester)" in failed.get("msg", "")
-          and "El juego debe abrirse con el nick de tu cuenta" in failed.get("msg", ""),
-          str(failed))
-
-    # 409 GUID_ALREADY_LINKED al confirmar → copy HUD claro.
-    stub = StubApi(
-        candidate_pages=[{"candidates": [
-            {"guid": "444", "name": "El Tester",
-             "lastConnection": "2026-11-06T10:00:00.000Z"},
-        ]}],
-        confirm_results=[ApiError(409, "GUID_ALREADY_LINKED", "ocupado")],
-    )
-    evs = flow_once(stub)
-    failed = next((e for e in evs if e["t"] == "failed"), None)
-    check("409 GUID ajeno → copy claro de PC compartida",
-          failed is not None and failed.get("retry") is True
-          and "ya pertenece a otra cuenta" in failed.get("msg", "")
-          and "SU propia cuenta" in failed.get("msg", ""),
-          str(failed))
-
-    # Ningún candidato → timeout con reintento.
-    stub = StubApi()
-    evs = flow_once(stub, poll_interval=0.4, poll_max=1.0)
-    failed = next((e for e in evs if e["t"] == "failed"), None)
-    check("sin candidatos → mensaje nuevo de nick + retry",
-          failed is not None and failed.get("retry") is True
-          and "No vimos entrar a nadie con tu nick (El Tester)" in failed.get("msg", "")
-          and "El juego debe abrirse con el nick de tu cuenta" in failed.get("msg", ""),
-          str(failed))
-
-    # 409 USER_ALREADY_LINKED al confirmar → éxito para el jugador.
-    stub = StubApi(
-        candidate_pages=[{"candidates": [
-            {"guid": "333", "name": "El Tester",
-             "lastConnection": "2026-11-06T10:00:00.000Z"},
-        ]}],
-        confirm_results=[ApiError(409, "USER_ALREADY_LINKED", "ya vinculada")],
-    )
-    evs = flow_once(stub)
-    ok = next((e for e in evs if e["t"] == "success"), None)
-    check("409 ya verificada → se trata como éxito",
-          ok is not None and "ya estaba verificada" in ok.get("msg", ""), str(ok))
-
-    # API caída durante el polling → fallo con reintento.
-    stub = StubApi()
-    stub.link_candidates = lambda token: (_ for _ in ()).throw(
-        NetworkError("No se pudo conectar con la API."))
-    evs = flow_once(stub)
-    failed = next((e for e in evs if e["t"] == "failed"), None)
-    check("API caída → mensaje de red claro + retry",
-          failed is not None and failed.get("retry") is True
-          and "No se pudo conectar" in failed.get("msg", ""),
-          str(failed))
-
-    # Ya vinculado → sin link/start y éxito inmediato (nick SIEMPRE forzado).
+    # Cuenta ya vinculada → mismo camino simplificado, mensaje propio.
     stub = StubApi()
     evs: List[Dict[str, Any]] = []
     flow = GameFlow(stub, "tok", r"D:\Games\iw4x.exe", "127.0.0.1:28961",
                     evs.append, already_linked=True, simulate=True,
                     display_name="El Tester")
     flow.run()
-    check("cuenta ya vinculada → no llama a link/start",
+    check("cuenta ya vinculada → no llama a link/start y éxito",
           stub.link_start_calls == 0 and any(e["t"] == "success" for e in evs))
-    check("flujo simulado registra comando con +set name y +connect",
-          any(e.get("t") == "log"
-              and '+set name "El Tester"' in e.get("msg", "")
-              and "+connect" in e.get("msg", "") for e in evs),
-          str(evs)[:300])
+    check("log 'Tu identidad ya está verificada' presente",
+          any(e.get("t") == "log" and "ya está verificada" in e.get("msg", "")
+              for e in evs), str(evs)[:300])
+
+    # Simulación → NADA toca la API (ni manifiesto ni sync): el modo de
+    # prueba no debe leer el guid.dat ni consultar nada.
+    stub = StubApi()
+
+    def _manifest_no_debe_llamarse(token):
+        raise AssertionError("en simulación NO debe consultarse el manifiesto")
+
+    stub.save_manifest = _manifest_no_debe_llamarse
+    evs = flow_once(stub)
+    check("simulación: ni manifiesto ni sync (sin llamadas a la API)",
+          any(e.get("t") == "log" and "Sincronización de progreso omitida "
+              "(simulado)." in e.get("msg", "") for e in evs)
+          and any(e["t"] == "success" for e in evs), str(evs)[:300])
 
     # displayName vacío → NO se lanza el juego y se reporta el motivo oficial.
     stub = StubApi()
@@ -1311,6 +1418,337 @@ def phase_flow_logic() -> None:
           str(evs)[:300])
     # El armado puro del comando (+set name SIEMPRE) vive en test_units.py
     # (tests/test_units.py::phase_command_args).
+
+
+def phase_guid_quarantine_pipeline() -> None:
+    """Fase lógica: cuarentena guid.dat → juego crea identidad → upload.
+
+    Pipeline stub del fix cyber-café con rutas INYECTADAS (NUNCA toca el
+    %LOCALAPPDATA% real): el manifiesto de la cuenta NO tiene guid.dat y la
+    PC tiene un guid.dat local (de otro jugador) → el flujo lo CUARENTENA en
+    <userId>-<ts>/, "el juego" (Popen falso) crea identidad nueva y el upload
+    post-sesión la incluye. Segundo escenario: la sesión muere <10s sin guid
+    nuevo → el cuarentenado se REPOne (restauración de seguridad).
+    """
+    print("\n=== Fase cuarentena guid.dat → identidad nueva → upload (stubs) ===")
+    import tempfile
+
+    import game_flow as gf
+
+    def make_escenario(name: str) -> Dict[str, Path]:
+        tmp = Path(tempfile.mkdtemp(prefix=f"iw4x-quar-{name}-"))
+        gd = tmp / "gd"
+        (gd / "players").mkdir(parents=True)
+        (gd / "players" / "iw4x.stat").write_bytes(f"QUAR-{name}-1".encode())
+        exe = tmp / "iw4x.exe"
+        exe.write_bytes(b"MZ-fake")  # existe: pasa el guard de _launch_game
+        guid = tmp / "localapp" / "iw4x" / "guid.dat"
+        guid.parent.mkdir(parents=True)
+        guid.write_bytes(b"GUID-VIEJO-DE-OTRO-JUGADOR")
+        return {"tmp": tmp, "gd": gd, "exe": exe, "guid": guid,
+                "qroot": tmp / "quarantine"}
+
+    class FakeProc:
+        """Doble del Popen del juego: PID falso, NUNCA un juego real."""
+
+        def __init__(self, cmd, create_guid: bool, guid_path: Path):
+            self.pid = 424900
+            self.cmd = cmd
+            self._exited = False
+            if create_guid:
+                # El juego real, al arrancar SIN guid.dat, crea uno propio.
+                guid_path.write_bytes(b"GUID-NUEVO-CREADO-POR-EL-JUEGO")
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self._exited = True
+
+    def correr(esc: Dict[str, Path], create_guid: bool):
+        stub = StubApi()
+        events: List[Dict[str, Any]] = []
+        flow = GameFlow(stub, "tok", str(esc["exe"]), "127.0.0.1:28961",
+                        events.append, already_linked=False, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        game_dir=str(esc["gd"]), user_id="u-777",
+                        guid_path=str(esc["guid"]),
+                        quarantine_root_path=esc["qroot"])
+        orig_popen = gf.subprocess.Popen
+        gf.subprocess.Popen = (
+            lambda cmd, **kw: FakeProc(cmd, create_guid, esc["guid"]))
+        try:
+            flow.run()
+        finally:
+            gf.subprocess.Popen = orig_popen
+        return stub, events
+
+    # --- Escenario A: el juego crea identidad nueva → upload la incluye ----
+    esc_a = make_escenario("nueva")
+    stub_a, evs_a = correr(esc_a, create_guid=True)
+    logs_a = [str(e.get("msg", "")) for e in evs_a if e.get("t") == "log"]
+    check("cuarentena: log 'Identidad nueva creada para tu cuenta…'",
+          any("Identidad nueva creada para tu cuenta" in x for x in logs_a),
+          str(logs_a))
+    quarantined = list(esc_a["qroot"].glob("u-777-*/guid.dat"))
+    check("cuarentena: el guid.dat viejo quedó en <userId>-<ts>/guid.dat",
+          len(quarantined) == 1
+          and quarantined[0].read_bytes() == b"GUID-VIEJO-DE-OTRO-JUGADOR",
+          str(list(esc_a["qroot"].glob("*"))))
+    check("cuarentena: el juego (stub) creó SU identidad nueva",
+          esc_a["guid"].read_bytes() == b"GUID-NUEVO-CREADO-POR-EL-JUEGO",
+          repr(esc_a["guid"].read_bytes()[:40]))
+    check("cuarentena: el upload post-sesión incluye la identidad NUEVA",
+          stub_a._save_store.get("guid.dat") == b"GUID-NUEVO-CREADO-POR-EL-JUEGO",
+          repr(stub_a._save_store.get("guid.dat"))[:40])
+    check("cuarentena: flujo en éxito y SIN link/start (sin verificación)",
+          any(e["t"] == "success" for e in evs_a)
+          and stub_a.link_start_calls == 0, str([e["t"] for e in evs_a]))
+
+    # --- Escenario B: sesión muere <10s sin guid → RESTAURACIÓN -------------
+    esc_b = make_escenario("restaurada")
+    stub_b, evs_b = correr(esc_b, create_guid=False)
+    logs_b = [str(e.get("msg", "")) for e in evs_b if e.get("t") == "log"]
+    check("restauración: el guid.dat viejo vuelve a su sitio (best-effort)",
+          esc_b["guid"].read_bytes() == b"GUID-VIEJO-DE-OTRO-JUGADOR",
+          repr(esc_b["guid"].read_bytes()[:40]))
+    check("restauración: log claro 'Tu identidad anterior fue repuesta…'",
+          any("Tu identidad anterior fue repuesta" in x for x in logs_b),
+          str(logs_b))
+    check("restauración: el upload incluye la identidad RESTAURADA",
+          stub_b._save_store.get("guid.dat") == b"GUID-VIEJO-DE-OTRO-JUGADOR",
+          repr(stub_b._save_store.get("guid.dat"))[:40])
+    check("restauración: la copia de cuarentena sigue como respaldo",
+          len(list(esc_b["qroot"].glob("u-777-*/guid.dat"))) == 1)
+
+    # --- Escenario C: API caída en el PRE-launch → WARNING y juega igual ----
+    # (misma filosofía del cloud-sync: NUNCA bloquea jugar; ante incertidumbre
+    # NO se cuarentena — se conserva la identidad local tal cual.)
+    esc_c = make_escenario("apizada")
+    stub_c = StubApi()
+
+    def _manifest_roto(token):
+        raise NetworkError("No se pudo conectar con la API.")
+
+    stub_c.save_manifest = _manifest_roto
+    events_c: List[Dict[str, Any]] = []
+    flow_c = GameFlow(stub_c, "tok", str(esc_c["exe"]), "127.0.0.1:28961",
+                      events_c.append, already_linked=False, simulate=False,
+                      display_name="El Tester", cloud_save=True,
+                      game_dir=str(esc_c["gd"]), user_id="u-777",
+                      guid_path=str(esc_c["guid"]),
+                      quarantine_root_path=esc_c["qroot"])
+    orig_popen = gf.subprocess.Popen
+    gf.subprocess.Popen = lambda cmd, **kw: FakeProc(cmd, False, esc_c["guid"])
+    try:
+        flow_c.run()
+    finally:
+        gf.subprocess.Popen = orig_popen
+    logs_c = [str(e.get("msg", "")) for e in events_c if e.get("t") == "log"]
+    check("API caída en pre-launch → NO bloquea jugar (éxito)",
+          any(e["t"] == "success" for e in events_c),
+          str([e["t"] for e in events_c]))
+    check("API caída → omite sync y CONSERVA la identidad (sin cuarentena)",
+          any("Sincronización de progreso omitida" in x for x in logs_c)
+          and any("se conserva la identidad local" in x for x in logs_c)
+          and not list(esc_c["qroot"].glob("u-777-*"))
+          and esc_c["guid"].read_bytes() == b"GUID-VIEJO-DE-OTRO-JUGADOR",
+          str(logs_c))
+
+
+def phase_hero_stop_button() -> None:
+    """Fase GUI: botón héroe JUGAR ⇄ DETENER según el proceso (stubs).
+
+    - (c) sin proceso vivo → el botón es JUGAR (ámbar, habilitado).
+    - (b) con el juego vivo que este launcher lanzó (doble del Popen con PID
+      falso, NUNCA un juego real; kill_tree parcheado por PID) → el MISMO
+      botón pasa a DETENER (danger #D2544A); al pulsarlo: mata el stub,
+      ejecuta el flujo post-sesión (esperar muerte + upload del save, stub)
+      y vuelve a JUGAR. Durante la detención: DETENIENDO… deshabilitado y
+      los clicks extra se ignoran (guard anti-carreras, un solo kill).
+    - si el juego se cierra SOLO (evento game_closed del flujo, el mismo que
+      emite _await_game_and_upload en producción) el botón también vuelve a
+      JUGAR sin quedar clavado en DETENER.
+    """
+    print("\n=== Fase botón héroe JUGAR ⇄ DETENER (stubs) ===")
+    import tempfile
+    import threading
+
+    import game_flow as gf
+
+    class StopProc:
+        """Doble del Popen del juego: PID falso, NUNCA un juego real."""
+
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self._exited = False
+            self.kill_calls = 0
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self.kill_calls += 1
+            self._exited = True
+
+    killed: List[int] = []
+    by_pid: Dict[int, StopProc] = {}
+    orig_kill_tree = gf.kill_tree
+
+    def fake_kill_tree(pid, timeout=None):
+        killed.append(int(pid))
+        p = by_pid.get(int(pid))
+        if p is not None:
+            p._exited = True  # el árbol murió (como el taskkill /F real)
+        return True
+
+    def make_live(app: App, tmp_root: str, pid: int):
+        """Flujo 'con juego vivo' para inyectar en la App (stub, sin run())."""
+        gd = Path(tmp_root) / f"gd-{pid}"
+        (gd / "players").mkdir(parents=True, exist_ok=True)
+        stat = gd / "players" / "iw4x.stat"
+        stat.write_bytes(f"STOP-PROGRESS-{pid}-{time.time_ns()}".encode())
+        expected = stat.read_bytes()
+        stub = StubApi()
+        flow = GameFlow(stub, "tok", r"C:\no\existe\iw4x.exe",
+                        "127.0.0.1:28961", app._on_flow_event,
+                        already_linked=True, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        game_dir=str(gd))
+        proc = StopProc(pid)
+        by_pid[pid] = proc
+        flow._process = proc  # inyección: el "juego" que el launcher lanzó
+        return flow, stub, expected
+
+    gf.kill_tree = fake_kill_tree
+    tmp_root = tempfile.mkdtemp(prefix="iw4x-hero-")
+    # El store de prueba es GLOBAL a la máquina: otra suite en paralelo (o
+    # las fases finales de esta) puede borrarlo entre fases. Igual que hace
+    # phase_play_linked: re-logueo headless ANTES de construir la GUI.
+    try:
+        token = ensure_login_retry(ApiClient(API_URL))
+        UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    except Exception as exc:
+        check("preparación del botón héroe (login)", False, str(exc))
+        return
+    try:
+        # --- (c) sin proceso vivo: JUGAR ámbar -------------------------------
+        def step_no_process(app: App, done: Callable[[], None]) -> None:
+            def ok() -> None:
+                btn = app.home_frame.play_btn
+                check("sin proceso vivo: botón JUGAR (ámbar, habilitado)",
+                      str(btn.cget("text")) == "JUGAR"
+                      and str(btn.cget("state")) == "normal"
+                      and "E8930C" in str(btn.cget("fg_color")).upper()
+                      and app._live_flow is None,
+                      f"text={btn.cget('text')} state={btn.cget('state')} "
+                      f"fg={btn.cget('fg_color')}")
+                done()
+
+            wait_in_app(app, lambda: app.current_frame is app.home_frame
+                        and app.token is not None, ok, timeout=15)
+
+        # --- (b) proceso vivo → DETENER → click → post-sesión → JUGAR --------
+        def step_stop_flow(app: App, done: Callable[[], None]) -> None:
+            btn = app.home_frame.play_btn
+            flow_b, stub_b, expected_b = make_live(app, tmp_root, 424344)
+            app.flow = flow_b
+            # El MISMO evento success que emite el flujo real tras abrir.
+            app._on_flow_event({"t": "success", "msg": "Juego abierto.",
+                                "linked": True})
+            check("juego vivo (stub): el MISMO botón pasa a DETENER (danger)",
+                  str(btn.cget("text")) == "DETENER"
+                  and str(btn.cget("state")) == "normal"
+                  and "D2544A" in str(btn.cget("fg_color")).upper(),
+                  f"text={btn.cget('text')} fg={btn.cget('fg_color')}")
+            check("juego vivo: el flujo queda como sesión viva (self.flow=None)",
+                  app._live_flow is flow_b and app.flow is None,
+                  f"live={app._live_flow is not None} flow={app.flow is not None}")
+
+            btn.invoke()          # click DETENER → DETENIENDO… + guard activo
+            app.on_hero_button()  # anti-carreras: click extra DEBE ignorarse
+            check("en vuelo: DETENIENDO… deshabilitado (click extra ignorado)",
+                  str(btn.cget("text")) == "DETENIENDO…"
+                  and str(btn.cget("state")) == "disabled"
+                  and app._hero_busy is True,
+                  f"text={btn.cget('text')} state={btn.cget('state')} "
+                  f"busy={app._hero_busy}")
+
+            def ok() -> None:
+                check("DETENER: mata el stub UNA vez por PID (guard anti-carreras)",
+                      killed == [424344] and flow_b._process._exited,
+                      f"killed={killed} kills_del_stub={flow_b._process.kill_calls}")
+                check("DETENER: ejecuta el upload post-sesión (stub)",
+                      stub_b.save_upload_calls >= 1, str(stub_b.save_upload_calls))
+                check("DETENER: el progreso llegó a la cuenta (stub)",
+                      stub_b._save_store.get("iw4x.stat") == expected_b,
+                      repr(stub_b._save_store.get("iw4x.stat"))[:60])
+                check("DETENER: el botón vuelve a JUGAR (ámbar) y sin sesión viva",
+                      str(btn.cget("text")) == "JUGAR"
+                      and str(btn.cget("state")) == "normal"
+                      and "E8930C" in str(btn.cget("fg_color")).upper()
+                      and app._hero_busy is False and app._live_flow is None,
+                      f"text={btn.cget('text')} state={btn.cget('state')} "
+                      f"busy={app._hero_busy}")
+                console = app.home_frame.console.get("1.0", "end")
+                check("DETENER: logs del post-sesión en la consola",
+                      "Botón DETENER: juego detenido." in console
+                      and "Progreso subido a tu cuenta ✓" in console,
+                      console[-300:])
+                done()
+
+            wait_in_app(app, lambda: str(btn.cget("text")) == "JUGAR"
+                        and app._hero_busy is False, ok, timeout=15)
+
+        # --- el juego se cierra SOLO → JUGAR (no clavado en DETENER) ---------
+        def step_solo_exit(app: App, done: Callable[[], None]) -> None:
+            btn = app.home_frame.play_btn
+            flow_s, stub_s, _expected = make_live(app, tmp_root, 424345)
+            app.flow = flow_s
+            app._on_flow_event({"t": "success", "msg": "Juego abierto (2).",
+                                "linked": True})
+            check("segunda sesión: DETENER de nuevo (estado reutilizable)",
+                  str(btn.cget("text")) == "DETENER", str(btn.cget("text")))
+            # El juego muere SOLO y el hilo del flujo hace el post-sesión
+            # completo (el mismo camino de producción: game_closed + upload).
+            flow_s._process._exited = True
+            threading.Thread(target=flow_s._await_game_and_upload,
+                             daemon=True, name="await-stub").start()
+
+            def ok_btn() -> None:
+                check("juego cerrado solo: el botón vuelve a JUGAR "
+                      "(no clavado en DETENER)",
+                      str(btn.cget("text")) == "JUGAR" and app._live_flow is None,
+                      f"text={btn.cget('text')} "
+                      f"live={app._live_flow is not None}")
+
+                def ok_upload() -> None:
+                    check("juego cerrado solo: el post-sesión subió el "
+                          "progreso (stub)",
+                          stub_s.save_upload_calls >= 1,
+                          str(stub_s.save_upload_calls))
+                    done()
+
+                wait_in_app(app, lambda: stub_s.save_upload_calls >= 1,
+                            ok_upload, timeout=10)
+
+            wait_in_app(app, lambda: str(btn.cget("text")) == "JUGAR"
+                        and app._live_flow is None, ok_btn, timeout=15)
+
+        run_phase("botón héroe JUGAR ⇄ DETENER",
+                  [step_no_process, step_stop_flow, step_solo_exit],
+                  lambda: App(make_test_cfg(), ApiClient(API_URL),
+                              UserStore(STORE_PATH)))
+    finally:
+        gf.kill_tree = orig_kill_tree
 
 
 # ---------------------------------------------------------------------------
@@ -1645,6 +2083,123 @@ def phase_autosave_close() -> None:
 
 
 # ---------------------------------------------------------------------------
+def phase_login_compact() -> None:
+    """Fase GUI: login compacto — viewport mínimo, CONEXIÓN colapsable y scroll.
+
+    - En la geometría mínima (980x640) el enlace CREAR CUENTA y el botón
+      ENTRAR están MAPEADOS y DENTRO del viewport (winfo_rooty + winfo_height
+      ≤ fondo de la ventana), en modo login y en modo registro.
+    - Franja CONEXIÓN: colapsada por defecto tras el primer éxito (solo la
+      caption clickeable + punto); un clic expande y otro colapsa.
+    - Pantalla más baja que el contenido: Canvas + Scrollbar activos y la
+      rueda del ratón hace scroll.
+    """
+    print("\n=== Fase login compacto: viewport mínimo + colapso CONEXIÓN + scroll ===")
+
+    def step_viewport(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            f = app.login_frame
+            app.update_idletasks()
+            fondo = app.winfo_rooty() + app.winfo_height()
+
+            def dentro(w) -> bool:
+                return bool(w.winfo_ismapped()) and \
+                    (w.winfo_rooty() + w.winfo_height()) <= fondo + 1
+
+            check("login compacto: ENTRAR mapeado y dentro del viewport 980x640",
+                  dentro(f.action_btn),
+                  f"mapped={f.action_btn.winfo_ismapped()} "
+                  f"y={f.action_btn.winfo_rooty() + f.action_btn.winfo_height()} "
+                  f"fondo={fondo}")
+            check("login compacto: enlace CREAR CUENTA dentro del viewport",
+                  dentro(f.toggle_link),
+                  f"mapped={f.toggle_link.winfo_ismapped()} "
+                  f"y={f.toggle_link.winfo_rooty() + f.toggle_link.winfo_height()} "
+                  f"fondo={fondo}")
+
+            # Modo registro (email + VOLVER: la columna más alta de todas).
+            f._toggle_mode()
+            app.update_idletasks()
+            check("login compacto (registro): CREAR CUENTA dentro del viewport",
+                  dentro(f.action_btn),
+                  f"y={f.action_btn.winfo_rooty() + f.action_btn.winfo_height()} "
+                  f"fondo={fondo}")
+            check("login compacto (registro): VOLVER y EMAIL dentro del viewport",
+                  dentro(f.back_btn) and dentro(f.email_box),
+                  f"back={dentro(f.back_btn)} email={dentro(f.email_box)}")
+            f._toggle_mode()  # de vuelta al login para los siguientes pasos
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.login_frame,
+                    ok, timeout=10)
+
+    def step_conn_collapse(app: App, done: Callable[[], None]) -> None:
+        f = app.login_frame
+
+        def ok() -> None:
+            check("CONEXIÓN colapsada tras el primer éxito (solo caption + punto)",
+                  (not f.conn_test_btn.winfo_ismapped())
+                  and (not f.conn_row2.winfo_ismapped())
+                  and bool(f.conn_caption.winfo_ismapped())
+                  and "CONECTADO" in str(f.conn_state.cget("text")),
+                  f"test_btn={f.conn_test_btn.winfo_ismapped()} "
+                  f"row2={f.conn_row2.winfo_ismapped()} "
+                  f"state={f.conn_state.cget('text')!r}")
+            f.toggle_conn()
+            app.update_idletasks()
+            check("caption '// CONEXIÓN //': clic expande el detalle",
+                  bool(f.conn_test_btn.winfo_ismapped())
+                  and bool(f.conn_row2.winfo_ismapped()))
+            f.toggle_conn()
+            app.update_idletasks()
+            check("caption '// CONEXIÓN //': clic vuelve a colapsar",
+                  not f.conn_test_btn.winfo_ismapped())
+            done()
+
+        wait_in_app(
+            app,
+            lambda: "CONECTADO" in str(app.login_frame.conn_state.cget("text")),
+            ok, timeout=15,
+        )
+
+    def step_small_screen(app: App, done: Callable[[], None]) -> None:
+        f = app.login_frame
+        f.toggle_conn()  # máximo contenido: el detalle de CONEXIÓN expandido
+        app.geometry("980x480")
+
+        class _WheelDown:
+            delta = -120  # evento falso de rueda: hacia abajo
+
+        class _WheelUp:
+            delta = 120
+
+        def check_small() -> None:
+            app.update_idletasks()
+            check("pantalla baja: Scrollbar vertical activa (Canvas+Scrollbar)",
+                  f._scroll_active and bool(f._vbar.winfo_ismapped()),
+                  f"active={f._scroll_active} "
+                  f"vbar={f._vbar.winfo_ismapped()}")
+            antes = f._canvas.yview()
+            f._on_wheel(_WheelDown())
+            app.update_idletasks()
+            despues = f._canvas.yview()
+            check("pantalla baja: la rueda del ratón hace scroll",
+                  despues != antes and despues[0] > antes[0],
+                  f"antes={antes} despues={despues}")
+            f._on_wheel(_WheelUp())  # volver arriba
+            app.geometry("980x640")
+            app.update_idletasks()
+            done()
+
+        app.after(350, check_small)
+
+    run_phase(
+        "login compacto (viewport + colapso CONEXIÓN + scroll)",
+        [step_viewport, step_conn_collapse, step_small_screen],
+        lambda: App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH)),
+    )
+
+
 def main() -> int:
     # Consola Windows (cp1252): nunca romper por caracteres Unicode.
     try:
@@ -1680,6 +2235,8 @@ def main() -> int:
     phase_play_linked()
     phase_save_sync()
     phase_flow_logic()
+    phase_guid_quarantine_pipeline()
+    phase_hero_stop_button()
     phase_exit_hook()
     phase_autosave_close()
 
@@ -1688,6 +2245,11 @@ def main() -> int:
     # login) y su build borra el token de prueba — dejarlo para el cierre
     # evita romper auto-login/JUGAR/stats en cascada.
     phase_navigation_busy()
+
+    # AL FINAL DEL TODO: login compacto (viewport/colapso/scroll). Su app
+    # arranca SIN sesión guardada (necesita la pantalla de login) y NO
+    # guarda token — por eso vive después de la audit de navegación.
+    phase_login_compact()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

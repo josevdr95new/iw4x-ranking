@@ -10,6 +10,11 @@ Reglas de decisión (``decide_sync``, pura y testeable):
 Regla de oro: el juego hace flush del .stat al fin de ronda, así que la
 subida solo se hace con iw4x.exe cerrado (el launcher espera al proceso).
 
+Aislamiento de identidad (fix cyber-café): ``decide_guid_action`` (pura)
+decide restore/quarantine/none para el guid.dat local según el manifiesto
+de la cuenta; ``quarantine_local_guid`` mueve el local a la cuarentena para
+que el juego cree una identidad NUEVA y propia por cuenta.
+
 Las funciones ``sync_before_launch`` / ``sync_after_session`` son la
 orquestación (API + disco + logs); ``GameFlow`` las invoca y NUNCA deja que
 un error de sync bloquee jugar.
@@ -26,6 +31,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from logging_setup import app_data_dir
 
 log = logging.getLogger("save_sync")
 
@@ -45,6 +52,70 @@ def default_guid_path() -> str:
     """Ruta real del GUID de IW4x en esta PC (%LOCALAPPDATA%\\iw4x\\guid.dat)."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return str(Path(base) / "iw4x" / "guid.dat")
+
+
+def quarantine_root() -> Path:
+    """Raíz de la cuarentena de identidades: %APPDATA%\\iw4x-ranking-launcher\\guid-quarantine."""
+    return app_data_dir() / "guid-quarantine"
+
+
+# ---------------------------------------------------------------------------
+# Aislamiento de guid.dat por cuenta (fix cyber-café)
+# ---------------------------------------------------------------------------
+def decide_guid_action(manifest: Optional[Dict[str, Any]],
+                       local_guid_exists: bool) -> str:
+    """Decide qué hacer con el guid.dat local ANTES de lanzar (pura).
+
+    El problema: en una PC compartida, un usuario NUEVO (sin guid.dat en su
+    nube) jugaba con el guid.dat LOCAL de otro → robo de identidad/stats.
+    Reglas:
+    - manifest CON guid.dat     → "restore": el sync ya baja la identidad de
+      la cuenta (comportamiento existente; aquí no se toca nada).
+    - manifest SIN guid.dat Y existe guid.dat local → "quarantine": mover el
+      local a cuarentena ANTES de lanzar; el juego, al arrancar sin guid.dat,
+      CREA uno nuevo y propio, y el upload post-sesión lo sube a la cuenta.
+    - manifest SIN guid.dat Y sin local → "none": el juego crea el primero.
+    ``manifest`` None (o sin clave files) se trata como "el server no tiene
+    identidad": decide igual que el caso sin guid.dat.
+    """
+    has_server_guid = False
+    if isinstance(manifest, dict):
+        for f in (manifest.get("files") or []):
+            if isinstance(f, dict) and str(f.get("path") or "") == GUID_REL:
+                has_server_guid = True
+                break
+    if has_server_guid:
+        return "restore"
+    if local_guid_exists:
+        return "quarantine"
+    return "none"
+
+
+def quarantine_local_guid(guid_path: str,
+                          user_id: str = "",
+                          root: Optional[Path] = None) -> Optional[Path]:
+    """Mueve el guid.dat local a la cuarentena (SIEMPRE con el juego cerrado).
+
+    Destino: ``<root|guid-quarantine()>\\<userId>-<ts>\\guid.dat`` (directorios
+    creados si faltan). La copia queda como respaldo de restauración de
+    seguridad. Devuelve la carpeta destino, o None si no había nada que
+    mover o el movimiento falló (best-effort: jamás bloquea jugar).
+    """
+    src = Path(guid_path)
+    if not src.is_file():
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest_dir = Path(root) if root is not None else quarantine_root()
+    dest_dir = dest_dir / f"{user_id or 'sin-cuenta'}-{stamp}"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest_dir / GUID_REL))
+    except OSError:
+        log.warning("No se pudo cuarentenar el guid.dat local (%s)", src,
+                    exc_info=True)
+        return None
+    log.info("guid.dat local cuarentenado en %s", dest_dir / GUID_REL)
+    return dest_dir
 
 
 # ---------------------------------------------------------------------------
@@ -246,17 +317,21 @@ def _local_hashes_and_mtime(game_dir: str,
 def sync_before_launch(api, token: str, game_dir: str,
                        log: Callable[[str], None],
                        backup_root: Optional[Path] = None,
-                       guid_path: Optional[str] = None) -> str:
+                       guid_path: Optional[str] = None,
+                       manifest: Optional[Dict[str, Any]] = None) -> str:
     """PRE-lanzamiento: deja el progreso del server listo en disco.
 
     Descarga tb el guid.dat si el server lo tiene (identidad IW4x: mismo
     GUID en cualquier PC). Devuelve la acción realizada
     ("download" | "upload" | "noop"). Los errores (red/API/disco) propagan:
-    el caller los trata como WARNING.
+    el caller los trata como WARNING. ``manifest`` permite reutilizar un
+    GET /profile/save ya hecho (GameFlow lo comparte con la decisión de
+    aislamiento del guid.dat — una sola llamada).
     """
     paths = local_save_files(game_dir, guid_path=guid_path)
     local_hashes, local_mtime = _local_hashes_and_mtime(game_dir, guid_path)
-    manifest = api.save_manifest(token)
+    if manifest is None:
+        manifest = api.save_manifest(token)
     action, detail = decide_sync(manifest, local_hashes, local_mtime)
     log(f"Sincronizando tu progreso con la cuenta… ({detail['why']})")
 

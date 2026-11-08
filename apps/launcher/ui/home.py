@@ -2,7 +2,14 @@
 
 El botón JUGAR es el protagonista: bloque ámbar grande con strip de estado
 (● LISTO → ● CONECTANDO → ● EN PARTIDA / ● FALLO). La consola mini vive en
-una barra inferior tipo terminal. Sin cambios de comportamiento.
+una barra inferior tipo terminal.
+
+El MISMO botón hace de JUGAR ⇄ DETENER según el proceso del juego: sin
+juego vivo es JUGAR (ámbar); con el juego que este launcher abrió sigue
+vivo pasa a DETENER (rojo danger del tema) y al pulsarlo detiene el árbol
+del juego y ejecuta el flujo post-sesión (upload del save) SIN cerrar el
+launcher. Durante la conexión: CONECTANDO… ; durante la detención:
+DETENIENDO… (ambos deshabilitados de verdad).
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from api_client import user_is_linked
 from ui.hud import (
     DotState,
     bind_flat_focus,
+    bind_focus_hairline,
     bind_ghost_focus,
     ghost_button,
     hairline,
@@ -35,6 +43,8 @@ log = logging.getLogger("ui.home")
 TEXT_LISTO = "JUGAR"
 TEXT_CONECTANDO = "CONECTANDO…"
 TEXT_REINTENTAR = "REINTENTAR"
+TEXT_DETENER = "DETENER"
+TEXT_DETENIENDO = "DETENIENDO…"
 
 
 class HomeFrame(ctk.CTkFrame):
@@ -120,13 +130,15 @@ class HomeFrame(ctk.CTkFrame):
         )
         self.stats_panel.pack(fill="x", pady=(SP["m"], 0))
 
-        # --- Botón héroe JUGAR (bloque ámbar, esquinas afiladas) -------------
+        # --- Botón héroe JUGAR/DETENER (bloque ámbar, esquinas afiladas) ------
+        # El comando SIEMPRE pasa por App.on_hero_button: es el único handler
+        # y decide JUGAR o DETENER consultando game_running() del flujo vivo.
         self.play_btn = ctk.CTkButton(
             body, text=TEXT_LISTO, height=64, font=font(26, "bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             text_color=COLORS["on_accent"], corner_radius=RADIUS["btn"],
             text_color_disabled=COLORS["text_faint"],
-            command=self.app.start_play,
+            command=self.app.on_hero_button,
         )
         self.play_btn.pack(fill="x", pady=(SP["m"], 0), ipady=2)
         bind_flat_focus(self.play_btn)
@@ -214,28 +226,75 @@ class HomeFrame(ctk.CTkFrame):
         }.get(kind, COLORS["text_dim"])
         self.status.configure(text=text, text_color=color)
 
+    # --- Estados del botón héroe (JUGAR ⇄ DETENER) -------------------------
+    def _hero_idle(self, text: str) -> None:
+        """Héroe en reposo ámbar (JUGAR/REINTENTAR): colores originales desde
+        ``_hud_rest`` + anillo de foco de la familia ámbar. Si el botón aún
+        no pasó por CONECTANDO (sin ``_hud_rest``), el ámbar se aplica
+        explícito — DETENER nunca deja teñido el reposo."""
+        if not hasattr(self.play_btn, "_hud_rest"):
+            self.play_btn.configure(
+                fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                text_color=COLORS["on_accent"],
+            )
+        set_button_idle(self.play_btn, text)
+        bind_focus_hairline(self.play_btn, COLORS["accent"],
+                            COLORS["accent_border"], (0, 1))
+
+    def _set_hero_danger(self, text: str, enabled: bool) -> None:
+        """Viste el héroe con la familia danger (#D2544A del tema).
+
+        NO toca ``_hud_rest`` (lo guarda set_button_busy): al volver al reposo,
+        ``_hero_idle`` restaura el ámbar original exacto.
+        """
+        if enabled:
+            self.play_btn.configure(
+                state="normal", text=text,
+                fg_color=COLORS["danger"], hover_color=COLORS["danger_hover"],
+                text_color=COLORS["text"],
+            )
+            bind_focus_hairline(self.play_btn, COLORS["danger"],
+                                COLORS["accent_border"], (0, 1))
+        else:
+            # En vuelo: atenuado sobre el fondo sutil de SU familia.
+            self.play_btn.configure(
+                state="disabled", text=text,
+                fg_color=COLORS["danger_dim"], hover_color=COLORS["danger_dim"],
+                text_color_disabled=COLORS["text_faint"],
+            )
+
     def set_playing(self, playing: bool) -> None:
-        """Estados del héroe: CONECTANDO (dim, no clickable) / LISTO (fin)."""
+        """Estados del héroe: CONECTANDO (dim, no clickable) / JUGAR (fin)."""
         if playing:
             set_button_busy(self.play_btn, TEXT_CONECTANDO)
             self.hud_state.set_state("conectando")
         else:
-            set_button_idle(self.play_btn, TEXT_LISTO)
+            self._hero_idle(TEXT_LISTO)
             self.hud_state.set_state("listo")
 
+    def set_stoppable(self) -> None:
+        """Juego vivo (lanzado por este launcher): el héroe pasa a DETENER."""
+        self._set_hero_danger(TEXT_DETENER, enabled=True)
+        self.hud_state.set_state("en_partida")
+
+    def set_deteniendo(self) -> None:
+        """Detención en vuelo: DETENIENDO… deshabilitado de verdad."""
+        self._set_hero_danger(TEXT_DETENIENDO, enabled=False)
+        self.hud_state.set_state("deteniendo")
+
     def set_deployed(self) -> None:
-        """Éxito de lanzamiento: botón operativo y strip EN PARTIDA."""
-        set_button_idle(self.play_btn, TEXT_LISTO)
+        """Éxito de lanzamiento sin proceso (simulación): JUGAR + EN PARTIDA."""
+        self._hero_idle(TEXT_LISTO)
         self.hud_state.set_state("en_partida")
 
     def set_retry(self) -> None:
         """Tras un fallo con reintento: REINTENTAR + strip rojo."""
-        set_button_idle(self.play_btn, TEXT_REINTENTAR)
+        self._hero_idle(TEXT_REINTENTAR)
         self.hud_state.set_state("fallo")
 
     def reset_hud(self) -> None:
-        """Vuelve al estado LISTO (logout)."""
-        set_button_idle(self.play_btn, TEXT_LISTO)
+        """Vuelve al estado JUGAR (logout)."""
+        self._hero_idle(TEXT_LISTO)
         self.hud_state.set_state("listo")
 
     def stop_animations(self) -> None:

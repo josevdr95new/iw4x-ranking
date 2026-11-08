@@ -27,6 +27,15 @@ from user_store import UserStore
 
 log = logging.getLogger("app")
 
+# Periodo de renovación de la sesión de juego (contrato: POST /api/play/session)
+# y demora del aviso único "aún sin vincular" tras lanzar el juego.
+PLAY_SESSION_PERIOD_MS = 30_000
+UNLINKED_HINT_DELAY_MS = 60_000
+UNLINKED_HINT_MSG = (
+    "Aún sin vincular: se vinculará automáticamente "
+    "(necesitas sesión activa de launcher, ya la tienes)."
+)
+
 
 class App(ctk.CTk):
     """Ventana única con tres pantallas: login, principal y ajustes."""
@@ -46,10 +55,27 @@ class App(ctk.CTk):
         # Flujo JUGAR en curso (o None).
         self.flow: Optional[GameFlow] = None
 
+        # Sesión viva: flujo cuyo juego (lanzado por este launcher) sigue
+        # abierto. Mientras exista, el botón héroe es DETENER; al morir el
+        # juego (solo o por DETENER) vuelve a JUGAR.
+        self._live_flow: Optional[GameFlow] = None
+        # Guard anti-carreras del héroe: una transición (detener) en vuelo
+        # ignora cualquier click extra.
+        self._hero_busy = False
+
         # Panel de stats en vivo: id del after() del ciclo de 30s + contadores.
         self._stats_after_id: Optional[str] = None
         self._stats_fetching = False
         self._stats_fetch_count = 0
+
+        # Sesión de juego (auto-link server-side): ciclo propio de 30s que
+        # renueva POST /api/play/session mientras hay sesión iniciada.
+        self._play_session_after_id: Optional[str] = None
+
+        # Aviso único "aún sin vincular" a los 60s de juego (solo log dim).
+        self._unlinked_hint_after: Optional[str] = None
+        self._unlinked_hint_shown = False
+        self.unlinked_hint_delay_ms = UNLINKED_HINT_DELAY_MS  # inyectable (tests)
 
         # Cola de tareas para el hilo de UI.
         self._tasks: "queue.Queue[Callable[[], None]]" = queue.Queue()
@@ -77,8 +103,8 @@ class App(ctk.CTk):
 
         # --- Ventana ---------------------------------------------------------
         self.title("IW4X RANKING // TERMINAL DE JUGADOR")
-        self.geometry("840x680")
-        self.minsize(800, 620)
+        self.geometry("980x640")
+        self.minsize(760, 500)
         self.configure(fg_color=COLORS["bg"])
         self._center()
         self._set_window_icon()
@@ -210,6 +236,7 @@ class App(ctk.CTk):
 
     def show_login(self, message: str = "") -> None:
         self._swap(self.login_frame)
+        self.login_frame.reset_scroll()
         if message:
             self.login_frame.status.configure(text=message, text_color=COLORS["warn"])
 
@@ -228,9 +255,9 @@ class App(ctk.CTk):
         self._swap(self.settings_frame)
 
     def _center(self) -> None:
-        """Centra la ventana en la pantalla."""
+        """Centra la ventana en la pantalla (geometría mínima 980x640)."""
         self.update_idletasks()
-        w, h = 780, 580
+        w, h = 980, 640
         x = (self.winfo_screenwidth() - w) // 2
         y = (self.winfo_screenheight() - h) // 3
         self.geometry(f"{w}x{h}+{x}+{y}")
@@ -269,11 +296,20 @@ class App(ctk.CTk):
         if self.flow is not None:
             self.flow.cancel()
             self.flow = None
+        # Sesión viva: se suelta (el juego sigue abierto, como hasta ahora);
+        # el upload post-sesión lo hace el hilo del propio flujo al morir.
+        live = self._live_flow
+        self._live_flow = None
+        if live is not None:
+            live.cancel()
+        self._hero_busy = False
         self.store.clear()
         self.token = None
         self.user = None
-        # Detiene el ciclo de stats y animaciones del strip.
+        # Detiene el ciclo de stats, la sesión de juego y animaciones.
         self._cancel_stats_timer()
+        self._cancel_play_session_timer()
+        self._cancel_unlinked_hint()
         self._stats_fetching = False
         self.home_frame.stats_panel.stop_timers()
         self.home_frame.reset_hud()
@@ -289,11 +325,99 @@ class App(ctk.CTk):
         self._update_play_as()
         self._update_stats_panel_state()
         self.show_home()
+        self._schedule_play_session()  # ciclo de sesión de juego (auto-link)
 
     def _update_play_as(self) -> None:
         """Refresca 'Jugando como: <nick>' — siempre visible (obligatorio)."""
         name = str((self.user or {}).get("displayName") or "")
         self.home_frame.set_play_as(name)
+
+    # ================== Sesión de juego (auto-link server-side) ==========
+    def _touch_play_session(self, announce: bool = False) -> None:
+        """POST /api/play/session (best-effort) — NUNCA bloquea jugar.
+
+        Es la señal con la que el server puede auto-vincular la identidad del
+        jugador al entrar (sin polling de candidatos en la UI). Fallos (404
+        mientras el backend despliega, red, 401): log dim y se sigue; con
+        ``announce`` (llamada al dar JUGAR) el aviso llega a la consola.
+        """
+        token = self.token
+        if not token:
+            return
+
+        def ok(data: Dict[str, Any]) -> None:
+            log.info("[play-session] activa: %s", data)
+
+        def err(exc: Exception) -> None:
+            msg = (str(exc) if isinstance(exc, NetworkError)
+                   else getattr(exc, "message", str(exc)))
+            log.info("[play-session] ignorada: %s", msg)
+            if announce:
+                self._log_line_safe(
+                    f"Sesión de juego no disponible ({msg}); el juego "
+                    "continúa igual.")
+
+        self.run_bg(lambda: self.api.play_session(token), on_ok=ok, on_err=err)
+
+    def _schedule_play_session(self, delay_ms: int = PLAY_SESSION_PERIOD_MS) -> None:
+        """Ciclo de 30s de la sesión de juego (mientras haya sesión iniciada)."""
+        self._cancel_play_session_timer()
+        if not self.token:
+            return
+        self._play_session_after_id = self.after(delay_ms, self._play_session_tick)
+
+    def _play_session_tick(self) -> None:
+        self._play_session_after_id = None
+        self._touch_play_session()
+        self._schedule_play_session()
+
+    def _cancel_play_session_timer(self) -> None:
+        if self._play_session_after_id is not None:
+            try:
+                self.after_cancel(self._play_session_after_id)
+            except Exception:
+                pass
+            self._play_session_after_id = None
+
+    # ================== Aviso único "aún sin vincular" ==================
+    def _schedule_unlinked_hint(self) -> None:
+        """Programa el aviso único a los 60s de juego (identidad por server).
+
+        Se cancela si el juego se cierra antes; al dispararse reconsulta
+        /auth/me y SOLO loggea si la cuenta sigue sin identidad (una vez).
+        """
+        self._cancel_unlinked_hint()
+        self._unlinked_hint_shown = False
+        delay = max(500, int(self.unlinked_hint_delay_ms))
+        self._unlinked_hint_after = self.after(delay, self._unlinked_hint_tick)
+
+    def _unlinked_hint_tick(self) -> None:
+        self._unlinked_hint_after = None
+        if self.user is None or not self.token:
+            return
+        if user_is_linked(self.user):
+            return
+        token = self.token
+
+        def ok(user: Dict[str, Any]) -> None:
+            self.user = user
+            self._apply_user_to_home()
+            if not user_is_linked(user) and not self._unlinked_hint_shown:
+                self._unlinked_hint_shown = True
+                self._log_line_safe(UNLINKED_HINT_MSG)
+
+        def err(_exc: Exception) -> None:
+            pass  # red caída: el aviso simplemente no se muestra
+
+        self.run_bg(lambda: self.api.me(token), on_ok=ok, on_err=err)
+
+    def _cancel_unlinked_hint(self) -> None:
+        if self._unlinked_hint_after is not None:
+            try:
+                self.after_cancel(self._unlinked_hint_after)
+            except Exception:
+                pass
+            self._unlinked_hint_after = None
 
     # ================== Stats en vivo ==================
     def _update_stats_panel_state(self) -> None:
@@ -448,9 +572,28 @@ class App(ctk.CTk):
         self.run_bg(client.sync_status, on_ok=on_ok, on_err=on_err)
 
     # ================== Flujo JUGAR ==================
+    def on_hero_button(self) -> None:
+        """ÚNICO handler del botón héroe: JUGAR o DETENER según el proceso.
+
+        Anti-carreras: mientras haya una transición en vuelo (_hero_busy) o
+        una conexión en curso (self.flow), los clicks extra se ignoran. Sin
+        transición, la decisión se toma consultando game_running() del flujo
+        vivo EN EL MOMENTO del click.
+        """
+        if self._hero_busy or self.flow is not None:
+            return  # transición en vuelo: ignorar clicks extra
+        live = self._live_flow
+        if live is not None and live.game_running():
+            self._stop_live_session()
+            return
+        self.start_play()
+
     def start_play(self) -> None:
         """Arranca el flujo JUGAR en un hilo de fondo."""
-        if self.flow is not None:
+        if self.flow is not None or self._hero_busy:
+            return
+        # Con una partida viva NO se abre una segunda instancia del juego.
+        if self._live_flow is not None and self._live_flow.game_running():
             return
         if not self.token or self.user is None:
             return
@@ -467,6 +610,9 @@ class App(ctk.CTk):
         home.set_status("Conectando…", "warn")
         home.log_line("— Nueva partida —")
 
+        # Sesión de juego (auto-link server-side): al dar JUGAR, best-effort.
+        self._touch_play_session(announce=True)
+
         self.flow = GameFlow(
             self.api,
             self.token,
@@ -475,13 +621,52 @@ class App(ctk.CTk):
             self._on_flow_event,
             already_linked=linked,
             simulate=self.cfg.simulate_game,
-            poll_interval=self.cfg.link_poll_interval,
-            poll_max_seconds=self.cfg.link_poll_max_seconds,
             display_name=display_name,
             cloud_save=self.cfg.cloud_save,
             game_dir=os.path.dirname(self.cfg.game_path) if self.cfg.game_path else "",
+            user_id=str((self.user or {}).get("id") or ""),
         )
         threading.Thread(target=self.flow.run, daemon=True, name="game-flow").start()
+
+    def _stop_live_session(self) -> None:
+        """DETENER: mata el árbol del juego y ejecuta el post-sesión normal.
+
+        Reusa ``GameFlow.stop_game_for_exit`` (kill tree por PID → esperar
+        muerte → upload del save, con el guard anti-duplicado) SIN cerrar el
+        launcher. El trabajo corre en un hilo daemon; el botón queda en
+        DETENIENDO… (deshabilitado) hasta que la sesión termina.
+        """
+        flow = self._live_flow
+        if flow is None or not flow.game_running():
+            return
+        self._hero_busy = True  # guard: los clicks extra se ignoran
+        home = self.home_frame
+        home.set_deteniendo()
+        home.set_status("Deteniendo el juego…", "warn")
+        home.log_line("— Deteniendo la partida…")
+
+        def work() -> None:
+            try:
+                flow.stop_game_for_exit(reason="Botón DETENER")
+            except Exception:
+                log.exception("No se pudo detener el juego desde el botón")
+            finally:
+                self.post(self._stop_live_done)
+
+        threading.Thread(target=work, daemon=True, name="game-stop").start()
+
+    def _stop_live_done(self) -> None:
+        """Fin de la detención (hilo de UI): el héroe vuelve a JUGAR."""
+        self._hero_busy = False
+        self._live_flow = None
+        self.flow = None
+        self._cancel_unlinked_hint()
+        home = self.home_frame
+        home.set_playing(False)  # JUGAR ámbar + strip ● LISTO
+        home.set_status("Partida detenida.", "ok")
+        home.log_line("Partida detenida.")
+        self.refresh_me()      # el server pudo auto-vincular durante la sesión
+        self.refresh_stats()  # los stats de la sesión ya están en la API
 
     def _on_flow_event(self, event: Dict[str, Any]) -> None:
         """Recibe eventos del hilo del flujo (ya está en el hilo de UI)."""
@@ -499,18 +684,44 @@ class App(ctk.CTk):
             if event.get("linked"):
                 # Refresca /auth/me para el badge VERIFICADO.
                 self.refresh_me()
-            home.set_deployed()  # strip ● EN PARTIDA
+            else:
+                # Flujo simplificado: sin pantalla de verificación. Si a los
+                # 60s de juego la cuenta sigue sin identidad, aviso dim único.
+                self._schedule_unlinked_hint()
+            flow_obj = self.flow
             self.flow = None
+            if flow_obj is not None and flow_obj.game_running():
+                # Juego REAL vivo: la sesión queda abierta y el héroe pasa a
+                # DETENER (mismo botón, familia danger del tema).
+                self._live_flow = flow_obj
+                home.set_stoppable()
+            else:
+                # Simulación (sin proceso): botón JUGAR y strip EN PARTIDA.
+                home.set_deployed()
 
         elif kind == "failed":
             msg = str(event.get("msg", ""))
             home.log_line(f"✘ {msg}")
             home.set_status(msg, "error")
+            self._cancel_unlinked_hint()
             if event.get("retry"):
                 home.set_retry()  # el botón grande pasa a REINTENTAR
             else:
                 home.set_playing(False)
             self.flow = None
+
+        elif kind == "game_closed":
+            # El juego se cerró SOLO (no lo mató el botón DETENER, que ignora
+            # este evento por el guard _hero_busy y la identidad del flow).
+            if event.get("flow") is not self._live_flow:
+                return
+            self._live_flow = None
+            self._cancel_unlinked_hint()
+            home.set_playing(False)  # héroe → JUGAR (nunca clavado en DETENER)
+            home.set_status("Partida terminada.", "dim")
+            home.log_line("El juego se cerró. Fin de la partida.")
+            self.refresh_me()     # recoge el auto-link que hizo el server
+            self.refresh_stats()
 
     # ================== Cierre ==================
     def _on_close(self) -> None:
@@ -562,6 +773,19 @@ class App(ctk.CTk):
             except Exception:
                 log.exception("No se pudo detener el juego / subir el progreso")
 
+        # Sesión viva (juego abierto tras un JUGAR exitoso): misma secuencia.
+        # Si es el mismo flujo ya parado arriba, stop_game_for_exit no repite
+        # nada (game_running False + guard anti-doble-upload).
+        live = self._live_flow
+        self._live_flow = None
+        self._hero_busy = False
+        if live is not None and live is not flow:
+            live.cancel()
+            try:
+                live.stop_game_for_exit()
+            except Exception:
+                log.exception("No se pudo detener la sesión viva al cerrar")
+
         # Guardado final SIEMPRE (con o sin juego vivo): si el estado local
         # cambió desde el último sync, sube. Best-effort, presupuesto ~10s:
         # NUNCA bloquea el cierre más que eso. Caso cubierto: jugó, cerró el
@@ -575,6 +799,11 @@ class App(ctk.CTk):
         # Limpieza de timers (best-effort: la ventana puede estar rota ya).
         try:
             self._cancel_stats_timer()
+        except Exception:
+            pass
+        try:
+            self._cancel_play_session_timer()
+            self._cancel_unlinked_hint()
         except Exception:
             pass
         try:

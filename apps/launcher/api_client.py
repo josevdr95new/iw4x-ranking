@@ -243,6 +243,18 @@ class ApiClient:
         """
         return self._request("GET", f"/players/{guid}")
 
+    # --- Sesión de juego (auto-link server-side) ---------------------------
+    def play_session(self, token: str) -> Dict[str, Any]:
+        """POST /api/play/session → {ok, nick, expiresAt}.
+
+        Abre/renueva la SESIÓN DE JUEGO de la cuenta: es la señal con la que
+        el server puede auto-vincular la identidad cuando el jugador entra
+        (sin polling de candidatos en el launcher). El caller NUNCA bloquea
+        jugar por esto: cualquier fallo (404 mientras el backend despliega,
+        red, 401) se ignora con log dim.
+        """
+        return self._request("POST", "/play/session", token=token, json_body={})
+
     # --- Vinculación cuenta ↔ GUID -----------------------------------------
     def link_start(self, token: str) -> Dict[str, Any]:
         """POST /api/link/start — registra el intento de vinculación."""

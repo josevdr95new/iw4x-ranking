@@ -28,10 +28,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Cloud-sync del progreso (iw4x.stat/config/mods) antes de jugar y al
     # cerrar el juego. Descargable/subible con la cuenta del ranking.
     "cloud_save": True,
-    # Ajustes finos del polling de vinculación (los valores del contrato son
-    # 10s / 180s; se exponen para poder acortarlos en pruebas).
-    "link_poll_interval": 10,
-    "link_poll_max_seconds": 180,
     # Auto-guardado periódico del progreso en la nube (pedido del dueño:
     # evitar pérdida de progreso si la PC muere a mitad de sesión).
     # 0 = desactivado. Editable en Ajustes.
@@ -123,20 +119,6 @@ class AppConfig:
         return bool(self.data.get("cloud_save", True))
 
     @property
-    def link_poll_interval(self) -> int:
-        try:
-            return max(1, int(self.data.get("link_poll_interval", 10)))
-        except (TypeError, ValueError):
-            return 10
-
-    @property
-    def link_poll_max_seconds(self) -> int:
-        try:
-            return max(5, int(self.data.get("link_poll_max_seconds", 180)))
-        except (TypeError, ValueError):
-            return 180
-
-    @property
     def autosave_minutes(self) -> int:
         """Minutos entre auto-guardados del progreso (0 = desactivado)."""
         try:
@@ -188,8 +170,11 @@ def load_config() -> AppConfig:
     # api_url normalizado también en carga (esquema garantizado, sin barra):
     # la propiedad ya normaliza al leer, aquí lo dejamos consistente en el dict.
     merged["api_url"] = normalize_api_url(merged.get("api_url"))
-    # 'force_nick' quedó obsoleto (el nick SIEMPRE se fuerza): se purga
-    # silenciosamente para que no vuelva al archivo al guardar.
+    # 'force_nick' quedó obsoleto (el nick SIEMPRE se fuerza) y el polling
+    # de candidatos desapareció (auto-link server-side): se purgan en
+    # silencio para que no vuelvan al archivo al guardar.
     merged.pop("force_nick", None)
+    merged.pop("link_poll_interval", None)
+    merged.pop("link_poll_max_seconds", None)
     log.info("Config cargada desde %s (api_url=%s)", path, merged["api_url"])
     return AppConfig(merged)

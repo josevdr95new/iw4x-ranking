@@ -1,18 +1,18 @@
 {
-  "api_url": "http://127.0.0.1:3000",
-  "game_path": "D:\\Call of Duty 6\\iw4x.exe",
+  "api_url": "http://localhost:3000",
+  "game_path": "C:\\no\\existe\\iw4x.exe",
   "servers": [
     {
-      "name": "LAN",
-      "address": "10.81.1.183:28961"
+      "name": "LAN Server",
+      "address": "192.168.2.251:28960"
     },
     {
-      "name": "Local",
+      "name": "Test Local",
       "address": "127.0.0.1:28961"
     }
   ],
-  "default_server": 0,
-  "simulate_game": false,
-  "link_poll_interval": 10,
-  "link_poll_max_seconds": 180
+  "default_server": 1,
+  "simulate_game": true,
+  "cloud_save": true,
+  "autosave_minutes": 10
 }

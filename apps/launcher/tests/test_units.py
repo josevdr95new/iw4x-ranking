@@ -4,16 +4,17 @@ Uso:
     py apps\\launcher\\tests\\test_units.py
 
 Qué verifica (mismo estilo [OK]/[FALLO] que test_smoke.py):
-  1. game_flow: candidate_matches (normalización de nicks ^X, trim, lower)
-     y pick_candidate (match único, sin match → None, recencia).
-  2. save_sync (puras): local_save_files (mapeo base/mods/guid),
-     sha256_of, decide_sync (matriz completa de decisión), build_upload_files
-     (caps ≤24 archivos / ≤256KB, guid primero), detect_build.
+  1. save_sync (puras): local_save_files (mapeo base/mods/guid),
+      sha256_of, decide_sync (matriz completa de decisión), build_upload_files
+      (caps ≤24 archivos / ≤256KB, guid primero), detect_build.
+  2. save_sync: aislamiento de identidad por cuenta (fix cyber-café):
+      decide_guid_action (restore/quarantine/none + manifest None) y
+      quarantine_local_guid (movimiento a cuarentena, rutas inyectadas).
   3. game_flow: build_game_args (nick SIEMPRE forzado con +set name).
   4. app_config: DEFAULT_CONFIG y el merge de claves (propiedades con
-     defaults, acotes y limpieza de servers inválidos).
+      defaults, acotes y limpieza de servers inválidos).
   5. app_config: normalize_api_url (esquema http:// faltante, barra final,
-     espacios, vacío → default; JAMÁS inventa/corrige puertos).
+      espacios, vacío → default; JAMÁS inventa/corrige puertos).
 
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
 Las suites E2E/GUI (API real, CustomTkinter) viven en tests/test_smoke.py
@@ -21,6 +22,7 @@ Las suites E2E/GUI (API real, CustomTkinter) viven en tests/test_smoke.py
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 import tempfile
 import time
@@ -33,12 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_config import AppConfig, DEFAULT_CONFIG, normalize_api_url  # noqa: E402
 import game_flow as gf  # noqa: E402
-from game_flow import build_game_args, candidate_matches, pick_candidate  # noqa: E402
+from game_flow import build_game_args  # noqa: E402
 import save_sync as ss  # noqa: E402
 from save_sync import (  # noqa: E402
     build_upload_files,
+    decide_guid_action,
     decide_sync,
     local_save_files,
+    quarantine_local_guid,
     sha256_of,
 )
 
@@ -52,35 +56,69 @@ def check(name, cond, extra=""):
 
 
 # ---------------------------------------------------------------------------
-# 1. game_flow: comparación de nicks y elección de candidato (puras).
-def phase_candidate_matching() -> None:
-    print("\n=== Units: comparación de nicks / pick_candidate (puras) ===")
+# 1. save_sync: aislamiento de identidad por cuenta (fix cyber-café).
+def phase_guid_isolation() -> None:
+    print("\n=== Units: decide_guid_action / quarantine_local_guid ===")
 
-    check("match exacto de nick", candidate_matches("El Tester", "El Tester"))
-    check("match trim + lower", candidate_matches("  el tester ", "EL TESTER"))
-    check("códigos ^X del server se stripean",
-          candidate_matches("^7El^1 Tester", "El Tester"))
-    check("nick distinto → False",
-          not candidate_matches("ZombieSlayer69", "El Tester"))
-    check("displayName vacío → False",
-          not candidate_matches("Alguien", ""))
+    manifest_con_guid = {"exists": True, "version": 3,
+                         "updatedAt": "2026-11-07T10:00:00.000Z",
+                         "files": [{"path": "iw4x.stat", "sha256": "AAA"},
+                                   {"path": "guid.dat", "sha256": "GGG"}]}
+    manifest_sin_guid = {"exists": True, "version": 3,
+                         "updatedAt": "2026-11-07T10:00:00.000Z",
+                         "files": [{"path": "iw4x.stat", "sha256": "AAA"}]}
 
-    # pick_candidate (pura): filtrado por nick + desambiguación por recencia.
-    bots = [{"guid": str(100 + i), "name": f"Bot_{i}",
-             "lastConnection": "2026-11-06T09:00:00.000Z"} for i in range(14)]
-    bots.append({"guid": "777", "name": "^7El^1 Tester",
-                 "lastConnection": "2026-11-06T10:00:00.000Z"})
-    picked = pick_candidate(bots, "El Tester")
-    check("pick_candidate: encuentra el único match entre bots",
-          picked is not None and picked["guid"] == "777", str(picked))
-    check("pick_candidate: sin match → None", pick_candidate(bots, "Nadie") is None)
-    check("pick_candidate: display vacío → None", pick_candidate(bots, "") is None)
-    two = [{"guid": "A", "name": "el tester",
-            "lastConnection": "2026-11-06T09:00:00.000Z"},
-           {"guid": "B", "name": "^7El^1 Tester",
-            "lastConnection": "2026-11-06T11:30:00.000Z"}]
-    check("pick_candidate: recencia gana con nick duplicado",
-          (pick_candidate(two, "El Tester") or {}).get("guid") == "B")
+    # Regla 1: manifest con guid.dat → restore (sync ya baja la identidad).
+    check("decide_guid: manifest con guid.dat → restore (con local)",
+          decide_guid_action(manifest_con_guid, True) == "restore")
+    check("decide_guid: manifest con guid.dat → restore (sin local)",
+          decide_guid_action(manifest_con_guid, False) == "restore")
+
+    # Regla 2: manifest sin guid.dat + local → QUARANTINE (fix cyber-café).
+    check("decide_guid: manifest sin guid.dat + local → quarantine",
+          decide_guid_action(manifest_sin_guid, True) == "quarantine")
+    check("decide_guid: exists:false (server vacío) + local → quarantine",
+          decide_guid_action({"exists": False}, True) == "quarantine")
+    check("decide_guid: files con basura se ignoran con seguridad",
+          decide_guid_action({"exists": True, "files": ["x", 3, None]}, True)
+          == "quarantine")
+
+    # Regla 3: manifest sin guid.dat y sin local → none (juego crea el 1º).
+    check("decide_guid: manifest sin guid.dat y sin local → none",
+          decide_guid_action(manifest_sin_guid, False) == "none")
+
+    # Manifest None (pura, caso pedido): se trata como server sin identidad.
+    check("decide_guid: manifest None + local → quarantine",
+          decide_guid_action(None, True) == "quarantine")
+    check("decide_guid: manifest None + sin local → none",
+          decide_guid_action(None, False) == "none")
+
+    # --- quarantine_local_guid: mueve el guid.dat a cuarentena (rutas
+    #     inyectadas; JAMÁS toca el %LOCALAPPDATA% o %APPDATA% real) ---------
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-quarantine-"))
+    guid_path = tmp / "localapp" / "iw4x" / "guid.dat"
+    guid_path.parent.mkdir(parents=True)
+    guid_path.write_bytes(b"GUID-DE-OTRO-JUGADOR")
+    root = tmp / "quarantine"
+    dest = quarantine_local_guid(str(guid_path), user_id="u-123", root=root)
+    moved = root / "guid.dat" if dest is None else dest / "guid.dat"
+    check("quarantine: mueve el guid.dat y devuelve la carpeta destino",
+          dest is not None and moved.is_file()
+          and moved.read_bytes() == b"GUID-DE-OTRO-JUGADOR", str(dest))
+    check("quarantine: carpeta <userId>-<ts> dentro de la raíz inyectada",
+          dest is not None and dest.parent == root
+          and re.fullmatch(r"u-123-\d{8}-\d{6}", dest.name) is not None,
+          dest.name if dest is not None else str(dest))
+    check("quarantine: la ruta original queda SIN guid.dat",
+          not guid_path.exists())
+    check("quarantine: sin guid.dat local → None sin crear nada",
+          quarantine_local_guid(str(guid_path), user_id="u-123", root=root)
+          is None)
+    guid_path.write_bytes(b"x")
+    dest2 = quarantine_local_guid(str(guid_path), root=root)
+    check("quarantine: sin userId → carpeta 'sin-cuenta-<ts>'",
+          dest2 is not None and dest2.name.startswith("sin-cuenta-"),
+          dest2.name if dest2 is not None else str(dest2))
 
 
 # ---------------------------------------------------------------------------
@@ -232,12 +270,15 @@ def phase_app_config() -> None:
     check("DEFAULT_CONFIG: claves del contrato completas",
           set(DEFAULT_CONFIG) >= {"api_url", "game_path", "servers",
                                   "default_server", "simulate_game",
-                                  "cloud_save", "link_poll_interval",
-                                  "link_poll_max_seconds"}, str(sorted(DEFAULT_CONFIG)))
+                                  "cloud_save", "autosave_minutes"},
+          str(sorted(DEFAULT_CONFIG)))
     check("DEFAULT_CONFIG: api_url de LAN y cloud_save activado",
           DEFAULT_CONFIG["api_url"] == "http://192.168.3.99:3000"
           and DEFAULT_CONFIG["cloud_save"] is True
           and DEFAULT_CONFIG["simulate_game"] is False, str(DEFAULT_CONFIG["api_url"]))
+    check("DEFAULT_CONFIG: sin claves del polling de candidatos (eliminado)",
+          not ({"link_poll_interval", "link_poll_max_seconds"} & set(DEFAULT_CONFIG)),
+          str(sorted(DEFAULT_CONFIG)))
 
     # diccionario vacío → todas las propiedades caen al default.
     cfg = AppConfig({})
@@ -246,20 +287,14 @@ def phase_app_config() -> None:
     check("AppConfig: dict vacío → game_path vacío y sin servers",
           cfg.game_path == "" and cfg.servers == [],
           f"{cfg.game_path!r} {cfg.servers}")
-    check("AppConfig: dict vacío → poll por defecto (10s / 180s)",
-          cfg.link_poll_interval == 10
-          and cfg.link_poll_max_seconds == 180
-          and cfg.default_server == 0)
+    check("AppConfig: dict vacío → default_server 0 y autosave 10",
+          cfg.default_server == 0 and cfg.autosave_minutes == 10)
 
     # Merge: config vieja con claves faltantes → defaults por clave.
     cfg = AppConfig({"api_url": "http://localhost:3000"})
     check("app_config merge: clave ausente usa default, clave nueva manda",
           cfg.api_url == "http://localhost:3000" and cfg.cloud_save is True,
           cfg.api_url)
-    cfg = AppConfig({"link_poll_interval": 0, "link_poll_max_seconds": 1})
-    check("app_config: poll se acota a mínimo 1s / 5s",
-          cfg.link_poll_interval == 1 and cfg.link_poll_max_seconds == 5,
-          f"{cfg.link_poll_interval}/{cfg.link_poll_max_seconds}")
     cfg = AppConfig({"default_server": "basura"})
     check("app_config: default_server inválido → 0",
           cfg.default_server == 0, str(cfg.default_server))
@@ -626,7 +661,7 @@ def main() -> int:
 
     print("Tests unitarios del launcher IW4x Ranking (puras, sin red/GUI)")
 
-    phase_candidate_matching()
+    phase_guid_isolation()
     phase_save_sync_pure()
     phase_command_args()
     phase_app_config()
