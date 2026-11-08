@@ -1,7 +1,6 @@
 import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { aliasKey, isBotGuid, normalizeDisplayName, rebuildAliases } from './alias.service.js';
-
 /**
  * Alertas de identidad (anti-impersonación de nick registrado).
  *
@@ -187,6 +186,11 @@ export async function resolveIdentityAlert(id: number, action: 'LINK_TO_OWNER' |
   }
 
   // LINK_TO_OWNER: el guid debe estar libre (si es de otra cuenta → 409).
+  // Defensa anti-bot: los guids del rango 0xb07… jamás se vinculan (los bots
+  // reusan nombres; crear alerta→link de bot inflaría cuentas fantasma).
+  if (isBotGuid(alert.guid)) {
+    throw Errors.botGuidNotLinkable(alert.guid);
+  }
   const existingLink = await prisma.accountLink.findUnique({ where: { guid: alert.guid } });
   if (existingLink && existingLink.userId !== alert.ownerUserId) {
     throw Errors.guidLinkedToOtherAccount(alert.guid);

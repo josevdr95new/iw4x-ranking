@@ -16,7 +16,10 @@
  */
 import { prisma } from '../lib/prisma.js';
 import { errMessage } from '../lib/errors.js';
-import { getSharedRcon, isRconConfigured, statusGuidDecimal, type StatusPlayer } from '../lib/rcon/iw4x-rcon.js';
+import { getSharedRcon, isRconConfigured, statusGuidDecimal, stripColorCodes, type StatusPlayer } from '../lib/rcon/iw4x-rcon.js';
+import { normalizeDisplayName } from './alias.service.js';
+import { getLauncherOnly } from './setting.service.js';
+import { env } from '../config/env.js';
 
 interface EnforceablePenalty {
   id: number;
@@ -93,6 +96,8 @@ export async function runEnforcerTick(now: number = Date.now()): Promise<number>
 
 /**
  * Arranca el enforcer con guards: RCON_PASSWORD configurado + NODE_ENV != test.
+ * Cada intervalo ejecuta DOS ciclos: (1) penalidades de nuestra DB (bans/
+ * tempbans) y (2) enforcement launcher-only si el setting está activo.
  * Devuelve el timer (o null si no arrancó).
  */
 export function startModerationEnforcer(intervalMs?: number): NodeJS.Timeout | null {
@@ -105,7 +110,10 @@ export function startModerationEnforcer(intervalMs?: number): NodeJS.Timeout | n
   const safeInterval = Number.isFinite(interval) && interval >= 1000 ? interval : 30_000;
   console.log(`[enforcer] activo cada ${safeInterval}ms (moderación nativa por RCON).`);
   const timer = setInterval(() => {
-    void runEnforcerTick();
+    void (async () => {
+      await runEnforcerTick();
+      await runLauncherOnlyTick();
+    })();
   }, safeInterval);
   // No retiene el proceso vivo solo por el enforcer.
   timer.unref?.();
@@ -114,4 +122,62 @@ export function startModerationEnforcer(intervalMs?: number): NodeJS.Timeout | n
 
 export function stopModerationEnforcer(timer: NodeJS.Timeout | null): void {
   if (timer) clearInterval(timer);
+}
+
+// ── Enforcer LAUNCHER-ONLY (anti no-launcher) ──────────────────────────────
+
+let launcherRunning = false;
+
+/**
+ * Un tick del enforcer launcher-only. Reglas EXACTAS:
+ *  - Setting launcher_only = false → NADA (cero kicks, cero lecturas rcon).
+ *  - Para cada HUMANO conectado (bots SIEMPRE exentos; CNCT/ZMBI = conectando,
+ *    gracia: no se kickea mientras negocia):
+ *      · tiene sesión activa por GUID (session.guid == su guid decimal), O
+ *      · tiene sesión activa cuyo nick normalizado matchea su nick → OK.
+ *      · si no → `tell <cid> <mensaje>` + `clientkick <cid>` (el mensaje NO va
+ *        en el clientkick: el protocolo no lo soporta; el tell lo ve antes de
+ *        ser expulsado y el log queda en consola de la API).
+ *  - `now` inyectable para tests. Devuelve el nº de kicks enviados.
+ */
+export async function runLauncherOnlyTick(now: number = Date.now()): Promise<number> {
+  if (launcherRunning) return 0;
+  launcherRunning = true;
+  try {
+    const enabled = await getLauncherOnly();
+    if (!enabled) return 0;
+    if (!isRconConfigured()) return 0;
+
+    const sessions = await prisma.playSession.findMany({ where: { expiresAt: { gt: new Date(now) } } });
+    const byGuid = new Set(sessions.filter((s) => s.guid !== null).map((s) => s.guid as string));
+    const byNick = new Set(sessions.map((s) => normalizeDisplayName(s.nick)).filter((n) => n !== ''));
+
+    const status = await getSharedRcon().status();
+    const message = env.launcherOnlyKickMsg;
+    let kicks = 0;
+    for (const slot of status.players) {
+      if (slot.connecting) continue; // gracia mientras conecta (CNCT/ZMBI)
+      if (slot.isBot) continue; // bots SIEMPRE exentos
+      const guid = statusGuidDecimal(slot);
+      const nick = normalizeDisplayName(stripColorCodes(slot.name));
+      const allowed = (guid !== null && byGuid.has(guid)) || (nick !== '' && byNick.has(nick));
+      if (allowed) continue;
+      try {
+        await getSharedRcon().tell(slot.cid, message);
+        await getSharedRcon().clientkick(slot.cid);
+        kicks += 1;
+        console.log(
+          `[enforcer] launcher-only: slot=${slot.cid} "${stripColorCodes(slot.name)}" (guid=${guid ?? slot.guid}) kickeado: sin sesión de launcher activa.`,
+        );
+      } catch (err) {
+        console.warn(`[enforcer] launcher-only: fallo al kickear slot=${slot.cid}: ${errMessage(err)}`);
+      }
+    }
+    return kicks;
+  } catch (err) {
+    console.warn(`[enforcer] launcher-only tick falló: ${errMessage(err)}`);
+    return 0;
+  } finally {
+    launcherRunning = false;
+  }
 }

@@ -26,6 +26,7 @@ model User {
   accountLinks AccountLink[]
   linkAttempts LinkAttempt[]
   identityAlerts IdentityAlert[]
+  playSessions PlaySession[]
 }
 
 /// Intento de vinculación cuenta↔GUID (POST /api/link/start)
@@ -214,6 +215,33 @@ model SyncState {
   source        String    @unique // ruta de la DB fuente
   lastKillEpoch Int       @default(0)
   lastRunAt     DateTime?
+}
+
+/// Configuración key-value persistente del panel (launcher-only, etc.).
+/// value guarda JSON (string). key es la PK (única por definición).
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// Sesión de juego "launcher" (anti no-launcher): el launcher la crea al dar
+/// JUGAR y la refresca en cada heartbeat (TTL DESLIZANTE, env
+/// PLAY_SESSION_TTL_MIN, default 10 min). Una fila por cuenta (userId @unique,
+/// refresh = upsert). `guid` queda null hasta que la ingesta hace el auto-link
+/// del nick de la cuenta con el guid conectado al server. Expirada (expiresAt
+/// <= now) NO cuenta como activa para el enforcer ni para el auto-link.
+model PlaySession {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nick      String   // displayName de la cuenta al crear/refrescar
+  guid      String?  // guid decimal (formato Player.guid) vinculado por auto-link
+  lastSeen  DateTime // último heartbeat del launcher
+  expiresAt DateTime // lastSeen + TTL
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }
 
 /// Cursor de lectura del games_mp.log del servidor dedicado IW4x.

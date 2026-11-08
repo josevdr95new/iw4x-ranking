@@ -17,6 +17,8 @@ export interface SyncResult {
   aliasesSynced: number;
   /** Alertas de identidad (impersonación de nick) creadas/actualizadas por la fuente log. */
   identityAlertsSynced: number;
+  /** AccountLinks creados por auto-link de sesión de launcher (fuente log). */
+  autoLinksSynced: number;
   warnings: string[];
 }
 
@@ -82,6 +84,7 @@ export async function runSync(): Promise<SyncResult> {
   let killEventsSynced = 0;
   let aliasesSynced = 0;
   let identityAlertsSynced = 0;
+  let autoLinksSynced = 0;
   let syncError: unknown = null;
 
   const run = await prisma.syncRun.create({ data: { startedAt } });
@@ -220,6 +223,7 @@ export async function runSync(): Promise<SyncResult> {
         killEventsSynced += logResult.killEventsSynced;
         aliasesSynced += logResult.aliasesUpserted;
         identityAlertsSynced += logResult.identityAlertsUpserted;
+        autoLinksSynced += logResult.autoLinksSynced;
         if (!logResult.ok) ok = false;
         if (logResult.linesIgnored > 0) {
           warnings.push(`[GameLog] ${logResult.linesIgnored} líneas no reconocidas (ignoradas).`);
@@ -275,6 +279,7 @@ export async function runSync(): Promise<SyncResult> {
     killEventsSynced,
     aliasesSynced,
     identityAlertsSynced,
+    autoLinksSynced,
     warnings,
   };
 }

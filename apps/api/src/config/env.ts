@@ -62,6 +62,13 @@ const envSchema = z.object({
       return !['false', '0', 'no', 'off'].includes(value.trim().toLowerCase());
     }),
   LINK_WINDOW_MINUTES: z.coerce.number().int().positive().default(10),
+  /** TTL (minutos) de la sesión de juego del launcher (TTL deslizante por heartbeat). */
+  PLAY_SESSION_TTL_MIN: z.coerce.number().int().positive().default(10),
+  /** Mensaje que ve el jugador kickeado por el enforcer launcher-only. */
+  LAUNCHER_ONLY_KICK_MSG: z
+    .string()
+    .min(1)
+    .default('Este server exige el launcher IW4x Ranking - entra desde www.tuweb (descarga en la web)'),
   CORS_ORIGIN: z.string().min(1).default('http://localhost:5173'),
   /** Raíz de almacenamiento del cloud save por cuenta (default: <repo>/apps/api/storage/profiles). */
   PROFILE_STORAGE_DIR: z.string().min(1).optional(),
@@ -117,6 +124,8 @@ export const env = {
   adminPassword: raw.ADMIN_PASSWORD,
   seedDefaultAdmin: raw.SEED_DEFAULT_ADMIN,
   linkWindowMinutes: raw.LINK_WINDOW_MINUTES,
+  playSessionTtlMin: raw.PLAY_SESSION_TTL_MIN,
+  launcherOnlyKickMsg: raw.LAUNCHER_ONLY_KICK_MSG,
   corsOrigins: raw.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0),

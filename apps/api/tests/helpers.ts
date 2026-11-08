@@ -17,6 +17,8 @@ export async function resetDb(): Promise<void> {
   await prisma.accountLink.deleteMany();
   await prisma.linkAttempt.deleteMany();
   await prisma.penalty.deleteMany();
+  await prisma.playSession.deleteMany();
+  await prisma.setting.deleteMany();
   await prisma.player.deleteMany();
   await prisma.syncRun.deleteMany();
   await prisma.syncState.deleteMany();

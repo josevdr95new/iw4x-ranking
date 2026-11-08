@@ -23,6 +23,25 @@ import {
 } from '../dto/iam.dto.js';
 import { identityAlertsQuery, identityAlertResolveInput, identityAlertIdParam } from '../dto/identity.dto.js';
 import { getIdentityAlerts, resolveIdentityAlert } from '../services/identity.service.js';
+import {
+  botsCountInput,
+  botsDifficultyInput,
+  launcherOnlyInput,
+  mapChangeInput,
+} from '../dto/serveradmin.dto.js';
+import { getActivePlaySessions } from '../services/play-session.service.js';
+import { getLauncherOnly, setLauncherOnly } from '../services/setting.service.js';
+import {
+  changeMap,
+  fastRestart,
+  getMapsOverview,
+  rotateMap,
+} from '../services/server-maps.service.js';
+import {
+  getBotsOverview,
+  setBotCount,
+  setBotDifficulty,
+} from '../services/server-bots.service.js';
 
 export const adminRouter: Router = Router();
 
@@ -140,5 +159,89 @@ adminRouter.get(
   '/iam/bans',
   asyncHandler(async (_req, res) => {
     res.json(await getServerBans());
+  }),
+);
+
+// ── Sesiones de juego (launcher) + launcher-only ───────────────────────────
+
+adminRouter.get(
+  '/server/sessions',
+  asyncHandler(async (_req, res) => {
+    res.json({ sessions: await getActivePlaySessions() });
+  }),
+);
+
+adminRouter.get(
+  '/server/launcher-only',
+  asyncHandler(async (_req, res) => {
+    res.json({ enabled: await getLauncherOnly() });
+  }),
+);
+
+adminRouter.post(
+  '/server/launcher-only',
+  validate(launcherOnlyInput, 'body'),
+  asyncHandler(async (req, res) => {
+    const { enabled } = parseWith(launcherOnlyInput, req.body ?? {});
+    res.json({ enabled: await setLauncherOnly(enabled) });
+  }),
+);
+
+// ── Mapas (catálogo MW2/IW4x + control por rcon) ───────────────────────────
+
+adminRouter.get(
+  '/server/maps',
+  asyncHandler(async (_req, res) => {
+    res.json(await getMapsOverview());
+  }),
+);
+
+adminRouter.post(
+  '/server/map',
+  validate(mapChangeInput, 'body'),
+  asyncHandler(async (req, res) => {
+    const { map } = parseWith(mapChangeInput, req.body ?? {});
+    res.json(await changeMap(map));
+  }),
+);
+
+adminRouter.post(
+  '/server/rotate',
+  asyncHandler(async (_req, res) => {
+    res.json(await rotateMap());
+  }),
+);
+
+adminRouter.post(
+  '/server/fast_restart',
+  asyncHandler(async (_req, res) => {
+    res.json(await fastRestart());
+  }),
+);
+
+// ── Bots (dvars Bot Warfare + spawnBot/kick por rcon) ──────────────────────
+
+adminRouter.get(
+  '/server/bots',
+  asyncHandler(async (_req, res) => {
+    res.json(await getBotsOverview());
+  }),
+);
+
+adminRouter.post(
+  '/server/bots/difficulty',
+  validate(botsDifficultyInput, 'body'),
+  asyncHandler(async (req, res) => {
+    const { level } = parseWith(botsDifficultyInput, req.body ?? {});
+    res.json(await setBotDifficulty({ level }));
+  }),
+);
+
+adminRouter.post(
+  '/server/bots/count',
+  validate(botsCountInput, 'body'),
+  asyncHandler(async (req, res) => {
+    const { count } = parseWith(botsCountInput, req.body ?? {});
+    res.json(await setBotCount(count));
   }),
 );

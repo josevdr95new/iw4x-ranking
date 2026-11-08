@@ -42,7 +42,8 @@ export interface PunisherInfo {
   name: string;
 }
 
-function toAppError(err: unknown): AppError {
+/** Mapea errores del cliente rcon → AppError HTTP (503 no configurado / 502 caído). */
+export function toAppError(err: unknown): AppError {
   if (err instanceof AppError) return err as AppError;
   const message = errMessage(err);
   if (message.includes('RCON_PASSWORD no está configurado')) {

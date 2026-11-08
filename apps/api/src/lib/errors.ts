@@ -104,4 +104,12 @@ export const Errors = {
   internal(message = 'Error interno del servidor.'): AppError {
     return new AppError(500, 'INTERNAL', message);
   },
+  /** Guid de BOT (rango 0xb07…): los bots no son cuentas, jamás se vinculan. */
+  botGuidNotLinkable(guid: string): AppError {
+    return new AppError(
+      400,
+      'BOT_GUID_NOT_LINKABLE',
+      `El GUID ${guid} pertenece al rango dedicado de BOTS (0xb07…): los bots no son cuentas y no se pueden vincular.`,
+    );
+  },
 };

@@ -4,6 +4,7 @@ import { prisma } from '../../lib/prisma.js';
 import { errMessage } from '../../lib/errors.js';
 import { isBotGuid, upsertPlayerAlias } from '../alias.service.js';
 import { reportIdentityAlert } from '../identity.service.js';
+import { tryAutoLinkBySession } from '../play-session.service.js';
 
 /**
  * Lector del games_mp.log del servidor dedicado IW4x.
@@ -344,6 +345,7 @@ export interface GameLogIngestResult {
   killEventsSynced: number; // KillEvent insertados
   aliasesUpserted: number; // apariciones de alias (J + K) aplicadas a PlayerAlias
   identityAlertsUpserted: number; // alertas de identidad (impersonación de nick) creadas/actualizadas
+  autoLinksSynced: number; // AccountLinks creados por sesión activa del launcher (auto-link)
   sessionsOpened: number;
   sessionsClosed: number;
   linesParsed: number;
@@ -505,6 +507,7 @@ export async function ingestGameLog(path: string, server: string | null): Promis
     killEventsSynced: 0,
     aliasesUpserted: 0,
     identityAlertsUpserted: 0,
+    autoLinksSynced: 0,
     sessionsOpened: 0,
     sessionsClosed: 0,
     linesParsed: 0,
@@ -575,9 +578,19 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         if (await upsertPlayerAlias({ guid: event.guid, name: event.name, server, when: now })) {
           result.aliasesUpserted += 1;
         }
-        // Anti-impersonación: ¿el cleanName es un nick REGISTRADO de otro user?
-        const alert = await reportIdentityAlert({ guid: event.guid, name: event.name, when: now });
-        if (alert.outcome !== 'skipped') result.identityAlertsUpserted += 1;
+        // AUTO-LINK por sesión (sustituye el polling del launcher): nick
+        // registrado SIN guids + PlaySession ACTIVA → AccountLink directo.
+        // Sin sesión activa (o guid ya vinculado) → alerta anti-impersonación
+        // como siempre. Un auto-link con éxito deja la alerta sin sentido (el
+        // guid pasa a ser del dueño) → no se reporta.
+        const autoLink = await tryAutoLinkBySession({ guid: event.guid, name: event.name, when: now });
+        if (autoLink.outcome === 'linked') {
+          result.autoLinksSynced += 1;
+        } else {
+          // Anti-impersonación: ¿el cleanName es un nick REGISTRADO de otro user?
+          const alert = await reportIdentityAlert({ guid: event.guid, name: event.name, when: now });
+          if (alert.outcome !== 'skipped') result.identityAlertsUpserted += 1;
+        }
         touched.add(event.guid);
       } else if (event.kind === 'disconnect') {
         await prisma.player.updateMany({

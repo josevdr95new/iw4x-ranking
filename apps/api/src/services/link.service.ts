@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { env } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
+import { isBotGuid } from './alias.service.js';
 
 export interface LinkCandidate {
   guid: string;
@@ -110,6 +111,13 @@ export async function findLinkCandidates(): Promise<CandidatesResult> {
 export async function completeLink(userId: number, guid: string | undefined): Promise<CandidatesResult | LinkedResult> {
   if (guid === undefined || guid === '') {
     return findLinkCandidates();
+  }
+
+  // Los bots NO son cuentas: su guid vive en el rango dedicado 0xb07… y los
+  // nombres de bot se reusan constantemente. Vincularlos inflaría stats de
+  // "jugadores" inexistentes → 400 (idéntico guard al del auto-link por sesión).
+  if (isBotGuid(guid)) {
+    throw Errors.botGuidNotLinkable(guid);
   }
 
   const player = await prisma.player.findUnique({

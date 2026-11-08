@@ -27,6 +27,8 @@ export interface FakeRconOptions {
   statusText?: string;
   /** Infostring para getinfo (SIN header ni "infoResponse\n"). */
   infostring?: string;
+  /** Respuestas de LECTURA de dvars: comando → payload (SIN print\n). Ej. {"bots_skill": '"bots_skill" is: "2" default: "0"'}. */
+  dvarResponses?: Record<string, string>;
   /** Trocear cada respuesta en N datagramas (default 1). */
   splitParts?: number;
   /** Delay artificial de respuesta en ms (default 5). */
@@ -63,6 +65,7 @@ export class FakeRconServer {
       infostring:
         options.infostring ??
         '\\hostname\\^7[^1RANKING^7] ^7Fake Server\\gamename\\IW4\\clients\\2\\bots\\1\\sv_maxclients\\18\\gametype\\war\\mapname\\mp_rust',
+      dvarResponses: options.dvarResponses ?? {},
       splitParts: options.splitParts ?? 1,
       delayMs: options.delayMs ?? 5,
       ackWrites: options.ackWrites ?? true,
@@ -109,6 +112,16 @@ export class FakeRconServer {
 
   setInfostring(text: string): void {
     this.opts.infostring = text;
+  }
+
+  /** Reemplaza las respuestas de lectura de dvars en caliente. */
+  setDvarResponses(responses: Record<string, string>): void {
+    this.opts.dvarResponses = responses;
+  }
+
+  /** Hook de mutación en caliente (asignable después de construir). */
+  setOnCommand(handler: (command: string, server: FakeRconServer) => void): void {
+    this.opts.onCommand = handler;
   }
 
   /** true si el comando N recibido coincide con el prefijo. */
@@ -161,6 +174,9 @@ export class FakeRconServer {
       if (command === 'status') {
         response = `${HEADER}print\n${this.opts.statusText}`;
         this.statusReplyCount += 1;
+      } else if (command in this.opts.dvarResponses) {
+        // Lectura de dvar (p. ej. `bots_skill`) con respuesta canned.
+        response = `${HEADER}print\n${this.opts.dvarResponses[command]}`;
       } else if (this.opts.ackWrites) {
         response = `${HEADER}print\n`;
       } else {
