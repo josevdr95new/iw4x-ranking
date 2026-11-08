@@ -75,6 +75,37 @@ def normalize_api_url(url: str, default: str = DEFAULT_CONFIG["api_url"]) -> str
     return (scheme or "http://") + rest
 
 
+# Puerto de la web de ranking (Vite, apps/web): el launcher la abre en el
+# navegador con los enlaces "RANKING WEB ↗" / "WEB ↗".
+WEB_PORT = 5173
+
+
+def default_web_url(api_url: str = DEFAULT_CONFIG["api_url"]) -> str:
+    """Web del ranking derivada de la API (pura): MISMO host, puerto WEB_PORT.
+
+    ``http://192.168.3.99:3000`` → ``http://192.168.3.99:5173``. Del api_url
+    solo se toma el host (se descartan puerto y posible path); esquema y
+    barra los recompone ``normalize_api_url``. Si el api_url no tiene host
+    utilizable → ``""``.
+
+    El dueño puede fijar ``web_url`` a mano en launcher.config.json (otro
+    host/puerto); un ``""`` explícito oculta los enlaces WEB de la UI.
+    """
+    rest = normalize_api_url(api_url, default="")
+    if not rest:
+        return ""
+    after = rest.split("://", 1)[1] if "://" in rest else rest
+    host = after.split("/", 1)[0].split(":", 1)[0].strip()
+    if not host:
+        return ""
+    return normalize_api_url(f"http://{host}:{WEB_PORT}")
+
+
+# La web del ranking vive en el MISMO host que la API, en el puerto de Vite:
+# el default se DERIVA del api_url del contrato (nunca a mano aquí).
+DEFAULT_CONFIG["web_url"] = default_web_url(DEFAULT_CONFIG["api_url"])
+
+
 class AppConfig:
     """Envoltura tipada y ligera sobre el diccionario de configuración."""
 
@@ -126,6 +157,23 @@ class AppConfig:
         except (TypeError, ValueError):
             return 10
 
+    @property
+    def web_url(self) -> str:
+        """URL de la web del ranking (enlaces RANKING WEB ↗ / WEB ↗).
+
+        - Clave ausente (config viejo) → derivada del api_url VIGENTE
+          (mismo host, puerto WEB_PORT de la web Vite).
+        - Clave propia: manda y se normaliza (esquema garantizado, sin
+          barra final; el puerto no se toca jamás).
+        - ``""`` explícito → ``""``: los enlaces WEB se ocultan en la UI.
+        """
+        if "web_url" not in self.data or self.data.get("web_url") is None:
+            return default_web_url(self.api_url)
+        raw = str(self.data.get("web_url") or "").strip()
+        if not raw:
+            return ""  # vacío a propósito: el dueño oculta los enlaces
+        return normalize_api_url(raw, default=default_web_url(self.api_url))
+
     # --- Escritura ---------------------------------------------------------
     def save(self) -> None:
         """Persiste la configuración actual en disco (JSON legible)."""
@@ -170,6 +218,11 @@ def load_config() -> AppConfig:
     # api_url normalizado también en carga (esquema garantizado, sin barra):
     # la propiedad ya normaliza al leer, aquí lo dejamos consistente en el dict.
     merged["api_url"] = normalize_api_url(merged.get("api_url"))
+    # web_url: si el config es viejo (sin la clave) se DERIVA del api_url
+    # vigente (mismo host, puerto de la web); si viene, se respeta tal cual
+    # ('' explícito = enlaces ocultos; la propiedad normaliza al leer).
+    if "web_url" not in raw:
+        merged["web_url"] = default_web_url(merged["api_url"])
     # 'force_nick' quedó obsoleto (el nick SIEMPRE se fuerza) y el polling
     # de candidatos desapareció (auto-link server-side): se purgan en
     # silencio para que no vuelvan al archivo al guardar.

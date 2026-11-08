@@ -43,6 +43,7 @@ ratón).
 ```json
 {
   "api_url": "http://192.168.3.99:3000",
+  "web_url": "http://192.168.3.99:5173",
   "game_path": "D:\\Call of Duty 6\\iw4x.exe",
   "servers": [
     { "name": "LAN Server", "address": "192.168.2.251:28960" },
@@ -64,6 +65,7 @@ ratón).
 | Clave                   | Significado                                                  |
 | ----------------------- | ------------------------------------------------------------ |
 | `api_url`               | Base de la API (el launcher añade el prefijo `/api/...`). Editable **desde el login** (franja CONEXIÓN) y en Ajustes. |
+| `web_url`               | Web del ranking que se abre en el navegador con los enlaces **RANKING WEB ↗** (login) y **WEB ↗** (cabecera de la home). Default **derivado del `api_url`**: mismo host, puerto **5173** (la web Vite) — p. ej. `http://192.168.3.99:3000` → `http://192.168.3.99:5173`. Si la web vive en otro host/puerto, escríbelo aquí (se normaliza: añade `http://` y recorta la barra final, nunca inventa puertos). Un valor **vacío (`""`) oculta los dos enlaces**. |
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |

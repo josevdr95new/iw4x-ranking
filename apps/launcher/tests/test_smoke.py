@@ -614,6 +614,15 @@ def phase_autologin() -> None:
                 str((app.user or {}).get("email", "")).lower() == EMAIL,
                 str((app.user or {}).get("email")),
             )
+            # Enlace WEB ↗ de la cabecera (fantasma junto a AJUSTES/CERRAR
+            # SESIÓN): mapeado con el copy exacto del config con web_url.
+            web = app.home_frame.web_btn
+            check("home: botón fantasma 'WEB ↗' visible en la cabecera",
+                  bool(web.winfo_ismapped())
+                  and str(web.cget("text")) == "WEB ↗"
+                  and str(web.cget("state")) == "normal",
+                  f"text={web.cget('text')} "
+                  f"mgr={web.winfo_manager()!r}")
             done()
 
         wait_in_app(
@@ -2213,6 +2222,14 @@ def phase_login_compact() -> None:
                   f"mapped={f.toggle_link.winfo_ismapped()} "
                   f"y={f.toggle_link.winfo_rooty() + f.toggle_link.winfo_height()} "
                   f"fondo={fondo}")
+            # Enlace RANKING WEB ↗ (debajo de CREAR CUENTA): mismo contrato de
+            # viewport — visible sin maximizar y con el copy exacto.
+            check("login compacto: enlace RANKING WEB ↗ dentro del viewport",
+                  dentro(f.web_link)
+                  and str(f.web_link.cget("text")) == "RANKING WEB ↗",
+                  f"mapped={f.web_link.winfo_ismapped()} "
+                  f"y={f.web_link.winfo_rooty() + f.web_link.winfo_height()} "
+                  f"fondo={fondo}")
 
             # Modo registro (email + VOLVER: la columna más alta de todas).
             f._toggle_mode()
@@ -2224,6 +2241,12 @@ def phase_login_compact() -> None:
             check("login compacto (registro): VOLVER y EMAIL dentro del viewport",
                   dentro(f.back_btn) and dentro(f.email_box),
                   f"back={dentro(f.back_btn)} email={dentro(f.email_box)}")
+            check("login compacto (registro): RANKING WEB ↗ sigue en viewport "
+                  "(enlace externo: no es ruta de retorno)",
+                  dentro(f.web_link),
+                  f"mapped={f.web_link.winfo_ismapped()} "
+                  f"y={f.web_link.winfo_rooty() + f.web_link.winfo_height()} "
+                  f"fondo={fondo}")
             f._toggle_mode()  # de vuelta al login para los siguientes pasos
             done()
 

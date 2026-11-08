@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import threading
+import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -253,6 +254,20 @@ class App(ctk.CTk):
     def show_settings(self) -> None:
         self.settings_frame.load_from_config()
         self._swap(self.settings_frame)
+
+    def open_web(self) -> None:
+        """Abre la web del ranking en el navegador por defecto (stdlib).
+
+        ``webbrowser.open`` no bloquea la UI de forma perceptible: llamada
+        directa en el hilo de Tk es suficiente (no hay red propia del
+        launcher en la llamada). Sin ``web_url`` en el config → no-op (los
+        enlaces ni siquiera se pintan; este guard es por seguridad).
+        """
+        url = self.cfg.web_url
+        if not url:
+            return
+        log.info("Abriendo la web del ranking: %s", url)
+        webbrowser.open(url)
 
     def _center(self) -> None:
         """Centra la ventana en la pantalla (geometría mínima 980x640)."""

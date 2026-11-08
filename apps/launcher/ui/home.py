@@ -83,6 +83,15 @@ class HomeFrame(ctk.CTkFrame):
                                          width=92)
         self.settings_btn.pack(side="left", padx=SP["xs"])
         bind_ghost_focus(self.settings_btn)
+        # Web del ranking en el navegador (fantasma, mono, sin color nuevo:
+        # el ámbar sigue siendo exclusivo del héroe). Entre AJUSTES y
+        # CERRAR SESIÓN; oculto si el config trae web_url vacía.
+        self.web_btn = ghost_button(right, "WEB ↗", self.app.open_web, width=78)
+        self.web_btn.configure(font=font(11, "bold", mono=True))
+        if self.app.cfg.web_url:
+            self.web_btn.pack(side="left", padx=SP["xs"],
+                              after=self.settings_btn)
+        bind_ghost_focus(self.web_btn)
         self.logout_btn = ghost_button(right, "CERRAR SESIÓN", self.app.logout,
                                        width=124)
         self.logout_btn.pack(side="left", padx=SP["s"])

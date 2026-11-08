@@ -144,6 +144,23 @@ class LoginFrame(ctk.CTkFrame):
         )
         self.toggle_link.pack(fill="x", padx=SP["l"], pady=(SP["xs"], SP["s"]))
 
+        # Enlace a la web del ranking (debajo de CREAR CUENTA): fantasma y
+        # mono (estética de caption), SIN color de acción — el ámbar es solo
+        # del CTA primario. Oculto si el config trae web_url vacía.
+        self.web_link = ctk.CTkButton(
+            body,
+            text="RANKING WEB ↗",
+            font=font(10, "bold", mono=True),
+            text_color=COLORS["text_faint"],
+            fg_color="transparent",
+            hover_color=COLORS["panel2"],
+            corner_radius=RADIUS["btn"],
+            height=26,
+            command=self.app.open_web,
+        )
+        if self.app.cfg.web_url:
+            self.web_link.pack(fill="x", padx=SP["l"], pady=(0, SP["s"]))
+
         # Enter = enviar.
         for entry in (self.nick, self.password, self.email):
             entry.bind("<Return>", lambda _e: self._on_submit())
@@ -159,6 +176,14 @@ class LoginFrame(ctk.CTkFrame):
         bind_ghost_focus(self.back_btn)
         bind_ghost_focus(self.conn_test_btn)
         bind_ghost_focus(self.conn_save_btn)
+        if self.app.cfg.web_url:
+            bind_flat_focus(self.web_link)
+            self.web_link.bind(
+                "<Enter>", lambda _e: self.web_link.configure(
+                    text_color=COLORS["text"]))
+            self.web_link.bind(
+                "<Leave>", lambda _e: self.web_link.configure(
+                    text_color=COLORS["text_faint"]))
         for entry in (self.nick, self.password, self.email):
             bind_focus_hairline(entry, COLORS["border"], COLORS["accent_border"])
         bind_focus_hairline(
