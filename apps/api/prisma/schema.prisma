@@ -62,6 +62,13 @@ model Player {
   /// true si el guid viene del rango dedicado a bots (0xb07…, mapeo de "botN").
   /// Set por la ingesta del log; bootstrap: npm run rebuild:aliases.
   isBot        Boolean     @default(false)
+  /// Progresión parseada del cloud save (iw4x.stat) de la cuenta vinculada
+  /// (link primario). Campo inválido según sanity → null individual;
+  /// saveParsedAt null = nunca se parseó con éxito (ver docs/API.md).
+  saveXp       Int?
+  saveLevel    Int?
+  savePrestige Int?
+  saveParsedAt DateTime?
   firstConnection DateTime?
   lastConnection  DateTime?
   updatedAt       DateTime  @updatedAt

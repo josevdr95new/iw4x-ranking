@@ -42,6 +42,12 @@ export interface PlayerDto {
   favoriteWeapon: string | null;
   /** Mapa con más kills del jugador. */
   favoriteMap: string | null;
+  /**
+   * Progresión parseada del cloud save (iw4x.stat) de la cuenta vinculada:
+   * {level, prestige, xp, parsedAt}; null si el guid nunca tuvo un save parseado
+   * con éxito (sin cuenta vinculada o último blob no parseable). Ver docs/API.md.
+   */
+  save: { level: number | null; prestige: number | null; xp: number | null; parsedAt: string } | null;
   firstConnection: string | null;
   lastConnection: string | null;
   linked: boolean;
@@ -125,6 +131,10 @@ function toPlayerDto(
     matchesPlayed: player.matchesPlayed,
     favoriteWeapon,
     favoriteMap,
+    save:
+      player.saveParsedAt !== null
+        ? { level: player.saveLevel ?? null, prestige: player.savePrestige ?? null, xp: player.saveXp ?? null, parsedAt: player.saveParsedAt.toISOString() }
+        : null,
     firstConnection: player.firstConnection?.toISOString() ?? null,
     lastConnection: player.lastConnection?.toISOString() ?? null,
     linked: player.accountLinks.length > 0,

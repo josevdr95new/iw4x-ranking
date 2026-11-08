@@ -259,7 +259,7 @@ Si ninguna entrada marca `isDefault`, la primera lo recibe. `source` ∈ `env | 
 
 > Todas las rutas exigen JWT normal (`401` sin token). **Cada usuario solo accede a SU save**: el userId sale SIEMPRE del token, nunca del request. Es el mecanismo para que un jugador recupere su nivel/armas/clases en cualquier PC.
 
-**Qué se sincroniza** (paths whitelisted, el binario es data opaca del juego — la API solo valida ruta/tamaño/hash, NUNCA el contenido interno):
+**Qué se sincroniza** (paths whitelisted; el binario es data opaca del juego — la API solo valida ruta/tamaño/hash — con UNA excepción: `iw4x.stat` raíz se **parsea** tras cada upload nuevo para exponer la progresión, ver "Parse del iw4x.stat" más abajo):
 
 | path relativo | Contenido |
 | ------------- | --------- |
@@ -352,6 +352,41 @@ Response **200** (nueva primero; máximo 10):
    - `mods/<mod>/...` → `players\mods\<mod>\`.
 3. **Post-sesión**: esperar que el proceso del juego muera (el flush del `.stat` es al fin de ronda), recalcular sha256 de cada archivo local (incluye `guid.dat` y `mods/<mod>/iw4x_config.cfg`), `PUT /api/profile/save`.
 4. Si el PUT responde `saved:false, reason:"unchanged"` → no pasó nada, normal.
+
+### Parse del `iw4x.stat` → progresión expuesta (perfil + leaderboard)
+
+Tras cada PUT que guarda un snapshot nuevo (`saved:true`), si incluye `iw4x.stat` **raíz**, el server lo parsea (`src/lib/save-parser/parse-stat-blob.ts`) y escribe el resultado en los Players vinculados a la cuenta (columnas `saveXp`/`saveLevel`/`savePrestige`/`saveParsedAt`; el save es por CUENTA: todos los GUIDs vinculados muestran la misma progresión). El parse **nunca puede fallar el upload** (try/catch total; errores → log debug). Semántica "latest wins": si el último blob no es parseable, los campos quedan `null`.
+
+**Confianza del layout** (fuentes verificadas: iw4x-client r5318, `Stats.cpp`/`StructuredData.cpp`/`Server.cpp`):
+
+| Dato | Valor | Confianza |
+| ---- | ----- | --------- |
+| Tamaño del blob | 8192 bytes exactos | ALTA |
+| Versión del def (bytes `[0..3]`, int32LE) | `155` normal; `159` posible tras migración de mods; >159 → blob del futuro → NO se parsea (`save:null`) | ALTA |
+| Fórmula índice→offset | índices 0–1999 → byte en `4+i`; índices 2000–3497 → int32LE en `2004+4*(i-2000)` | ALTA |
+| Bloque de clases | offset 3643 (v155) / 3963 (v159), 64 bytes × 15 clases; `name` string al inicio (32 bytes null-padded). Exposición conservadora: solo `slot`/`name`/`inUse` (sub-offsets internos MEDIA) | ALTA (offsets) / MEDIA (estructura interna) |
+| Índice `experience` (XP total) | 2300 → offset 3204 | MEDIA |
+| Índice prestigio | 2325 → offset 3304 | MEDIA |
+| Índices career | kills 2305, deaths 2315, wins 2307, losses 2308, ties 2309, assists 2316, headshots 2321, timePlayedTotal 2324 (minutos) | MEDIA |
+| Tabla XP por nivel (L1..L70) | umbrales MW2: 0 → L1, 500 → L2 … 2434700 → L70; 2516000 = L70 completo (prestigio) | ALTA |
+
+**Sanity checks** (todo campo MEDIA pasa filtro; lo que no los pase se expone `null` — NUNCA se inventa):
+
+| Campo | Rango válido → si falla |
+| ----- | ---------------------- |
+| `xp` | entero 0..2516000 → si no: `save.xp = null` (y `level`/`levelProgress` null) |
+| `level` | derivado de xp con la tabla (1..70); null si xp null |
+| `prestige` | entero 0..10 → si no: null |
+| career (cada campo) | entero 0..10.000.000 → si no: null SOLO ese campo |
+| clase | `name` imprimible ASCII hasta el primer null → `inUse:true`; si hay bytes no-cero pero no decodifica limpio → `inUse:false` + `rawHex` (diagnóstico) |
+
+**Estado del proyecto / protocolo del dueño** (pendiente): para subir los índices MEDIA a confianza ALTA hay que correlacionar con valores reales. Protocolo: con la cuenta del dueño jugada, ejecutar en la **consola del juego** `/dumpPlayerData` y revisar `console_mp.log`; comparar los valores reales (xp, prestigio, kills…) contra los offsets/índices de arriba. Fixture real pendiente de que el dueño lo suba — hasta entonces la exposición es defensiva por diseño.
+
+**Dónde se expone:**
+
+- `GET /api/players/:guid` → `player.save`: `{ level, prestige, xp, parsedAt } | null` (null = sin cuenta vinculada o último blob no parseable). P. ej. `"save": { "level": 35, "prestige": 1, "xp": 502700, "parsedAt": "2026-11-08T09:00:00.000Z" }`.
+- `GET /api/leaderboard` → cada entrada incluye `"level": number | null`; ordenable con `sort=level` (SQLite: nulls al final en `desc`).
+- Los career stats y clases parseados NO se exponen aún por API (quedan en el parser + tests a la espera del fixture real del dueño).
 
 ---
 
@@ -585,7 +620,7 @@ Query params (todos opcionales):
 
 | Param       | Valores / default                          |
 | ----------- | ------------------------------------------ |
-| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` \| `headshots` |
+| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` \| `headshots` \| `level` |
 | `order`     | `desc` (default) \| `asc`                  |
 | `search`    | substring del nombre (case-insensitive, ASCII) |
 | `page`      | ≥ 1 (default 1)                            |
@@ -619,6 +654,7 @@ Response **200** (ejemplo real):
       "connections": 29,
       "skill": 1042.5,
       "headshots": 61,
+      "level": 35,
       "lastConnection": "2026-11-02T21:59:06.318Z",
       "linked": false
     },
@@ -633,6 +669,7 @@ Response **200** (ejemplo real):
       "connections": 424,
       "skill": 1187.25,
       "headshots": 48,
+      "level": 70,
       "lastConnection": "2026-10-04T21:59:06.318Z",
       "linked": true
     }
@@ -640,7 +677,7 @@ Response **200** (ejemplo real):
 }
 ```
 
-Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo).
+Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo). `level` = nivel parseado del cloud save de la cuenta vinculada (`null` si ese guid nunca tuvo un save parseado con éxito; con `sort=level` los null van al final en `desc`) — ver "Parse del iw4x.stat" en la sección Cloud save.
 
 > **`rank` es SIEMPRE la posición GLOBAL** del jugador en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, el único match de un jugador que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
 
@@ -691,6 +728,7 @@ Response **200** (ejemplo real, truncado):
     "matchesPlayed": 14,
     "favoriteWeapon": "ak47",
     "favoriteMap": "mp_rust",
+    "save": { "level": 35, "prestige": 1, "xp": 502700, "parsedAt": "2026-11-08T09:00:00.000Z" },
     "firstConnection": "2026-02-27T21:59:06.318Z",
     "lastConnection": "2026-11-02T21:59:06.318Z",
     "linked": false
@@ -725,6 +763,7 @@ Notas para el frontend:
 - Campos nuevos (fuente log): `headshots`/`headshotPct` (hitloc `head`/`helmet` sobre kills), `hsRatio` (ratio `headshots`/`kills` con **2 decimales**; `null` si 0 kills — para web/launcher sin dividir por cero), `damageDealt`/`damageTaken` (suma de daño de líneas K + D), `bestStreak` (mejor racha de kills sin muerte intercalada; aprox: solo eventos K almacenados), `teamkills` (ateam == vteam), `matchesPlayed` (mapas distintos con actividad), `favoriteWeapon`/`favoriteMap` (arma/mapa con más kills; `null` sin actividad).
 - `timePlayed` (fuente log) = suma de sesiones reales J→Q (las abiertas cuentan como en curso, cap 4h).
 - `linked`: si el GUID tiene cuenta web vinculada.
+- `save` (cloud save parseado): `{ level, prestige, xp, parsedAt }` con la progresión del `iw4x.stat` de la cuenta vinculada; `null` si el guid nunca tuvo un save parseado con éxito (sin cuenta vinculada, o el último blob no era parseable). `parsedAt` = cuándo se parseó por última vez con éxito (ISO). Detalle de confianza/sanity: ver "Parse del iw4x.stat" en la sección Cloud save.
 - `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres: si el leaderboard muestra dos filas con el mismo displayName (son 2 entidades/GUIDs distintas, es verdad), el perfil con `aliases` desambigua quién es quién.
 
 ```json
@@ -1138,8 +1177,8 @@ Jugadores conectados AHORA: `status()` + `getinfo()` combinados por rcon.
 | POST   | `/api/link/start`         | ✅   | Registra intento de vinculación |
 | POST   | `/api/link/complete`      | ✅   | Sin `guid` → candidatos; con `guid` → vincula (MULTI-GUID) |
 | DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
-| GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable (SOLO-humanos por defecto; `includeBots=true` para ver bots) |
-| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor + `aliases` históricos |
+| GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable (SOLO-humanos por defecto; `includeBots=true` para ver bots; `sort=level` ordena por save parseado) |
+| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor + `aliases` históricos + `save` (nivel/prestigio/xp del cloud save) |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |
 | GET    | `/api/players/:guid/maps`    | — | Desglose por mapa del jugador + favorito |

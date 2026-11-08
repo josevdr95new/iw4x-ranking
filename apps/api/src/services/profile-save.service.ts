@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { env } from '../config/env.js';
 import { Errors } from '../lib/errors.js';
+import { prisma } from '../lib/prisma.js';
 import { MAX_FILE_BASE64_CHARS, type PutSaveInput } from '../dto/profile-save.dto.js';
+import { parseStatBlob } from '../lib/save-parser/parse-stat-blob.js';
+
+/** Path raíz del save de progresión (único archivo cuyo contenido se parsea). */
+const STAT_ROOT_PATH = 'iw4x.stat';
 
 /**
  * Cloud save de progresión IW4x: snapshots versionados POR CUENTA en disco.
@@ -17,7 +22,10 @@ import { MAX_FILE_BASE64_CHARS, type PutSaveInput } from '../dto/profile-save.dt
  *     ├── iw4x_config.cfg
  *     └── mods/<mod>/iw4x.stat
  *
- * - El binario es data OPACA del juego: jamás se parsea; solo hashes/tamaños.
+ * - EXCEPCIÓN de opacidad: `iw4x.stat` (raíz) se PARSEA tras cada upload nuevo
+ *   (progresión: xp/nivel/prestigio → columnas save* del Player vinculado).
+ *   El parse NUNCA puede fallar el upload (try/catch total + sanity por campo;
+ *   ver src/lib/save-parser/parse-stat-blob.ts y docs/API.md).
  * - combinedSha256 = sha256 de la lista canónica "path:fileSha256" → dedupe de PUTs idénticos.
  * - Poda: se conservan las últimas SAVE_KEEP_VERSIONS versiones por cuenta.
  * - Escritura atómica: siempre tmp + rename (mismo volumen → atómico en Windows y POSIX).
@@ -160,6 +168,39 @@ function decodeAndVerify(files: PutSaveInput['files']): DecodedFile[] {
 }
 
 /** PUT /api/profile/save: guarda un snapshot nuevo salvo que sea idéntico al latest. */
+
+/**
+ * Propaga el parse del `iw4x.stat` RAÍZ del snapshot recién guardado a los
+ * Players vinculados a la cuenta (el cloud save es por CUENTA: un perfil de
+ * progresión compartido por todos sus guids, jugue desde la PC que juegue).
+ *
+ * Garantías:
+ * - Sin `iw4x.stat` raíz en el snapshot → no-op.
+ * - Parse null (tamaño ≠ 8192 o versión no soportada) → campos a null ("latest
+ *   wins": el estado del Player refleja SIEMPRE el último snapshot) + log debug.
+ * - Sanity por campo dentro del parser: campo inválido → null individual.
+ * - Cualquier error inesperado (DB, etc.) se traga con log: el upload NUNCA
+ *   falla por el parse.
+ */
+async function syncParsedSaveToPlayers(userId: number, statBuf: Buffer | undefined): Promise<void> {
+  try {
+    if (!statBuf) return;
+    const parsed = parseStatBlob(statBuf);
+    if (!parsed) console.debug(`[profile-save] iw4x.stat no parseable (tamaño/versión) → save=null para cuenta ${userId}`);
+    const result = await prisma.player.updateMany({
+      where: { accountLinks: { some: { userId } } },
+      data: parsed
+        ? { saveXp: parsed.xp, saveLevel: parsed.level, savePrestige: parsed.prestige, saveParsedAt: new Date() }
+        : { saveXp: null, saveLevel: null, savePrestige: null, saveParsedAt: null },
+    });
+    if (result.count === 0) {
+      console.debug(`[profile-save] cuenta ${userId} sin GUIDs vinculados → parse de save no expuesto`);
+    }
+  } catch (err) {
+    console.debug(`[profile-save] parse/persist del iw4x.stat falló (upload intacto): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export function putSave(userId: number, input: PutSaveInput): Promise<PutSaveResult> {
   return withUserLock(userId, async () => {
     const decoded = decodeAndVerify(input.files);
@@ -200,6 +241,9 @@ export function putSave(userId: number, input: PutSaveInput): Promise<PutSaveRes
     atomicWriteFileSync(join(root, 'latest.json'), JSON.stringify(manifest, null, 2));
 
     const pruned = pruneVersions(userId);
+    // Parse de progresión (post-guardado, pre-respuesta): nunca rompe el upload.
+    const statBuf = decoded.find((f) => f.path === STAT_ROOT_PATH)?.buf;
+    await syncParsedSaveToPlayers(userId, statBuf);
     return { saved: true, version, updatedAt, files: fileInfos, pruned };
   });
 }

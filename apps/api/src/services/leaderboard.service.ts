@@ -19,6 +19,12 @@ export interface LeaderboardEntry {
   skill: number;
   /** Kills con hitloc head/helmet (acreditadas al killer; fuente log). */
   headshots: number;
+  /**
+   * Nivel del cloud save parseado (iw4x.stat de la cuenta vinculada); null si
+   * el guid nunca tuvo un save parseado con éxito. Ordenable con sort=level
+   * (SQLite: nulls al final en desc). Ver docs/API.md.
+   */
+  level: number | null;
   lastConnection: string | null;
   /** true si el GUID tiene una cuenta web vinculada. */
   linked: boolean;
@@ -45,7 +51,9 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
     ...(q.search ? { name: { contains: q.search } } : {}),
   };
 
-  const orderBy = [{ [q.sort]: q.order }, { name: 'asc' }] as Prisma.PlayerOrderByWithRelationInput[];
+  // sort=level ordena por la columna saveLevel (el nombre público es "level").
+  const sortField = q.sort === 'level' ? 'saveLevel' : q.sort;
+  const orderBy = [{ [sortField]: q.order }, { name: 'asc' }] as Prisma.PlayerOrderByWithRelationInput[];
 
   const [total, rows] = await Promise.all([
     prisma.player.count({ where }),
@@ -81,6 +89,7 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       connections: player.connections,
       skill: player.skill,
       headshots: player.headshots,
+      level: player.saveLevel ?? null,
       lastConnection: player.lastConnection?.toISOString() ?? null,
       linked: player.accountLinks.length > 0,
     })),

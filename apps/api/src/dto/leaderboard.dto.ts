@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const leaderboardQuerySchema = z.object({
-  sort: z.enum(['kills', 'deaths', 'kd', 'timePlayed', 'skill', 'headshots']).default('kills'),
+  sort: z.enum(['kills', 'deaths', 'kd', 'timePlayed', 'skill', 'headshots', 'level']).default('kills'),
   order: z.enum(['asc', 'desc']).default('desc'),
   search: z
     .string()
