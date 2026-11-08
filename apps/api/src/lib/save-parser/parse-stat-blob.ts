@@ -11,6 +11,17 @@
  *   lo que no los pase se expone null (NUNCA se inventa un valor).
  * - Pendiente (protocolo del dueño `/dumpPlayerData`): correlacionar índices con
  *   valores reales para subir estos índices a confianza ALTA.
+ *
+ * ⚠️ ALCANCE REAL (investigación 2026-11-08, ver docs/API.md "Formato real del
+ * iw4x.stat en disco"): este parser entiende el BUFFER PLANO de 8192 bytes que
+ * vive en MEMORIA (svs_clients[].stats del server dedicado, statpackets "stats"
+ * del cliente) — NO el archivo `iw4x.stat` EN DISCO. El archivo en disco que
+ * escriben las builds actuales (verificado con r5318 nov-2026 y archivos del
+ * dueño desde 2014) es un contenedor del MOTOR de 8208 bytes: 16 bytes de
+ * cabecera + 8192 bytes ofuscados/cifrados con keystream único por escritura.
+ * parseStatBlob(archivo real) → null SIEMPRE (es el contrato fijado por los
+ * tests con tests/fixtures/real-iw4x.stat). Para LVL en vivo ver docs/API.md
+ * (GSC GetStat + FileWrite, o dump de consola del cliente).
  */
 
 /** Tamaño exacto del blob en las builds actuales. */

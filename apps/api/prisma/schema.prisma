@@ -23,6 +23,16 @@ model User {
   role         String        @default("USER") // USER | ADMIN (auto-grant vía ADMIN_EMAILS o script promote:admin)
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
+  /// Marca de "cuarentena de identidad" (POST /api/identity/claim-fresh): la
+  /// cuenta espera un guid NUEVO (p. ej. su guid.dat compartido fue subido a la
+  /// nube desde varias cuentas y se quiere una identidad limpia). Mientras está
+  /// seteada:
+  ///  - el auto-link por sesión acepta un guid NUEVO aunque la cuenta ya tenga
+  ///    guids viejos vinculados (los guids viejos siguen sin matchear: el flag
+  ///    también limpia el PlaySession.guid colgante), y
+  ///  - se auto-limpia al producirse ese link (one-shot).
+  /// El usuario NUNCA se borra por esto; null = flujo normal.
+  claimFreshAt DateTime?
   accountLinks AccountLink[]
   linkAttempts LinkAttempt[]
   identityAlerts IdentityAlert[]

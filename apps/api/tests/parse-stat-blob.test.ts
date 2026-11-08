@@ -6,6 +6,9 @@
  * la fórmula de punta a punta). Layout verificado: iw4x-client r5318.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import {
@@ -21,6 +24,8 @@ import {
 } from '../src/lib/save-parser/parse-stat-blob.js';
 import { buildStatBlob, writeStatIndex } from './fixtures/build-stat-blob.js';
 import { registerUser, req, resetDb, type TestUser } from './helpers.js';
+
+const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
@@ -213,6 +218,70 @@ describe('sanity checks MEDIA: campo inválido → null individual', () => {
     expect(parsed?.career.deaths).toBeNull();
     expect(parsed?.career.wins).toBe(7);
     expect(parsed?.career.losses).toBe(0);
+  });
+});
+
+describe('archivo REAL del juego (fixtures/real-iw4x.stat): el blob en disco NO es el layout documentado', () => {
+  /**
+   * Fixture = copia REAL del `iw4x.stat` de un jugador (build IW4x r5318, nov 2026).
+   *
+   * HALLAZGO (investigación 2026-11-08, ver docs/API.md "Formato real del
+   * iw4x.stat en disco"): las builds actuales escriben el archivo a través del
+   * store nativo del MOTOR (el mismo que MW2/aIW usa desde ~2014), cuyo formato
+   * es 8208 bytes = 16 bytes de cabecera (nonce/checksum) + 8192 bytes de datos
+   * OFUSCADOS/CIFRADOS con keystream ÚNICO POR ESCRITURA:
+   * - entropía de Shannon ≈ 7.98 bits/byte (un blob de stats plano tiene runas
+   *   largas de ceros → entropía baja);
+   * - XOR entre dos .stat cualesquiera (mismo usuario o no, playerstats.txt
+   *   plano vs cifrado) = ruido puro → NO es XOR de clave estática;
+   * - int32LE@0 cambia cada sesión (no es la versión 155/159).
+   *
+   * La versión 8192 PLANA que este parser entiende es la del BUFFER en memoria
+   * (svs_clients[].stats del server, statpackets "stats"), no la del archivo.
+   * Conclusión: contra archivos reales el parser DEBE devolver null y el perfil
+   * debe quedar con save=null (el UI muestra "—"). Estos tests lo fijan como
+   * contrato para que nadie "arregle" el parser para aceptar el archivo real
+   * (produciría basura).
+   */
+  const real = () => readFileSync(join(FIXTURES_DIR, 'real-iw4x.stat'));
+
+  it('el fixture real existe, mide 8208 bytes (≠ 8192) y NO empieza con versión 155/159', () => {
+    const buf = real();
+    expect(buf.length).toBe(8208); // 16 de cabecera + 8192 de payload
+    const version = buf.readInt32LE(0);
+    expect(version).not.toBe(155);
+    expect(version).not.toBe(159);
+  });
+
+  it('parseStatBlob(archivo real) → null por tamaño (8208 ≠ STAT_BLOB_SIZE)', () => {
+    expect(parseStatBlob(real())).toBeNull();
+  });
+
+  it('defensa en profundidad: incluso truncado a 8192 sigue → null (versión aleatoria, no basura)', () => {
+    // Si el tamaño fuera el único chequeo, 8192 bytes de cifrado producirían
+    // "campos" sin sentido; el chequeo de versión lo impide → null garantizado.
+    const truncated = real().subarray(16); // cabecera fuera, payload cifrado
+    expect(truncated.length).toBe(8192);
+    expect(parseStatBlob(truncated)).toBeNull();
+    expect(parseStatBlob(real().subarray(0, 8192))).toBeNull();
+  });
+
+  it('integración: PUT del archivo REAL → upload OK y save=null en el perfil (UI muestra "—")', async () => {
+    await resetDb();
+    const user = await registerUser('realstat@test.local', 'supersecret123', 'RealStatTester');
+    const GUID_REAL = '3333333333333333333';
+    await prisma.player.create({ data: { guid: GUID_REAL, name: 'RealFile IG' } });
+    const link = await req().post('/api/link/complete').set('Authorization', `Bearer ${user.token}`).send({ guid: GUID_REAL });
+    expect(link.status).toBe(200);
+
+    const put = await putSaveFile(user, real());
+    expect(put.status).toBe(200);
+    expect(put.saved).toBe(true); // el snapshot se guarda (es un archivo legítimo del launcher)
+
+    const profile = await req().get(`/api/players/${GUID_REAL}`);
+    expect(profile.status).toBe(200);
+    const save = (profile.body as { player: { save: { level: number | null; xp: number | null } | null } }).player.save;
+    expect(save).toBeNull(); // level/xp/prestige NO se inventan
   });
 });
 

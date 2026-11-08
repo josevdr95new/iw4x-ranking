@@ -17,6 +17,13 @@ import { aliasKey, isBotGuid, normalizeDisplayName } from './alias.service.js';
  * se sella session.guid. Sin sesión activa → comportamiento previo
  * (IdentityAlert anti-impersonación). Si el guid YA está vinculado a OTRA
  * cuenta → también comportamiento previo (alerta; nunca re-asignamos).
+ *
+ * TIGHTENING anti herencia cruzada: una cuenta CON guids vinculados ya NO
+ * auto-linkea guids nuevos aunque el nick matchee y haya sesión activa (la
+ * identidad por cuenta es 1 guid principal; el link adicional legítimo va por
+ * /api/link o por el flujo de cuarentena POST /api/identity/claim-fresh, que
+ * re-habilita el auto-link UNA sola vez para el guid nuevo que nazca).
+ *
  * Los guids de BOT jamás se vinculan (los bots reusan nombres y no son
  * cuentas — mismo guard que la capa HTTP de link).
  */
@@ -85,15 +92,27 @@ export interface AutoLinkBySessionResult {
 
 /**
  * AUTO-LINK por sesión, llamado por la ingesta en cada línea J (connect).
- * REGLAS EXACTAS:
+ * REGLAS EXACTAS (identidad por cuenta = 1 guid principal):
  *  1. guid de bot → skip (los bots no son cuentas; isBotGuid = rango 0xb07…).
  *  2. nick sin identidad (vacío/'unknown') → skip.
- *  3. guid YA vinculado (a la misma cuenta o a otra) → skip 'guid-ya-vinculado'
+ *  3. nick no registrado → skip.
+ *  4. guid YA vinculado (a la misma cuenta o a otra) → skip 'guid-ya-vinculado'
  *     (la alerta de identidad sigue su curso como hoy).
- *  4. cuenta del nick SIN ningún guid vinculado + PlaySession ACTIVA → crea
- *     AccountLink + sella session.guid + log "Auto-link por sesión: ...".
- *  5. cuenta del nick CON guids (PC compartida declarada) o SIN sesión activa
- *     → skip (IdentityAlert, como antes).
+ *  5. TIGHTENING anti herencia cruzada: cuenta del nick CON guids vinculados
+ *     (PC compartida declarada) + guid DISTINTO de todos los suyos → skip
+ *     'cuenta-con-guids' aunque haya sesión activa (antes se linkeaba si el
+ *     guid entraba libre: así era como una cuenta heredaba el guid de otra en
+ *     la misma PC). La alerta anti-impersonación sigue normal. La vía legítima
+ *     para un guid nuevo adicional es la vinculación manual (/api/link) o el
+ *     flujo de cuarentena (claim-fresh, regla 7).
+ *  6. cuenta del nick SIN guids + PlaySession ACTIVA → crea AccountLink + sella
+ *     session.guid + log "Auto-link por sesión: ...".
+ *  7. CUARENTENA claim-fresh: cuenta CON guids y User.claimFreshAt seteado
+ *     (POST /api/identity/claim-fresh) + guid NUEVO (no coincide con ninguno de
+ *     los suyos) + sesión ACTIVA → SÍ linkea (el guid nuevo que nazca), sella
+ *     session.guid y LIMPIA la marca (one-shot). Los guids viejos de la cuenta
+ *     siguen sin matchear (claim-fresh ya desreferenció el PlaySession.guid).
+ *  8. Sin sesión activa → skip 'sin-sesion-activa' (IdentityAlert como siempre).
  */
 export async function tryAutoLinkBySession(input: { guid: string; name: string; when: Date }): Promise<AutoLinkBySessionResult> {
   if (isBotGuid(input.guid)) return { outcome: 'skipped', reason: 'guid-de-bot' };
@@ -105,12 +124,17 @@ export async function tryAutoLinkBySession(input: { guid: string; name: string; 
     select: {
       id: true,
       displayName: true,
+      claimFreshAt: true,
       accountLinks: { select: { guid: true } },
       playSessions: { select: { userId: true, expiresAt: true }, take: 1 },
     },
   });
   if (!owner) return { outcome: 'skipped', reason: 'nick-no-registrado' };
-  if (owner.accountLinks.length > 0) return { outcome: 'skipped', reason: 'cuenta-con-guids' };
+
+  const hasGuids = owner.accountLinks.length > 0;
+  const isNewGuidForAccount = !owner.accountLinks.some((link) => link.guid === input.guid);
+  if (hasGuids && !owner.claimFreshAt) return { outcome: 'skipped', reason: 'cuenta-con-guids' };
+
   const session = owner.playSessions[0];
   if (!session || session.expiresAt.getTime() <= input.when.getTime()) {
     return { outcome: 'skipped', reason: 'sin-sesion-activa' };
@@ -127,7 +151,13 @@ export async function tryAutoLinkBySession(input: { guid: string; name: string; 
   }
 
   try {
-    await prisma.accountLink.create({ data: { userId: owner.id, guid: input.guid } });
+    // claim-fresh es ONE-SHOT: la marca se limpia al materializarse el link del
+    // guid nuevo (misma transacción: link + flag van juntos o no van).
+    const shouldClearClaimFresh = owner.claimFreshAt !== null;
+    await prisma.$transaction([
+      prisma.accountLink.create({ data: { userId: owner.id, guid: input.guid } }),
+      ...(shouldClearClaimFresh ? [prisma.user.update({ where: { id: owner.id }, data: { claimFreshAt: null } })] : []),
+    ]);
   } catch {
     // Carrera: otro proceso vinculo el guid entre el check y el create (unique).
     return { outcome: 'skipped', reason: 'guid-ya-vinculado' };
