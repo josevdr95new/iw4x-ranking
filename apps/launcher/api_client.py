@@ -255,6 +255,33 @@ class ApiClient:
         """
         return self._request("POST", "/play/session", token=token, json_body={})
 
+    # --- Identidad: propiedad del guid.dat (backend en vivo) ---------------
+    def guid_from_file(self, token: str, data_base64: str) -> Dict[str, Any]:
+        """POST /api/identity/guid-from-file → {guid, guidDecimal, ownedByMe, ownerNick}.
+
+        El backend DERIVA el GUID desde el propio guid.dat (validado en vivo:
+        derivó c103bb7531742427 exacto del guid.dat real) y responde si
+        pertenece a la cuenta del token. Con el guid.dat de OTRO jugador,
+        ``ownerNick`` trae el nick de su dueño real. 400 si el base64 es
+        inválido o el tamaño queda fuera de 64B..4KB; ``guid: null`` si no es
+        derivable.
+        """
+        return self._request(
+            "POST", "/identity/guid-from-file", token=token,
+            json_body={"dataBase64": data_base64},
+        )
+
+    def claim_fresh(self, token: str) -> Dict[str, Any]:
+        """POST /api/identity/claim-fresh → {ok, claimFreshAt, linkedGuids}.
+
+        Marca la cuenta para identidad NUEVA: el próximo auto-link por sesión
+        aceptará un guid DISTINTO al vinculado y lo atará a ESTA cuenta (es
+        la pieza que completa la cuarentena del guid.dat ajeno).
+        """
+        return self._request(
+            "POST", "/identity/claim-fresh", token=token, json_body={}
+        )
+
     # --- Vinculación cuenta ↔ GUID -----------------------------------------
     def link_start(self, token: str) -> Dict[str, Any]:
         """POST /api/link/start — registra el intento de vinculación."""

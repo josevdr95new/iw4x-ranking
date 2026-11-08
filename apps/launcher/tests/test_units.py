@@ -40,7 +40,9 @@ import save_sync as ss  # noqa: E402
 from save_sync import (  # noqa: E402
     build_upload_files,
     decide_guid_action,
+    decide_guid_validation,
     decide_sync,
+    guid_file_b64,
     local_save_files,
     quarantine_local_guid,
     sha256_of,
@@ -119,6 +121,51 @@ def phase_guid_isolation() -> None:
     check("quarantine: sin userId → carpeta 'sin-cuenta-<ts>'",
           dest2 is not None and dest2.name.startswith("sin-cuenta-"),
           dest2.name if dest2 is not None else str(dest2))
+
+
+# ---------------------------------------------------------------------------
+# 1b. save_sync: capa NUEVA de propiedad del guid.dat (backend /identity/*).
+def phase_guid_validation() -> None:
+    print("\n=== Units: decide_guid_validation / guid_file_b64 (propiedad) ===")
+
+    # --- Ramas de la decisión pura (3 ramas + API caída) ---------------------
+    # El orden interno: API caída manda (sin confirmación del server jamás se
+    # cuarentena); sin guid local no hay nada que validar; con local manda
+    # ownedByMe.
+    check("validación: ownedByMe:true + local → 'play' (restore sano)",
+          decide_guid_validation(True, True, True) == "play")
+    check("validación: ownedByMe:false + local → 'quarantine+claim-fresh' "
+          "(guid compartido de otro)",
+          decide_guid_validation(False, True, True) == "quarantine+claim-fresh")
+    check("validación: guid:null (no derivable) cuenta como NO tuyo → "
+          "'quarantine+claim-fresh'",
+          decide_guid_validation(False, True, True) == "quarantine+claim-fresh")
+    check("validación: API caída + ownedByMe:false → 'play-offline' "
+          "(sin cuarentena por incertidumbre)",
+          decide_guid_validation(False, True, False) == "play-offline")
+    check("validación: API caída manda aunque la respuesta diga tuyo → "
+          "'play-offline'",
+          decide_guid_validation(True, True, False) == "play-offline")
+    check("validación: sin guid.dat local → 'play' (cuenta nueva, flujo "
+          "none/fresh existente)",
+          decide_guid_validation(True, False, True) == "play"
+          and decide_guid_validation(False, False, True) == "play")
+    check("validación: sin local y API caída → 'play-offline' (total)",
+          decide_guid_validation(False, False, False) == "play-offline")
+
+    # --- guid_file_b64: el body exacto del contrato ---------------------------
+    import base64 as _b64
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-guidval-"))
+    guid = tmp / "guid.dat"
+    guid.write_bytes(b"GUID-DE-ADMIN-COMPAR")
+    b64 = guid_file_b64(str(guid))
+    check("guid_file_b64: contenido crudo en base64 (body del contrato)",
+          b64 == _b64.b64encode(b"GUID-DE-ADMIN-COMPAR").decode("ascii"),
+          str(b64))
+    check("guid_file_b64: sin guid.dat local → None (sin validación posible)",
+          guid_file_b64(str(tmp / "nope.dat")) is None)
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +728,7 @@ def main() -> int:
     print("Tests unitarios del launcher IW4x Ranking (puras, sin red/GUI)")
 
     phase_guid_isolation()
+    phase_guid_validation()
     phase_save_sync_pure()
     phase_command_args()
     phase_app_config()

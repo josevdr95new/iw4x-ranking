@@ -1253,6 +1253,13 @@ class StubApi:
         self._save_version = 0
         self._save_updated = "2026-11-07T10:00:00.000Z"
         self.save_upload_calls = 0
+        # Identidad (capa nueva): propiedad del guid.dat derivada en server.
+        # Default "tuya": cualquier llamada no esperada es inofensiva.
+        self.guid_from_file_calls = 0
+        self.claim_fresh_calls = 0
+        self.last_guid_b64: Optional[str] = None
+        self.guid_answer: Dict[str, Any] = {"ownedByMe": True}
+        self.guid_from_file_error: Optional[Exception] = None
 
     def link_start(self, token):
         # SE CONSERVA como espía: el flujo simplificado NO debe llamarlo.
@@ -1296,6 +1303,24 @@ class StubApi:
         self._save_version += 1
         self._save_updated = "2026-11-07T11:00:00.000Z"
         return {"saved": True, "version": self._save_version}
+
+    # --- Identidad (capa nueva): propiedad del guid.dat --------------------
+    def guid_from_file(self, token, data_base64):
+        self.guid_from_file_calls += 1
+        self.last_guid_b64 = data_base64
+        if self.guid_from_file_error is not None:
+            raise self.guid_from_file_error
+        return {
+            "guid": self.guid_answer.get("guid"),
+            "guidDecimal": self.guid_answer.get("guidDecimal"),
+            "ownedByMe": bool(self.guid_answer.get("ownedByMe")),
+            "ownerNick": self.guid_answer.get("ownerNick"),
+        }
+
+    def claim_fresh(self, token):
+        self.claim_fresh_calls += 1
+        return {"ok": True, "claimFreshAt": "2026-11-08T00:00:00.000Z",
+                "linkedGuids": []}
 
 
 def flow_once(stub: StubApi, display_name: str = "El Tester", **kw):
@@ -1664,6 +1689,194 @@ def phase_guid_quarantine_pipeline() -> None:
           and not list(esc_c["qroot"].glob("u-777-*"))
           and esc_c["guid"].read_bytes() == b"GUID-VIEJO-DE-OTRO-JUGADOR",
           str(logs_c))
+
+
+def phase_guid_ownership() -> None:
+    """Fase lógica: capa NUEVA de propiedad del guid.dat (stubs, rutas inyectadas).
+
+    Caso real del dueño: la nube de quien jugó ANTES tenía el guid.dat
+    COMPARTIDO de la PC → el restore lo traía con confianza y el siguiente
+    jugador heredaba identidad ajena. El pre-launch ahora valida propiedad
+    contra POST /identity/guid-from-file (derivación server-side del GUID,
+    validada en vivo con c103bb7531742427):
+
+    - A: restore trae el guid de OTRO → llamada al stub con el b64 EXACTO
+         del guid restaurado → cuarentena <userId>-<ts> + claim-fresh + log
+         claro con el nick del dueño; el juego crea identidad FRESCA y el
+         upload post-sesión la sube a ESTA cuenta.
+    - B: el restaurado ya es TUYO (ownedByMe:true) → cero fricción.
+    - C: validación caída (el request falla) → sin cuarentena ni claim:
+         se conserva la local.
+
+    NUNCA toca el guid.dat real ni %LOCALAPPDATA% real: todo con rutas
+    inyectadas (guid_path/quarantine_root_path) bajo %TEMP%.
+    """
+    print("\n=== Fase propiedad del guid.dat → guid-from-file + claim-fresh (stubs) ===")
+    import base64
+    import tempfile
+
+    import game_flow as gf
+
+    ADMIN_GUID = b"GUID-COMPARTIDO-DE-ADMIN"     # el que 'pepe' heredaba
+    FRESH_GUID = b"GUID-NUEVO-CREADO-POR-EL-JUEGO"
+
+    def make_escenario(name: str) -> Dict[str, Path]:
+        tmp = Path(tempfile.mkdtemp(prefix=f"iw4x-own-{name}-"))
+        gd = tmp / "gd"
+        (gd / "players").mkdir(parents=True)
+        (gd / "players" / "iw4x.stat").write_bytes(f"OWN-{name}-1".encode())
+        exe = tmp / "iw4x.exe"
+        exe.write_bytes(b"MZ-fake")  # existe: pasa el guard de _launch_game
+        guid = tmp / "localapp" / "iw4x" / "guid.dat"
+        guid.parent.mkdir(parents=True)
+        guid.write_bytes(b"GUID-VIEJO-DE-ESTA-PC")
+        # Antefecha los mtimes locales (2026-11-07T10:00Z < stamp del server
+        # 11:00Z): en el PRE-launch el server resulta más nuevo → DOWNLOAD
+        # (el restore trae el guid compartido); tras jugar, los archivos
+        # reescritos quedan con mtime actual > server → UPLOAD post-sesión.
+        import os
+        from datetime import datetime, timezone
+
+        pasado = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc).timestamp()
+        os.utime(gd / "players" / "iw4x.stat", (pasado, pasado))
+        os.utime(guid, (pasado, pasado))
+        return {"tmp": tmp, "gd": gd, "exe": exe, "guid": guid,
+                "qroot": tmp / "quarantine"}
+
+    class FakeProc:
+        """Doble del Popen del juego: PID falso, crea identidad FRESCA."""
+
+        def __init__(self, cmd, guid_path: Path):
+            self.pid = 424700
+            self.cmd = cmd
+            self._exited = False
+            guid_path.write_bytes(FRESH_GUID)  # el juego real crea el suyo
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self._exited = True
+
+    def correr(esc: Dict[str, Path], stub: StubApi):
+        events: List[Dict[str, Any]] = []
+        flow = GameFlow(stub, "tok", str(esc["exe"]), "127.0.0.1:28961",
+                        events.append, already_linked=False, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        game_dir=str(esc["gd"]), user_id="u-888",
+                        guid_path=str(esc["guid"]),
+                        quarantine_root_path=esc["qroot"])
+        orig_popen = gf.subprocess.Popen
+        gf.subprocess.Popen = lambda cmd, **kw: FakeProc(cmd, esc["guid"])
+        try:
+            flow.run()
+        finally:
+            gf.subprocess.Popen = orig_popen
+        logs = [str(e.get("msg", "")) for e in events if e.get("t") == "log"]
+        return stub, events, logs
+
+    def seed_nube_con_guid(stub: StubApi, guid_content: bytes) -> None:
+        """La nube del jugador ANTERIOR: progreso + guid.dat compartido.
+
+        El stamp queda en el default del stub (pasado, 2026-11-07T11:00Z):
+        los mtimes locales se antefechan en make_escenario, así el pre-launch
+        ve server más nuevo (DOWNLOAD/restore) y el post-sesión ve local más
+        nuevo (UPLOAD de la identidad fresca).
+        """
+        import hashlib
+        seed = [
+            {"path": "iw4x.stat",
+             "dataBase64": base64.b64encode(b"PROGRESO-DEL-ANTERIOR").decode(),
+             "sha256": hashlib.sha256(b"PROGRESO-DEL-ANTERIOR").hexdigest()},
+            {"path": "guid.dat",
+             "dataBase64": base64.b64encode(guid_content).decode(),
+             "sha256": hashlib.sha256(guid_content).hexdigest()},
+        ]
+        stub.save_upload("tok", seed)
+
+    # --- Escenario A: restore trae el guid de OTRO → cuarentena+claim -------
+    esc_a = make_escenario("robo")
+    stub_a = StubApi()
+    seed_nube_con_guid(stub_a, ADMIN_GUID)
+    stub_a.guid_answer = {"guid": "c103bb7531742427",
+                          "guidDecimal": "13828633757488133607",
+                          "ownedByMe": False, "ownerNick": "admin"}
+    seed_calls_a = stub_a.save_upload_calls  # el seed ya hizo 1 PUT
+    stub_a, evs_a, logs_a = correr(esc_a, stub_a)
+    esperado_b64 = base64.b64encode(ADMIN_GUID).decode("ascii")
+    check("propiedad A: valida el guid RESTAURADO (b64 exacto del dueño ajeno)",
+          stub_a.guid_from_file_calls == 1
+          and stub_a.last_guid_b64 == esperado_b64,
+          f"calls={stub_a.guid_from_file_calls} "
+          f"b64_ok={stub_a.last_guid_b64 == esperado_b64}")
+    quarantined = list(esc_a["qroot"].glob("u-888-*/guid.dat"))
+    check("propiedad A: cuarentena <userId>-<ts> con el contenido del dueño ajeno",
+          len(quarantined) == 1
+          and quarantined[0].read_bytes() == ADMIN_GUID,
+          str(list(esc_a["qroot"].glob("*"))))
+    check("propiedad A: claim-fresh marcó la cuenta (1 llamada)",
+          stub_a.claim_fresh_calls == 1, str(stub_a.claim_fresh_calls))
+    check("propiedad A: log claro exacto con el nick del dueño real",
+          "Ese guid.dat pertenecía a admin. Se creará una identidad NUEVA "
+          "para tu cuenta." in logs_a, str(logs_a))
+    check("propiedad A: flujo en éxito y SIN link/start (flujo simplificado)",
+          any(e["t"] == "success" for e in evs_a)
+          and stub_a.link_start_calls == 0, str([e["t"] for e in evs_a]))
+    check("propiedad A: el upload post-sesión incluye la identidad FRESCA",
+          stub_a.save_upload_calls == seed_calls_a + 1
+          and stub_a._save_store.get("guid.dat") == FRESH_GUID,
+          f"calls={stub_a.save_upload_calls} (seed={seed_calls_a}) "
+          f"guid={stub_a._save_store.get('guid.dat')!r:.50}")
+
+    # --- Escenario B: el restaurado ya es TUYO → cero fricción --------------
+    esc_b = make_escenario("sano")
+    stub_b = StubApi()
+    seed_nube_con_guid(stub_b, b"GUID-PROPIO-DE-PEPE")
+    stub_b.guid_answer = {"guid": "aabbccdd11223344", "guidDecimal": "9",
+                          "ownedByMe": True, "ownerNick": None}
+    stub_b, evs_b, logs_b = correr(esc_b, stub_b)
+    check("propiedad B: valida el guid restaurado (1 llamada)",
+          stub_b.guid_from_file_calls == 1, str(stub_b.guid_from_file_calls))
+    check("propiedad B: ownedByMe:true → SIN cuarentena y SIN claim-fresh",
+          stub_b.claim_fresh_calls == 0
+          and not list(esc_b["qroot"].glob("*")),
+          f"claim={stub_b.claim_fresh_calls} "
+          f"qroot={list(esc_b['qroot'].glob('*'))}")
+    check("propiedad B: log dim 'Identidad verificada como tuya ✓'",
+          "Identidad verificada como tuya ✓" in logs_b, str(logs_b))
+    check("propiedad B: sin log de robo ni de identidad nueva",
+          not any("Ese guid.dat" in x for x in logs_b)
+          and not any("Identidad nueva creada" in x for x in logs_b),
+          str(logs_b))
+    check("propiedad B: flujo en éxito (juega normal)",
+          any(e["t"] == "success" for e in evs_b), str([e["t"] for e in evs_b]))
+
+    # --- Escenario C: la validación falla → SIN cuarentena (resiliente) -----
+    esc_c = make_escenario("apizada")
+    stub_c = StubApi()
+    seed_nube_con_guid(stub_c, ADMIN_GUID)
+    stub_c.guid_from_file_error = NetworkError("No se pudo conectar con la API.")
+    stub_c, evs_c, logs_c = correr(esc_c, stub_c)
+    check("propiedad C: intentó validar (1 llamada) y falló sin explotar",
+          stub_c.guid_from_file_calls == 1
+          and any(e["t"] == "success" for e in evs_c),
+          f"calls={stub_c.guid_from_file_calls} "
+          f"evs={[e['t'] for e in evs_c]}")
+    check("propiedad C: SIN cuarentena y SIN claim-fresh (incertidumbre)",
+          stub_c.claim_fresh_calls == 0
+          and not list(esc_c["qroot"].glob("*")),
+          f"claim={stub_c.claim_fresh_calls} "
+          f"qroot={list(esc_c['qroot'].glob('*'))}")
+    check("propiedad C: log dim exacto 'No se pudo validar la identidad "
+          "(sin conexión) — se conserva la actual'",
+          "No se pudo validar la identidad (sin conexión) — se conserva "
+          "la actual" in logs_c, str(logs_c))
+    check("propiedad C: sin log de robo",
+          not any("Ese guid.dat" in x for x in logs_c), str(logs_c))
 
 
 def phase_hero_stop_button() -> None:
@@ -2356,6 +2569,7 @@ def main() -> int:
     phase_save_sync()
     phase_flow_logic()
     phase_guid_quarantine_pipeline()
+    phase_guid_ownership()
     phase_hero_stop_button()
     phase_exit_hook()
     phase_autosave_close()

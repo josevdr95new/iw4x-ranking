@@ -15,6 +15,12 @@ decide restore/quarantine/none para el guid.dat local según el manifiesto
 de la cuenta; ``quarantine_local_guid`` mueve el local a la cuarentena para
 que el juego cree una identidad NUEVA y propia por cuenta.
 
+Propiedad del guid.dat (capa NUEVA, backend /identity/* en vivo):
+``decide_guid_validation`` (pura) valida que el guid.dat VIGENTE en disco
+(restaurado de la nube o preexistente) pertenezca a la cuenta — cierra el
+robo residual entre jugadores de la misma PC que ya subieron el guid.dat
+compartido a su nube. Con dueño ajeno: cuarentena + ``claim-fresh``.
+
 Las funciones ``sync_before_launch`` / ``sync_after_session`` son la
 orquestación (API + disco + logs); ``GameFlow`` las invoca y NUNCA deja que
 un error de sync bloquee jugar.
@@ -116,6 +122,54 @@ def quarantine_local_guid(guid_path: str,
         return None
     log.info("guid.dat local cuarentenado en %s", dest_dir / GUID_REL)
     return dest_dir
+
+
+# ---------------------------------------------------------------------------
+# Propiedad del guid.dat (capa NUEVA, backend /identity/* ya en vivo)
+# ---------------------------------------------------------------------------
+def decide_guid_validation(owned_by_me: bool, has_local_guid: bool,
+                           api_ok: bool) -> str:
+    """Decide la VALIDACIÓN DE PROPIEDAD del guid.dat local (pura).
+
+    Capa que corre DESPUÉS de ``decide_guid_action`` (esa decide por la
+    nube; esta valida lo que quedó VIGENTE en disco tras el restore/sync).
+    Caso real que cierra: cuentas que jugaron ANTES subieron a su nube el
+    guid.dat COMPARTIDO de la PC — el restore lo traía con confianza y el
+    siguiente jugador heredaba identidad ajena. El backend deriva el GUID
+    desde el propio archivo y responde ``ownedByMe`` / ``ownerNick``.
+
+    - ``api_ok`` False (API caída o request fallido) → "play-offline":
+      ante incertidumbre NUNCA se cuarentena; se conserva la local.
+    - sin guid.dat local (cuenta 100% nueva) → "play": nada que validar,
+      el flujo none/fresh existente se encarga.
+    - ``owned_by_me`` True → "play": el restaurado ya era tuyo (cero fricción).
+    - ``owned_by_me`` False (incluido guid no derivable con archivo
+      presente) → "quarantine+claim-fresh": el local pertenece a OTRO →
+      cuarentena + marcar la cuenta para identidad nueva; el juego arranca
+      sin guid.dat, crea uno fresco y el auto-link por sesión lo vincula a
+      ESTA cuenta.
+    """
+    if not api_ok:
+        return "play-offline"
+    if not has_local_guid:
+        return "play"
+    return "play" if owned_by_me else "quarantine+claim-fresh"
+
+
+def guid_file_b64(guid_path: str) -> Optional[str]:
+    """guid.dat crudo en base64 (body del POST /identity/guid-from-file).
+
+    None si el archivo no existe o es ilegible. Sin cap local de tamaño:
+    el backend valida el rango (64B..4KB) y un 400 se trata como fallo del
+    request → "play-offline" (sin cuarentena).
+    """
+    p = Path(guid_path)
+    if not p.is_file():
+        return None
+    try:
+        return base64.b64encode(p.read_bytes()).decode("ascii")
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------

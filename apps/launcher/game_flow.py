@@ -15,12 +15,17 @@ de juego — ``POST /api/play/session``, que lanza la App). Los logs de la
 consola sustituyen a la pantalla de verificación.
 
 Aislamiento de guid.dat por cuenta (fix cyber-café): en el pre-launch
-(SIEMPRE con el juego cerrado) se ejecuta ``decide_guid_action``:
-- manifest con guid.dat → el sync ya restauró la identidad de la cuenta.
-- manifest sin guid.dat Y con guid.dat local → CUARENTENA: el local (de otro
-  jugador de esta PC) se mueve a %APPDATA%\\iw4x-ranking-launcher\\guid-quarantine\\<userId>-<ts>\\
-  y el juego crea una identidad nueva y propia para esta cuenta.
-- manifest sin guid.dat y sin local → nada (el juego crea el primero).
+(SIEMPRE con el juego cerrado) se ejecutan DOS capas, en este orden:
+1. ``decide_guid_action`` (por la nube): manifest con guid.dat → restore;
+   manifest sin guid.dat y con local → CUARENTENA del local; sin ninguno →
+   nada (el juego crea el primero).
+2. ``decide_guid_validation`` (propiedad, backend /identity/* en vivo): el
+   guid.dat VIGENTE se deriva en el server y se comprueba que sea de ESTA
+   cuenta — cierra el robo residual (el dueño anterior de la PC subió el
+   guid.dat compartido a su nube y el restore lo traía con confianza). Si
+   es ajeno: cuarentena + ``claim-fresh`` y el juego crea identidad fresca
+   que el auto-link por sesión ata a esta cuenta. API caída → sin
+   cuarentena (se conserva la local).
 Seguridad: si la sesión muere antes de crear identidad nueva (<10s y sin
 guid.dat nuevo), el cuarentenado se repone (best-effort).
 """
@@ -37,9 +42,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from api_client import ApiClient, ApiError, NetworkError
 from logging_setup import app_data_dir
-from save_sync import (UPLOAD_LOCK, decide_guid_action, default_guid_path,
-                       quarantine_local_guid, sync_after_session,
-                       sync_before_launch)
+from save_sync import (UPLOAD_LOCK, decide_guid_action,
+                       decide_guid_validation, default_guid_path,
+                       guid_file_b64, quarantine_local_guid,
+                       sync_after_session, sync_before_launch)
 
 log = logging.getLogger("game_flow")
 
@@ -401,6 +407,73 @@ class GameFlow:
         self._log("Identidad nueva creada para tu cuenta "
                   "(primera vez en esta PC)")
 
+    def _validate_guid_ownership(self) -> None:
+        """Capa NUEVA de propiedad del guid.dat (backend /identity/*, en vivo).
+
+        Corre DESPUÉS de ``_apply_guid_identity`` (capa por-nube) sobre el
+        guid.dat ya VIGENTE en disco. Caso real que cierra: el dueño anterior
+        de la PC subió ese guid.dat COMPARTIDO a su nube → el restore lo
+        traía con confianza y el siguiente jugador heredaba identidad ajena
+        (pepe jugaba como admin). El backend deriva el GUID desde el propio
+        archivo y responde ``ownedByMe`` / ``ownerNick``; la decisión pura es
+        ``decide_guid_validation``:
+
+        - "play" → log dim "Identidad verificada como tuya ✓" (cero fricción).
+        - "quarantine+claim-fresh" → cuarentena del local (misma mecánica
+          ``<userId>-<ts>``) + POST /identity/claim-fresh + log claro con el
+          nick del dueño real; el juego arranca sin guid.dat, crea uno
+          fresco y el auto-link por sesión lo vincula a ESTA cuenta.
+        - "play-offline" → API caída o request fallido: se conserva la local
+          SIN cuarentena (misma filosofía resiliente del sync).
+        """
+        if self.simulate:
+            return
+        b64 = guid_file_b64(self.guid_path)
+        if b64 is None:
+            return  # sin guid.dat local (cuenta 100% nueva): flujo none/fresh
+        try:
+            resp = self.api.guid_from_file(self.token, b64)
+        except (NetworkError, ApiError, OSError) as exc:
+            log.info("Validación de propiedad del guid.dat no disponible: %s", exc)
+            self._log("No se pudo validar la identidad (sin conexión) — "
+                      "se conserva la actual")
+            return
+        action = decide_guid_validation(
+            owned_by_me=bool(resp.get("ownedByMe")),
+            has_local_guid=True,  # garantizado: guid_file_b64 devolvió datos
+            api_ok=True,          # el request no lanzó: llegamos aquí
+        )
+        if action == "play":
+            self._log("Identidad verificada como tuya ✓")
+            return
+        # "quarantine+claim-fresh": el guid.dat vigente pertenece a OTRO.
+        owner = str(resp.get("ownerNick") or "").strip()
+        dest = quarantine_local_guid(
+            self.guid_path,
+            user_id=self.user_id,
+            root=self.quarantine_root_path,
+        )
+        if dest is None:
+            self._log("⚠ No se pudo asegurar tu identidad en esta PC; "
+                      "se conserva la identidad local.")
+            return
+        self._quarantined = {
+            "file": str(dest / "guid.dat"),
+            "target": str(self.guid_path),
+        }
+        log.info("guid.dat ajeno cuarentenado (cuenta %s): %s",
+                 self.user_id or "?", dest / "guid.dat")
+        try:
+            self.api.claim_fresh(self.token)
+        except (NetworkError, ApiError, OSError) as exc:
+            self._log(f"⚠ No se pudo marcar tu cuenta para identidad nueva "
+                      f"({self._transport_error_text(exc)}); el auto-link "
+                      "podría no aceptarla.")
+        tenia = (f"pertenecía a {owner}" if owner
+                 else "no pertenece a tu cuenta")
+        self._log(f"Ese guid.dat {tenia}. Se creará una identidad NUEVA "
+                  "para tu cuenta.")
+
     def _maybe_restore_quarantined_guid(self) -> None:
         """Restauración de seguridad: reponer el cuarentenado (best-effort).
 
@@ -505,8 +578,11 @@ class GameFlow:
         except (NetworkError, ApiError, OSError) as exc:
             self._log(f"⚠ Sincronización de progreso omitida: "
                       f"{self._transport_error_text(exc)}")
-        # SIEMPRE con el juego cerrado (estamos en pre-launch).
+        # SIEMPRE con el juego cerrado (estamos en pre-launch). Capa por-nube
+        # (restore/cuarentena si el server no tiene guid.dat) y DESPUÉS la
+        # capa de propiedad (el guid vigente debe ser de esta cuenta).
         self._apply_guid_identity(manifest)
+        self._validate_guid_ownership()
 
     def _run(self) -> None:
         # Validación dura del nick: el juego SIEMPRE abre con el displayName.
