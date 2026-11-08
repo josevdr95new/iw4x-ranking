@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import { ServerConfigPanel } from "./admin/ServerConfigPanel";
+import { ServerControlPanel } from "./admin/ServerControlPanel";
 import { ModerationPanel } from "./admin/ModerationPanel";
 import { IdentityPanel } from "./admin/IdentityPanel";
 
@@ -72,7 +73,11 @@ export function AdminPage() {
         className="mt-4"
       >
         {tab === "config" ? (
-          <ServerConfigPanel />
+          <>
+            <ServerConfigPanel />
+            {/* Control RCON en vivo: mapas, bots, exigir launcher (junto a Server config). */}
+            <ServerControlPanel />
+          </>
         ) : tab === "identidad" ? (
           <IdentityPanel />
         ) : (

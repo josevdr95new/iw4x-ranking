@@ -147,7 +147,18 @@ export interface KillEvent {
   direction: "kill" | "death";
   isKill: boolean;
   damage: number;
+  /** Arma cruda del log (ej. "ump45_eotech_mp").Compat: igual que weaponCode. */
   weapon: string;
+  /** Arma cruda del log. Opcional: APIs previas pueden no enviarla. */
+  weaponCode?: string | null;
+  /** Nombre display humano (ej. "UMP45 + EOTech"). Opcional: APIs previas pueden no enviarla. */
+  weaponName?: string | null;
+  /** Zona del impacto (head, chest, ...). Opcional: APIs previas pueden no enviarla. */
+  hitloc?: string | null;
+  /** true si la kill fue a la cabeza. Opcional: APIs previas pueden no enviarla. */
+  headshot?: boolean;
+  /** true si fue baja/muerte a cuchillo (MOD_MELEE). Opcional: APIs previas pueden no enviarla. */
+  isKnife?: boolean;
   server: string | null;
   opponentGuid: string | null;
   opponentName: string | null;
@@ -168,6 +179,16 @@ export interface PlayerProfile {
   headshotPct?: number | null;
   /** headshots / kills, 2 decimales (0.06); null si 0 kills. Preferido sobre headshotPct. */
   hsRatio?: number | null;
+  /** Daño total infligido. Opcional: APIs previas pueden no enviarlo. */
+  damageDealt?: number;
+  /** Daño total recibido. Opcional: APIs previas pueden no enviarlo. */
+  damageTaken?: number;
+  /** Daño medio por kill (2 dec); null si 0 kills. Opcional: APIs previas. */
+  damagePerKill?: number | null;
+  /** Bajas a cuchillo (MOD_MELEE). Opcional: APIs previas pueden no enviarlo. */
+  knifeKills?: number;
+  /** Muertes a cuchillo. Opcional: APIs previas pueden no enviarlo. */
+  knifeDeaths?: number;
   firstConnection: string;
   lastConnection: string;
   linked: boolean;
@@ -510,6 +531,120 @@ export interface IdentityAlertsResponse {
   total: number;
 }
 
+/* Diccionario de armas (docs/API.md §Weapons, público) */
+
+export interface WeaponDictionaryEntry {
+  /** Código crudo del log (ej. "ump45_eotech_mp"). */
+  code: string;
+  /** Nombre display humano (ej. "UMP45 + EOTech"). */
+  name: string;
+}
+
+export interface WeaponDictionaryResponse {
+  total: number;
+  weapons: WeaponDictionaryEntry[];
+}
+
+/* Control del server por RCON (ADMIN): mapas, bots, sesiones, launcher-only */
+
+export interface MapCatalogEntry {
+  id: string;
+  name: string;
+  group: "base" | "dlc";
+}
+
+/** GET /api/admin/server/maps: catálogo + mapa actual EN VIVO (502 si el server no responde). */
+export interface ServerMapsResponse {
+  current: string | null;
+  maps: MapCatalogEntry[];
+}
+
+export interface ServerMapResult {
+  sent: true;
+  map: string;
+  note: string;
+}
+
+export interface ServerRotateResult {
+  sent: true;
+  command: "map_rotate" | "fast_restart";
+  note: string;
+}
+
+export interface BotsOverview {
+  /** Nº de bots conectados ahora (del status rcon). */
+  count: number;
+  difficulty: {
+    dvar: string;
+    /** Valor actual; null (o found:false) = dvar inexistente → mod Bot Warfare NO instalado. */
+    value: string | null;
+    default: string | null;
+    /** false → el server no tiene el mod GSC: `set bots_skill` sería inerte. */
+    found: boolean;
+    note: string;
+  };
+  dvars: Record<string, string | null>;
+}
+
+/** POST /api/admin/server/bots/difficulty: level 0–9 o contadores por equipo (modo 8). */
+export type BotDifficultyRequest = {
+  level: number;
+} | {
+  alliesHard?: number;
+  alliesMed?: number;
+  axisHard?: number;
+  axisMed?: number;
+}
+
+export interface BotDifficultyResult {
+  sent: true;
+  dvar: string;
+  value: string;
+  commands: string[];
+  note: string;
+}
+
+export interface BotCountResult {
+  sent: true;
+  requested: number;
+  before: number;
+  after: number;
+  spawned: number;
+  kicked: Array<{ cid: number; guid: string; name: string }>;
+  note: string;
+}
+
+/** Sesión de juego activa del launcher (GET /api/admin/server/sessions). */
+export interface PlaySessionInfo {
+  userId: number;
+  nick: string;
+  guid: string | null;
+  lastSeen: string;
+  expiresAt: string;
+}
+
+export interface ServerSessionsResponse {
+  sessions: PlaySessionInfo[];
+}
+
+export interface LauncherOnlyResponse {
+  enabled: boolean;
+}
+
+/* Cloud-save propio (GET /api/profile/save, JWT del viewer) */
+
+export interface ProfileSaveFile {
+  path: string;
+  sha256: string;
+  size: number;
+  updatedAt: string;
+}
+
+/** 200 con `{ exists: false }` (NO 404) si la cuenta nunca subió un save. */
+export type ProfileSaveResponse =
+  | { exists: false }
+  | { exists: true; version: number; updatedAt: string; build: string; files: ProfileSaveFile[] };
+
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
@@ -696,5 +831,78 @@ export const api = {
   /** Conflictos de alias (read-only): colisiones de nombre + guids multi-alias. */
   aliasConflicts() {
     return request<AliasConflictsResponse>("/admin/alias-conflicts", { auth: true });
+  },
+
+  /* Diccionario de armas — público. */
+  weaponDictionary() {
+    return request<WeaponDictionaryResponse>("/weapons/dictionary");
+  },
+
+  /* Control del server por RCON — ADMIN (errores 502/503 como la moderación). */
+
+  /** GET /admin/server/maps: catálogo 26 mapas + mapa actual EN VIVO. 502 si el server no responde. */
+  serverMaps() {
+    return request<ServerMapsResponse>("/admin/server/maps", { auth: true });
+  },
+
+  /** POST /admin/server/map {map}: cambia el mapa (400 si desconocido). El cambio tarda unos segundos. */
+  changeMap(map: string) {
+    return request<ServerMapResult>("/admin/server/map", { method: "POST", body: { map }, auth: true });
+  },
+
+  /** POST /admin/server/rotate: `map_rotate` — avanza al siguiente mapa de la rotación. */
+  rotateMap() {
+    return request<ServerRotateResult>("/admin/server/rotate", { method: "POST", body: {}, auth: true });
+  },
+
+  /** POST /admin/server/fast_restart: reinicia el mapa actual sin rotar. */
+  fastRestart() {
+    return request<ServerRotateResult>("/admin/server/fast_restart", { method: "POST", body: {}, auth: true });
+  },
+
+  /** GET /admin/server/bots: bots conectados + estado de la dvar bots_skill (found:false = sin mod Bot Warfare). */
+  serverBots() {
+    return request<BotsOverview>("/admin/server/bots", { auth: true });
+  },
+
+  /** POST /admin/server/bots/difficulty: `set bots_skill N` (+ contadores por equipo si objeto). */
+  setBotDifficulty(input: BotDifficultyRequest) {
+    return request<BotDifficultyResult>("/admin/server/bots/difficulty", {
+      method: "POST",
+      body: input,
+      auth: true,
+    });
+  },
+
+  /** POST /admin/server/bots/count: spawnBot/clientkick REAL hasta llegar al nº pedido. */
+  setBotCount(count: number) {
+    return request<BotCountResult>("/admin/server/bots/count", {
+      method: "POST",
+      body: { count },
+      auth: true,
+    });
+  },
+
+  /** GET /admin/server/sessions: sesiones de juego activas del launcher. */
+  serverSessions() {
+    return request<ServerSessionsResponse>("/admin/server/sessions", { auth: true });
+  },
+
+  /** GET/POST /admin/server/launcher-only: exigir sesión de launcher para entrar al server. */
+  launcherOnly() {
+    return request<LauncherOnlyResponse>("/admin/server/launcher-only", { auth: true });
+  },
+
+  setLauncherOnly(enabled: boolean) {
+    return request<LauncherOnlyResponse>("/admin/server/launcher-only", {
+      method: "POST",
+      body: { enabled },
+      auth: true,
+    });
+  },
+
+  /* Cloud-save propio del viewer (JWT). 200 `{exists:false}` si nunca subió. */
+  mySave() {
+    return request<ProfileSaveResponse>("/profile/save", { auth: true });
   },
 };

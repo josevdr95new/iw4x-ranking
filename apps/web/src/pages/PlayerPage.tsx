@@ -1,14 +1,17 @@
-import { ArrowLeft, Inbox, Info, RefreshCcw, ShieldAlert, UserX, WifiOff } from "lucide-react";
+import { ArrowLeft, CloudUpload, Inbox, Info, RefreshCcw, ShieldAlert, UserX, WifiOff } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError, api } from "../lib/api";
-import type { PlayerDetail } from "../lib/api";
+import type { KillEvent, PlayerDetail, ProfileSaveResponse } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Skeleton } from "../components/ui/Spinner";
+import { Skeleton, Spinner } from "../components/ui/Spinner";
+import { useAuth } from "../lib/auth";
 import {
+  formatDecimal,
   formatDuration,
+  formatFullDate,
   formatInt,
   formatMemberSince,
   formatRelative,
@@ -28,8 +31,8 @@ function PlayerSkeleton() {
           <Skeleton className="h-3 w-72" />
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-7">
-        {Array.from({ length: 7 }, (_, index) => (
+      <div className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-9">
+        {Array.from({ length: 9 }, (_, index) => (
           <div key={index} className="bg-surface p-4">
             <Skeleton className="h-2.5 w-16" />
             <Skeleton className="mt-3 h-6 w-20" />
@@ -40,7 +43,30 @@ function PlayerSkeleton() {
   );
 }
 
-function ActivityTable({ detail }: { detail: PlayerDetail }) {
+/** Tag inline estilo mono del tema (igual que el tag BOT de la moderación). */
+function EventTag({ label, title }: { label: string; title: string }) {
+  return (
+    <span
+      title={title}
+      className="type-mono inline-flex h-[18px] items-center rounded-none border border-border px-1.5 text-[10px] leading-none text-text-2"
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Arma del feed: SIEMPRE nombre humano (weaponName del evento; si una API previa
+ * no lo trae, se decodifica con el diccionario público; el crudo es último recurso).
+ */
+function weaponDisplay(event: KillEvent, dictionary: Map<string, string>): string {
+  if (event.weaponName) return event.weaponName;
+  const code = event.weaponCode ?? event.weapon;
+  if (code) return dictionary.get(code) ?? code;
+  return "—";
+}
+
+function ActivityTable({ detail, weaponNames }: { detail: PlayerDetail; weaponNames: Map<string, string> }) {
   const events = detail.recentEvents;
 
   if (events.length === 0) {
@@ -93,11 +119,15 @@ function ActivityTable({ detail }: { detail: PlayerDetail }) {
                   <span className="hidden text-sm text-text lg:inline">{formatTimestamp(event.time)}</span>
                 </td>
                 <td className="px-3 py-2.5">
-                  {isKill ? (
-                    <Badge variant="success">Baja</Badge>
-                  ) : (
-                    <Badge variant="danger">Muerte</Badge>
-                  )}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {isKill ? (
+                      <Badge variant="success">Baja</Badge>
+                    ) : (
+                      <Badge variant="danger">Muerte</Badge>
+                    )}
+                    {event.headshot && <EventTag label="HS" title="Baja con tiro a la cabeza" />}
+                    {event.isKnife && <EventTag label="CUCHILLO" title="Baja o muerte a cuchillo" />}
+                  </div>
                 </td>
                 <td className="max-w-[180px] truncate px-3 py-2.5">
                   {event.opponentGuid ? (
@@ -111,8 +141,8 @@ function ActivityTable({ detail }: { detail: PlayerDetail }) {
                     <span className="text-sm text-text-2">{event.opponentName ?? "—"}</span>
                   )}
                 </td>
-                <td className="px-3 py-2.5">
-                  <span className="type-mono text-text-2">{event.weapon}</span>
+                <td className="max-w-[220px] truncate px-3 py-2.5" title={weaponDisplay(event, weaponNames)}>
+                  <span className="text-sm text-text">{weaponDisplay(event, weaponNames)}</span>
                 </td>
                 <td className="hidden px-3 py-2.5 lg:table-cell">
                   <span className="type-mono text-text-2">{event.server ?? "—"}</span>
@@ -129,11 +159,98 @@ function ActivityTable({ detail }: { detail: PlayerDetail }) {
   );
 }
 
+/** Bloque MI NUBE: solo para el perfil propio (algún GUID vinculado a la sesión). */
+function CloudSavePanel() {
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [save, setSave] = useState<ProfileSaveResponse | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    api
+      .mySave()
+      .then((response) => {
+        if (cancelled) return;
+        setSave(response);
+        setState("ready");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
+
+  return (
+    <section aria-label="Mi nube" className="mt-4 rounded-md border border-border bg-surface">
+      <header className="flex items-center justify-between gap-2 border-b border-border px-5 py-3">
+        <h2 className="type-display-m text-text">Mi nube</h2>
+        {state === "ready" && save !== null && save.exists && (
+          <Badge variant="neutral">versión {formatInt(save.version)}</Badge>
+        )}
+      </header>
+      <div className="flex items-start gap-3 px-5 py-4" aria-live="polite">
+        <CloudUpload size={20} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0 text-text-2" />
+        {state === "loading" && (
+          <p className="type-body flex items-center gap-2 text-text-2">
+            <Spinner size={16} />
+            Comprobando tu copia en la nube…
+          </p>
+        )}
+        {state === "error" && (
+          <div className="min-w-0 flex-1">
+            <p className="type-body text-text-2">No pudimos comprobar tu copia en la nube.</p>
+            <Button variant="ghost" size="sm" className="mt-2" onClick={() => setReloadKey((key) => key + 1)}>
+              <RefreshCcw size={14} strokeWidth={1.75} aria-hidden="true" />
+              Reintentar
+            </Button>
+          </div>
+        )}
+        {state === "ready" && save !== null && (
+          save.exists ? (
+            <p className="type-body min-w-0 text-text">
+              Última copia en la nube: {formatFullDate(save.updatedAt)}
+              <span className="text-text-2"> · {formatInt(save.files.length)} archivos · </span>
+              <span className="type-mono text-text-2">versión {formatInt(save.version)}</span>
+            </p>
+          ) : (
+            <p className="type-body min-w-0 text-text-2">
+              Sin copia en la nube todavía — juega y se guarda solo.
+            </p>
+          )
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function PlayerPage() {
   const { guid = "" } = useParams<{ guid: string }>();
+  const { user } = useAuth();
   const [detail, setDetail] = useState<PlayerDetail | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "not-found" | "error">("loading");
   const [reloadKey, setReloadKey] = useState(0);
+  // Diccionario code→display para el feed (fallback si el evento no trae weaponName).
+  const [weaponNames, setWeaponNames] = useState<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .weaponDictionary()
+      .then((dictionary) => {
+        if (cancelled) return;
+        setWeaponNames(new Map(dictionary.weapons.map((entry) => [entry.code, entry.name])));
+      })
+      .catch(() => {
+        // Sin diccionario el feed sigue funcionando: usa weaponName del evento o el código crudo.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!guid) return;
@@ -209,6 +326,11 @@ export function PlayerPage() {
   const online = isOnline(player.lastConnection);
   const initials = initialsOf(player.name);
 
+  // Bloque MI NUBE: solo si el perfil visitado pertenece a la cuenta de la sesión.
+  const isOwnProfile =
+    !!user &&
+    (user.linkedGuid === player.guid || user.linkedGuids.some((linked) => linked.guid === player.guid));
+
   // Headshots: hsRatio (headshots/kills, 2 dec) es el campo nuevo; fallback a headshotPct (API previa).
   const hsRatio = player.hsRatio ?? (player.headshotPct !== null && player.headshotPct !== undefined ? player.headshotPct / 100 : null);
   const hsPercent = hsRatio !== null && hsRatio !== undefined ? Math.round(hsRatio * 100) : null;
@@ -275,8 +397,8 @@ export function PlayerPage() {
           </div>
         </div>
 
-        {/* Stat strip: celdas con hairlines, NO cards (§3.3) */}
-        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border md:grid-cols-7">
+        {/* Stat strip: celdas con hairlines, NO cards (§3.3). 3×3 en móvil, 9 en fila desde lg. */}
+        <dl className="grid grid-cols-3 gap-px border-t border-border bg-border lg:grid-cols-9">
           <div className="bg-surface p-4">
             <dt className="type-label text-text-2">Kills</dt>
             <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.kills)}</dd>
@@ -290,6 +412,22 @@ export function PlayerPage() {
             <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.headshots ?? 0)}</dd>
             <dd className="type-caption mt-1 text-text-2">
               {hsPercent !== null ? `${formatInt(hsPercent)}% de tus bajas` : "sin bajas aún"}
+            </dd>
+          </div>
+          <div className="bg-surface p-4">
+            <dt className="type-label text-text-2">Cuchillo</dt>
+            <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.knifeKills ?? 0)}</dd>
+            <dd className="type-caption mt-1 text-text-2">
+              {formatInt(player.knifeKills ?? 0)} bajas / {formatInt(player.knifeDeaths ?? 0)} muertes
+            </dd>
+          </div>
+          <div className="bg-surface p-4">
+            <dt className="type-label text-text-2">Daño infligido</dt>
+            <dd className="type-number-l stat-value mt-2 text-text">{formatInt(player.damageDealt ?? 0)}</dd>
+            <dd className="type-caption mt-1 text-text-2">
+              {player.damagePerKill !== null && player.damagePerKill !== undefined
+                ? `por baja: ${formatDecimal(player.damagePerKill)}`
+                : "sin bajas aún"}
             </dd>
           </div>
           <div className="bg-surface p-4">
@@ -345,10 +483,13 @@ export function PlayerPage() {
         </p>
       </div>
 
+      {/* MI NUBE: solo el perfil de la cuenta logueada (cloud-save propio) */}
+      {isOwnProfile && <CloudSavePanel />}
+
       {/* Actividad reciente (adaptación del supuesto D: la API expone eventos kill/death, no partidas) */}
       <section className="mt-8">
         <h2 className="type-display-l mb-4 text-text">Actividad reciente</h2>
-        <ActivityTable detail={detail} />
+        <ActivityTable detail={detail} weaponNames={weaponNames} />
       </section>
     </div>
   );

@@ -80,6 +80,31 @@ export function formatMemberSince(isoDate: string): string {
   return monthYearFormatter.format(date);
 }
 
+/** "05 nov 2026, 20:14" para marcas de tiempo completas (copia en la nube). */
+const fullDateFormatter = new Intl.DateTimeFormat("es-ES", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+export function formatFullDate(isoDate: string): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) return "—";
+  return fullDateFormatter.format(date);
+}
+
+/** Minutos que faltan para que expire una sesión: "expira en 8 min". */
+export function formatExpiresIn(isoDate: string, now: number = Date.now()): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) return "—";
+  const minutes = Math.floor((date.getTime() - now) / 60000);
+  if (minutes <= 0) return "expirando…";
+  return `expira en ${intFormatter.format(minutes)} min`;
+}
+
 export type KdTone = "success" | "neutral" | "warning" | "danger";
 
 /** Umbral oficial de K/D. DESIGN.md §1.1. */
