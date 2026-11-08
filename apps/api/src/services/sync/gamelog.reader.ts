@@ -51,12 +51,12 @@ import { reportIdentityAlert } from '../identity.service.js';
  * dedicado 0xb07… (ver botGuidToDecimal). El perfil del bot acumula stats
  * entre reboots.
  *
- * Extracción por evento K (almacenado en KillEvent): weapon, damage, hitloc,
- * headshot (hitloc ∈ head/helmet, se acredita al KILLER), isTeamkill
- * (vteam == kteam), map y gametype (del estado InitGame vigente; null si el
- * log no lo declaró aún). En KillEvent la DB guarda la semántica stock:
- * originGuid = KILLER, targetGuid = VÍCTIMA (todo el skill ELO, streaks,
- * armas y perfiles consumen ese orden).
+ * Extracción por evento K (almacenado en KillEvent): weapon, mod (MOD_MELEE =
+ * cuchillada), damage, hitloc, headshot (hitloc ∈ head/helmet, se acredita al
+ * KILLER), isTeamkill (vteam == kteam), map y gametype (del estado InitGame
+ * vigente; null si el log no lo declaró aún). En KillEvent la DB guarda la
+ * semántica stock: originGuid = KILLER, targetGuid = VÍCTIMA (todo el skill
+ * ELO, streaks, armas y perfiles consumen ese orden).
  *
  * Defensivo por diseño:
  *  - Líneas no reconocidas → skip silencioso + contador (linesIgnored).
@@ -94,6 +94,8 @@ export interface GameLogKill {
   /** Nombre EXACTO del killer (segundo bloque); null si world. */
   killerName: string | null;
   weapon: string | null;
+  /** Mod de la kill según el log (MOD_RIFLE_BULLET, MOD_MELEE, MOD_HEAD_SHOT...). */
+  mod: string | null;
   damage: number;
   hitloc: string | null;
   /** Teamkill: víctima y killer con guid distinto y MISMO team (vteam == kteam). */
@@ -131,6 +133,12 @@ export type GameLogEvent =
 const TIME_PREFIX = /^\s*\d{1,4}:\d{2}\s?/;
 
 export const HEADSHOT_HITLOCS = new Set(['head', 'helmet']);
+
+/**
+ * MOD_MELEE del log = MUERTE A CUCHILLO: cubre la cuchillada del cuchillo Y el
+ * golpe con el arma en la mano (el juego marca ambos como MOD_MELEE).
+ */
+export const MELEE_MOD = 'MOD_MELEE';
 
 /**
  * GUIDs de BOTS (server dedicado con `+spawnBot N`, build r5318): el engine
@@ -269,6 +277,8 @@ export function parseGameLogLine(rawLine: string): GameLogEvent | null | 'ignore
     victimName,
     killerName,
     weapon: (fields[8] ?? '').trim() || null,
+    // mod (fields[10]): MOD_MELEE distingue muertes a cuchillo (cuchillada o golpe con el arma en la mano).
+    mod: (fields[10] ?? '').trim() || null,
     damage,
     hitloc,
     // Teamkill: killer y víctima reales con MISMO team (world/suicidio → false).
@@ -619,6 +629,7 @@ export async function ingestGameLog(path: string, server: string | null): Promis
               isKill: true,
               damage: event.damage,
               weapon: event.weapon,
+              mod: event.mod,
               hitloc: event.hitloc,
               headshot,
               isTeamkill: event.isTeamkill,

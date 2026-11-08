@@ -2,7 +2,8 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { getWeaponsRanking, getPlayerMaps, getPlayerWeapons } from '../src/services/weapons.service.js';
 import { getPlayerProfile } from '../src/services/players.service.js';
-import { resetDb } from './helpers.js';
+import { weaponDictionary, weaponDisplayName } from '../src/lib/weapons.js';
+import { resetDb, req } from './helpers.js';
 
 /**
  * Fixture directo en Prisma (las líneas del log sintético se cubren en
@@ -155,5 +156,71 @@ describe('Perfil ampliado (getPlayerProfile)', () => {
     expect(p.favoriteMap).toBe('mp_rust');
     // timePlayed viene de Session: Alpha tiene 1 cerrada de 12 min.
     expect(p.timePlayed).toBe(720);
+    // damagePerKill: 350/3 kills = 116.67 (2 decimales).
+    expect(p.damagePerKill).toBe(116.67);
+    // Los fixtures de esta suite no llevan mod → sin muertes/bajas a cuchillo.
+    expect(p.knifeKills).toBe(0);
+    expect(p.knifeDeaths).toBe(0);
+  });
+});
+
+// ── Diccionario de armas (MW2/IW4x): weaponDisplayName + GET /api/weapons/dictionary ──
+
+describe('weaponDisplayName (diccionario MW2/IW4x)', () => {
+  it('decodifica armas base reales del log del dueño', () => {
+    expect(weaponDisplayName('ump45_mp')).toBe('UMP45');
+    expect(weaponDisplayName('ak47_mp')).toBe('AK-47');
+    expect(weaponDisplayName('famas_mp')).toBe('FAMAS');
+    expect(weaponDisplayName('m4_mp')).toBe('M4A1');
+    expect(weaponDisplayName('spas12_mp')).toBe('SPAS-12');
+    expect(weaponDisplayName('cheytac_mp')).toBe('Intervention');
+    expect(weaponDisplayName('coltanaconda_mp')).toBe('Colt Anaconda');
+    expect(weaponDisplayName('knife_mp')).toBe('Cuchillo');
+    // Alias interno REAL visto en el log del dueño: sa80 = L86 LSW.
+    expect(weaponDisplayName('sa80_mp')).toBe('L86 LSW');
+    expect(weaponDisplayName('masada_mp')).toBe('ACR'); // codename interno del ACR
+  });
+
+  it('decodifica sufijos de attachments (incluye combinaciones múltiples)', () => {
+    expect(weaponDisplayName('ump45_eotech_mp')).toBe('UMP45 + EOTech');
+    expect(weaponDisplayName('famas_gl_mp')).toBe('FAMAS + Lanzagranadas');
+    expect(weaponDisplayName('spas12_silencer_mp')).toBe('SPAS-12 + Silenciador');
+    // Fixture REAL del dueño: el "_tactical" de las secondary es el Tactical Knife de MW2.
+    expect(weaponDisplayName('coltanaconda_tactical_mp')).toBe('Colt Anaconda + Cuchillo táctico');
+    expect(weaponDisplayName('sa80_grip_reflex_mp')).toBe('L86 LSW + Empuñadura + Mira holográfica');
+    expect(weaponDisplayName('model1887_akimbo_mp')).toBe('Model 1887 + Akimbo');
+    expect(weaponDisplayName('m16_xmags_fmj_mp')).toBe('M16A4 + Cargador ampliado + FMJ');
+  });
+
+  it('equipamiento y killstreaks compuestos vía lookup de código completo', () => {
+    expect(weaponDisplayName('frag_grenade_mp')).toBe('Granada de fragmentación');
+    expect(weaponDisplayName('semtex_mp')).toBe('Semtex');
+    expect(weaponDisplayName('pavelow_mp')).toBe('Pavelow');
+    expect(weaponDisplayName('ac130_mp')).toBe('AC-130');
+    expect(weaponDisplayName('precision_airstrike_mp')).toBe('Ataque aéreo de precisión');
+  });
+
+  it('código desconocido → título humanizado (nunca el crudo); null/vacío → Desconocida', () => {
+    expect(weaponDisplayName('mystery_gun_mp')).toBe('Mystery Gun');
+    expect(weaponDisplayName('exotic_sniper_thermal_mp')).toBe('Exotic Sniper + Térmica');
+    expect(weaponDisplayName('none')).toBe('Desconocida'); // world kills del log
+    expect(weaponDisplayName('')).toBe('Desconocida');
+    expect(weaponDisplayName(null)).toBe('Desconocida');
+    expect(weaponDisplayName(undefined)).toBe('Desconocida');
+  });
+});
+
+describe('GET /api/weapons/dictionary', () => {
+  it('expone el diccionario estático code→name, completo y ordenado por nombre', async () => {
+    const res = await req().get('/api/weapons/dictionary');
+    expect(res.status).toBe(200);
+    const body = res.body as { total: number; weapons: Array<{ code: string; name: string }> };
+    expect(body.total).toBeGreaterThanOrEqual(40); // arsenal MW2 + equipamiento + killstreaks
+    expect(body.weapons).toHaveLength(body.total);
+    const names = body.weapons.map((entry) => entry.name);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
+    expect(body.weapons.find((entry) => entry.code === 'ump45')).toMatchObject({ name: 'UMP45' });
+    expect(body.weapons.find((entry) => entry.code === 'sa80')).toMatchObject({ name: 'L86 LSW' });
+    expect(body.weapons.find((entry) => entry.code === 'knife')).toMatchObject({ name: 'Cuchillo' });
   });
 });

@@ -2,8 +2,10 @@
 import { prisma } from '../lib/prisma.js';
 import { Errors } from '../lib/errors.js';
 import { clampInt, GUID_PATTERN } from '../lib/validation.js';
+import { weaponDisplayName } from '../lib/weapons.js';
 import { computeDefaultRank } from './ranking.service.js';
 import { getPlayerAliases, type PlayerAliasDto } from './alias.service.js';
+import { MELEE_MOD } from './sync/gamelog.reader.js';
 
 type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true } } } }>;
 
@@ -25,6 +27,12 @@ export interface PlayerDto {
   hsRatio: number | null;
   damageDealt: number;
   damageTaken: number;
+  /** Daño medio por kill (damageDealt/kills, 2 decimales); null si 0 kills. */
+  damagePerKill: number | null;
+  /** Bajas con cuchillo (mod MOD_MELEE del log: cuchillada o golpe con el arma en la mano — así lo cuenta el juego). Computado al vuelo sobre KillEvent. */
+  knifeKills: number;
+  /** Muertes a cuchillo (mod MOD_MELEE). Computado al vuelo sobre KillEvent. */
+  knifeDeaths: number;
   /** Mejor racha de kills sin morir (aprox: solo eventos K almacenados). */
   bestStreak: number;
   teamkills: number;
@@ -46,7 +54,18 @@ export interface KillEventDto {
   direction: 'kill' | 'death';
   isKill: boolean;
   damage: number;
+  /** Arma cruda del log (ej. "ump45_eotech_mp"). Compat: igual que weaponCode. */
   weapon: string | null;
+  /** Arma cruda del log (ej. "ump45_eotech_mp"). */
+  weaponCode: string | null;
+  /** Nombre display humano del arma (diccionario MW2/IW4x; nunca el crudo). */
+  weaponName: string | null;
+  /** Zona del impacto según el log (head, chest, ...); null si no vino. */
+  hitloc: string | null;
+  /** Kill con headshot (hitloc head/helmet). */
+  headshot: boolean;
+  /** Muerte/baja a cuchillo (mod MOD_MELEE del log). */
+  isKnife: boolean;
   server: string | null;
   opponentGuid: string;
   opponentName: string | null;
@@ -77,7 +96,13 @@ export interface PlayerHistoryDto {
   series: Array<{ date: string; kills: number; deaths: number }>;
 }
 
-function toPlayerDto(player: PlayerWithLink, favoriteWeapon: string | null, favoriteMap: string | null): PlayerDto {
+function toPlayerDto(
+  player: PlayerWithLink,
+  favoriteWeapon: string | null,
+  favoriteMap: string | null,
+  knifeKills: number,
+  knifeDeaths: number,
+): PlayerDto {
   return {
     guid: player.guid,
     name: player.name,
@@ -92,6 +117,9 @@ function toPlayerDto(player: PlayerWithLink, favoriteWeapon: string | null, favo
     hsRatio: player.kills > 0 ? round2(player.headshots / player.kills) : null,
     damageDealt: player.damageDealt,
     damageTaken: player.damageTaken,
+    damagePerKill: player.kills > 0 ? round2(player.damageDealt / player.kills) : null,
+    knifeKills,
+    knifeDeaths,
     bestStreak: player.bestStreak,
     teamkills: player.teamkills,
     matchesPlayed: player.matchesPlayed,
@@ -139,8 +167,9 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     take: 300,
   });
 
-  // Favoritos del resumen (arma/mapa con más kills, empate por daño).
-  const [weaponRows, mapRows, aliases] = await Promise.all([
+  // Favoritos del resumen + conteos de cuchillo (MOD_MELEE) computados al
+  // vuelo sobre KillEvent: fuente única de verdad, sin counters derivables.
+  const [weaponRows, mapRows, aliases, knifeKills, knifeDeaths] = await Promise.all([
     prisma.killEvent.groupBy({
       by: ['weapon'],
       where: { originGuid: guid, isKill: true, weapon: { not: null } },
@@ -154,6 +183,13 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
       _sum: { damage: true },
     }),
     getPlayerAliases(guid, player.name),
+    // Bajas a cuchillo: eventos K del jugador con mod MOD_MELEE (isKill=true,
+    // mismo filtro que los favoritos). Con el histórico borrado por db:zero el
+    // conteo parte de 0 y crece con el juego (decisión del dueño: el histórico
+    // pre-zero NO existe).
+    prisma.killEvent.count({ where: { originGuid: guid, isKill: true, mod: MELEE_MOD } }),
+    // Muertes a cuchillo: el jugador como VÍCTIMA de un evento MOD_MELEE.
+    prisma.killEvent.count({ where: { targetGuid: guid, mod: MELEE_MOD } }),
   ]);
   const favoriteWeapon =
     weaponRows
@@ -185,6 +221,11 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
       isKill: event.isKill,
       damage: event.damage,
       weapon: event.weapon,
+      weaponCode: event.weapon,
+      weaponName: event.weapon !== null ? weaponDisplayName(event.weapon) : null,
+      hitloc: event.hitloc,
+      headshot: event.headshot,
+      isKnife: event.mod === MELEE_MOD,
       server: event.server,
       opponentGuid,
       opponentName: nameByGuid.get(opponentGuid) ?? null,
@@ -204,7 +245,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   }
 
   return {
-    player: toPlayerDto(player, favoriteWeapon, favoriteMap),
+    player: toPlayerDto(player, favoriteWeapon, favoriteMap, knifeKills, knifeDeaths),
     rank,
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),

@@ -154,6 +154,11 @@ model KillEvent {
   isKill     Boolean  @default(true) // false = evento no letal en IW4MAdmin
   damage     Int      @default(0)
   weapon     String?  // arma base del log (ej. "mp5k_mp"); sin attachments
+  /// Mod de la kill según el log (MOD_RIFLE_BULLET, MOD_MELEE, MOD_HEAD_SHOT...).
+  /// MOD_MELEE = cuchillada (venga del cuchillo o de golpear con el arma en la
+  /// mano: así lo cuenta el juego). Null en eventos de la fuente IW4MAdmin
+  /// (su reader no lo importa) y en eventos previos a esta columna.
+  mod        String?
   hitloc     String?  // zona del impacto (head, chest, torso_lower, ...)
   headshot   Boolean  @default(false) // hitloc en (head, helmet)
   isTeamkill Boolean  @default(false) // ateam == vteam

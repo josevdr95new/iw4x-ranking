@@ -165,6 +165,7 @@ describe('parseGameLogLine', () => {
       victimName: 'Mandango ProMax', // anti-confusión: nombre exacto de la víctima para alias
       killerName: null, // killer world: nombre vacío → null (sin alias de killer)
       weapon: 'none',
+      mod: 'MOD_FALLING',
       damage: 100,
       hitloc: 'none',
       isTeamkill: false,
@@ -734,5 +735,172 @@ describe('FIXTURES REALES de esta build: víctima-primero (regresión de formato
     const mandangoBody = mandangoRes.body as { player: { kills: number; headshots: number; hsRatio: number | null } };
     expect(mandangoBody.player.kills).toBe(0);
     expect(mandangoBody.player.hsRatio).toBeNull();
+  });
+});
+
+// ── KNIFE STATS (MOD_MELEE) + FEED ENRIQUECIDO + DAÑO DE POR VIDA ───────────
+
+describe('knifeKills/knifeDeaths (MOD_MELEE) y feed enriquecido del perfil', () => {
+  // Línea REAL del log del dueño: cuchillada/golpe con el arma en la mano → el
+  // juego la marca MOD_MELEE (fixture real: Colt Anaconda a 138, right_arm_upper).
+  const KNIFE_LINE = `  0:10 K;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;coltanaconda_tactical_mp;138;MOD_MELEE;right_arm_upper`;
+  const RIFLE_LINE = `  0:12 K;${HEX_B};1;axis;Bravo;${HEX_A};0;allies;Alpha^7;ak47;120;MOD_RIFLE_BULLET;head`;
+
+  it('cuenta la cuchillada: knifeKills del killer (2º bloque) y knifeDeaths de la víctima (1º bloque); persiste el mod', async () => {
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:04 J;${HEX_A};0;Alpha^7`,
+      `  0:05 J;${HEX_B};1;Bravo`,
+      KNIFE_LINE,
+      '\n',
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(1);
+
+    // ESTA build: Alpha (1er bloque) = VÍCTIMA; Bravo (2º bloque) = KILLER.
+    // Agregados del Player: el kill/death es campo persistido...
+    const bravoRow = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_B } });
+    expect(bravoRow.kills).toBe(1);
+    const alphaRow = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_A } });
+    expect(alphaRow.deaths).toBe(1);
+
+    // ...pero knifeKills/knifeDeaths son COMPUTADOS AL VUELO (opción "sin schema
+    // en Player"): se leen del perfil GET /api/players/:guid.
+    const bravoRes = await req().get(`/api/players/${DEC_B}`);
+    expect(bravoRes.status).toBe(200);
+    const bravoBody = bravoRes.body as { player: { knifeKills: number; knifeDeaths: number } };
+    expect(bravoBody.player.knifeKills).toBe(1);
+    expect(bravoBody.player.knifeDeaths).toBe(0);
+    const alphaRes = await req().get(`/api/players/${DEC_A}`);
+    expect(alphaRes.status).toBe(200);
+    const alphaBody = alphaRes.body as { player: { knifeKills: number; knifeDeaths: number } };
+    expect(alphaBody.player.knifeDeaths).toBe(1);
+    expect(alphaBody.player.knifeKills).toBe(0);
+
+    // El evento persiste el mod crudo del log (semántica DB stock: origin=killer).
+    const event = await prisma.killEvent.findFirstOrThrow();
+    expect(event).toMatchObject({
+      originGuid: DEC_B,
+      targetGuid: DEC_A,
+      weapon: 'coltanaconda_tactical_mp',
+      mod: 'MOD_MELEE',
+      hitloc: 'right_arm_upper',
+      damage: 138,
+    });
+  });
+
+  it('un kill normal (MOD_RIFLE_BULLET) NO incrementa knifeKills/knifeDeaths', async () => {
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:04 J;${HEX_A};0;Alpha^7`,
+      `  0:05 J;${HEX_B};1;Bravo`,
+      RIFLE_LINE,
+      '\n',
+    ]);
+    await ingestGameLog(LOG_PATH, SERVER_LABEL);
+
+    // ESTA build: Bravo (1er bloque) = VÍCTIMA; Alpha (2º bloque) = KILLER.
+    // knifeKills/knifeDeaths son computados al vuelo → se leen del perfil.
+    const alphaRes = await req().get(`/api/players/${DEC_A}`);
+    expect(alphaRes.status).toBe(200);
+    const alphaBody = alphaRes.body as { player: { kills: number; knifeKills: number; knifeDeaths: number } };
+    expect(alphaBody.player.kills).toBe(1);
+    expect(alphaBody.player.knifeKills).toBe(0);
+    expect(alphaBody.player.knifeDeaths).toBe(0);
+    const bravoRes = await req().get(`/api/players/${DEC_B}`);
+    expect(bravoRes.status).toBe(200);
+    const bravoBody = bravoRes.body as { player: { deaths: number; knifeKills: number; knifeDeaths: number } };
+    expect(bravoBody.player.deaths).toBe(1);
+    expect(bravoBody.player.knifeDeaths).toBe(0);
+    expect(bravoBody.player.knifeKills).toBe(0);
+  });
+
+  it('expone knifeKills/knifeDeaths/damagePerKill en el perfil y feed con headshot/isKnife/weaponCode/weaponName/hitloc', async () => {
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:03 J;${HEX_C};2;Charlie`,
+      `  0:04 J;${HEX_A};0;Alpha^7`,
+      `  0:05 J;${HEX_B};1;Bravo`,
+      // D no letal: Alpha RECIBE 50 de Bravo → damageDealt de Bravo SIN kill.
+      `  0:06 D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`,
+      KNIFE_LINE, // Bravo cuchillea a Alpha (138)
+      RIFLE_LINE, // Alpha mata a Bravo con rifle + headshot (120)
+      // Charlie muere por world: NO crea evento (knifeDeaths no aplica), solo death.
+      `  0:20 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`,
+      '\n',
+    ]);
+    await ingestGameLog(LOG_PATH, SERVER_LABEL);
+
+    interface FeedEvent {
+      direction: string;
+      isKnife: boolean;
+      headshot: boolean;
+      weaponCode: string | null;
+      weaponName: string | null;
+      hitloc: string | null;
+      damage: number;
+    }
+    interface ProfileBody {
+      player: {
+        knifeKills: number;
+        knifeDeaths: number;
+        damageDealt: number;
+        damageTaken: number;
+        kills: number;
+        damagePerKill: number | null;
+      };
+      recentEvents: FeedEvent[];
+    }
+
+    // Bravo: 1 knifeKill (138) + 50 de daño no letal → damageDealt 188; murió por rifle (120).
+    const bravoRes = await req().get(`/api/players/${DEC_B}`);
+    expect(bravoRes.status).toBe(200);
+    const bravoBody = bravoRes.body as ProfileBody;
+    expect(bravoBody.player.knifeKills).toBe(1);
+    expect(bravoBody.player.knifeDeaths).toBe(0);
+    expect(bravoBody.player.damageDealt).toBe(188); // 138 (K) + 50 (D no letal): los D cuentan aunque no maten
+    expect(bravoBody.player.damageTaken).toBe(120);
+    expect(bravoBody.player.damagePerKill).toBe(188); // 188/1 kill
+
+    // Feed de Bravo: su baja a cuchillo Y su muerte por rifle headshot, ambos enriquecidos.
+    const knifeEvent = bravoBody.recentEvents.find((event) => event.isKnife);
+    expect(knifeEvent).toMatchObject({
+      direction: 'kill',
+      isKnife: true,
+      headshot: false,
+      weaponCode: 'coltanaconda_tactical_mp',
+      weaponName: 'Colt Anaconda + Cuchillo táctico',
+      hitloc: 'right_arm_upper',
+      damage: 138,
+    });
+    const deathEvent = bravoBody.recentEvents.find((event) => event.direction === 'death');
+    expect(deathEvent).toMatchObject({
+      direction: 'death',
+      isKnife: false,
+      headshot: true,
+      weaponCode: 'ak47',
+      weaponName: 'AK-47',
+      hitloc: 'head',
+      damage: 120,
+    });
+
+    // Alpha: murió a cuchillo (knifeDeaths=1); daño recibido 50 (D) + 138 (K) = 188.
+    const alphaRes = await req().get(`/api/players/${DEC_A}`);
+    expect(alphaRes.status).toBe(200);
+    const alphaBody = alphaRes.body as ProfileBody;
+    expect(alphaBody.player.knifeKills).toBe(0);
+    expect(alphaBody.player.knifeDeaths).toBe(1);
+    expect(alphaBody.player.damageTaken).toBe(188);
+    expect(alphaBody.player.damagePerKill).toBe(120); // daño infligido 120 / 1 kill
+
+    // Charlie: 0 kills (solo deaths) → damagePerKill null (sin división por cero).
+    const charlieRes = await req().get(`/api/players/${DEC_C}`);
+    expect(charlieRes.status).toBe(200);
+    const charlieBody = charlieRes.body as ProfileBody;
+    expect(charlieBody.player.kills).toBe(0);
+    expect(charlieBody.player.knifeKills).toBe(0);
+    expect(charlieBody.player.knifeDeaths).toBe(0);
+    expect(charlieBody.player.damagePerKill).toBeNull();
   });
 });
