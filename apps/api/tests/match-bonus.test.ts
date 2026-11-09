@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ingestGameLog, parseLogTimeSeconds } from '../src/services/sync/gamelog.reader.js';
 import { prisma } from '../src/lib/prisma.js';
-import { SKILL } from '../src/services/skill/elo.js';
+import { SKILL, round2 } from '../src/services/skill/elo.js';
 import { matchTop3, type MatchPlayerTally } from '../src/services/skill/match-bonus.js';
 import { processSkillUpdates } from '../src/services/skill/skill.service.js';
 import { resetDb } from './helpers.js';
@@ -212,6 +212,25 @@ describe('bonus top-3 por partida (ingesta del log + skill ELO)', () => {
   });
 
   it('el delta del bonus es EXACTO: mismas kills con y sin ShutdownGame → diferencia = +15/+10/+5', async () => {
+    // NOTA SOBRE DETERMINISMO (causa raíz del flaky de CI, 3 pushes rojos
+    // 2026-11-08): este test compara dos ingestas con `toBe` EXACTO sobre
+    // skillElo absoluto, así que exige que el stream de skill ordene IGUAL en
+    // ambas. El orden es (timeEpoch, id); el timeEpoch de los eventos NO sale
+    // de los prefijos m:ss del log (el reader los descarta: es el reloj de
+    // PARTIDA, no wall-clock) sino de Date.now() de la ingesta → las dos
+    // corridas tienen epochs distintos ENTRE SÍ, pero eso es inocuo (cada
+    // corrida se procesa por separado). El flaky real era DENTRO de la corrida
+    // 2: los kills de una pasada llevan el epoch del INICIO de la pasada y el
+    // bonus llevaba SU PROPIO Date.now() al ShutdownGame → si la ingesta cabía
+    // en <1s (CI ubuntu rápida) compartían segundo y el desempate por id
+    // comparaba ids de TABLAS DISTINTAS (secuencias autoincrement
+    // independientes: ids de bonus ≪ ids de kill) → el bonus ordenaba ANTES de
+    // los kills de su propia partida y el delta real daba ≠ +15
+    // (899.52 vs 903.17). Fix de raíz: el reader fija al bonus un floor de
+    // epoch estrictamente posterior a su pasada (gamelog.reader.ts, rama
+    // shutdown, minTimeEpoch) → orden determinista aquí y en producción
+    // (recompute:skill reproduce los epochs GUARDADOS, que ya no dependen de
+    // la velocidad de la máquina).
     const kills = new Map<string, number>([
       [DEC_A, 7],
       [DEC_B, 6],
@@ -231,10 +250,23 @@ describe('bonus top-3 por partida (ingesta del log + skill ELO)', () => {
     await resetDb();
     writeLog(buildMatch({ kills, shutdownAt: '5:00' }));
     await ingestGameLog(LOG_PATH, SERVER_LABEL);
+
+    // Invariante de orden (regresión del bug de CI): el bonus queda
+    // ESTRICTAMENTE DESPUÉS de los kills de su partida, haya o no cambio de
+    // segundo durante la ingesta.
+    const killEpoch = (await prisma.killEvent.findFirst({ select: { timeEpoch: true } }))!.timeEpoch;
+    const bonusEpoch = (await prisma.matchBonusEvent.findFirst({ select: { timeEpoch: true } }))!.timeEpoch;
+    expect(bonusEpoch).toBeGreaterThan(killEpoch);
+
     await processSkillUpdates();
     for (const [guid, delta] of [[DEC_A, 15], [DEC_B, 10], [DEC_C, 5]] as const) {
       const row = await prisma.player.findUniqueOrThrow({ where: { guid } });
-      expect(row.skillElo).toBe(base.get(guid)! + delta); // exacto (round2 estable)
+      // La DIFERENCIA entre escenarios mide EXACTAMENTE lo que dice el test
+      // (final − base = bonus, sin contaminación del orden de los kills).
+      expect(round2(row.skillElo - base.get(guid)!)).toBe(delta);
+      // Absoluto exacto (round2 estable): legítimo ahora que el orden del
+      // stream es determinista (invariante de arriba).
+      expect(row.skillElo).toBe(round2(base.get(guid)! + delta));
     }
   });
 

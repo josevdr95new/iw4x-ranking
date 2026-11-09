@@ -218,7 +218,10 @@ model MatchBonusEvent {
   gametype   String?
   server     String?
   time       DateTime
-  timeEpoch  Int // epoch en segundos (mismo criterio que KillEvent)
+  timeEpoch  Int // epoch en segundos. Clave de orden del stream de skill: el
+             // reader le fija un floor (minTimeEpoch) para que el bonus ordene
+             // SIEMPRE DESPUÉS de los kills de su partida aunque la ingesta no
+             // cruce un segundo de reloj (ver gamelog.reader.ts rama shutdown)
   // Flag de skill: mismo contrato que KillEvent.skillProcessed. Se procesa en
   // el MISMO stream cronológico (timeEpoch ASC, id ASC): el bonus de una
   // partida siempre ordena DESPUÉS de los kills de su partida (se crea al

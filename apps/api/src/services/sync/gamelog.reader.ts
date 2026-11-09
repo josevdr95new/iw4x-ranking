@@ -569,6 +569,8 @@ export async function ingestGameLog(path: string, server: string | null): Promis
 
   result.newOffset = chunk.newOffset;
   const now = new Date();
+  /** Epoch (segundos) de TODA esta pasada: los KillEvent de la pasada lo comparten y el orden dentro del stream lo resuelve id ASC (orden de inserción). */
+  const passEpoch = Math.trunc(now.getTime() / 1000);
   const touched = new Set<string>(); // guids que requieren recompute de derivados
 
   // ── Estado de la PARTIDA en curso (para el bonus top-3 de fin de partida) ──
@@ -585,7 +587,7 @@ export async function ingestGameLog(path: string, server: string | null): Promis
     matchTally.set(guid, row);
   };
 
-  for (const line of chunk.lines) {
+  for (const [lineIndex, line] of chunk.lines.entries()) {
     if (line.trim() === '') continue;
     let event: GameLogEvent | null | 'ignored';
     try {
@@ -624,11 +626,32 @@ export async function ingestGameLog(path: string, server: string | null): Promis
           const shutdownSec = parseLogTimeSeconds(line);
           const duration =
             matchStartSec !== null && shutdownSec !== null ? Math.max(0, shutdownSec - matchStartSec) : null;
+          // FLOOR DEL EPOCH DEL BONUS (bug CI 2026-11-08, 3 pushes rojos):
+          // los KillEvent de esta pasada llevan `passEpoch`; el bonus llevaba su
+          // propio Date.now() → si la pasada cabía en <1s (CI rápida), bonus y
+          // kills compartían segundo y el desempate (timeEpoch, id) comparaba
+          // ids de tablas DISTINTAS (secuencias autoincrement independientes y
+          // descompensadas: los ids de bonus van siempre por detrás) → el bonus
+          // ordenaba ANTES de los kills de su propia partida y el delta real
+          // era ≠ +15/+10/+5. Fix: floor estricto passEpoch+1 → el bonus ordena
+          // SIEMPRE después de los kills ya insertados de su partida, con o sin
+          // cambio de segundo. EXCEPCIÓN (multi-partida en la MISMA pasada):
+          // si quedan líneas K después de este ShutdownGame, floor = passEpoch
+          // (sin bump): el orden real lo resuelve id ASC = orden de inserción
+          // (un bump aquí retrasaría el bonus de esta partida por detrás de los
+          // kills de la siguiente). Residual documentado: si esa misma pasada
+          // multi-partida CRUZA un segundo justo en un ShutdownGame, el bonus
+          // de la partida cerrada ordena tras los kills de la siguiente (para
+          // eliminarlo haría falta un cursor de orden persistido por fuente).
+          const killsRemainInPass = chunk.lines
+            .slice(lineIndex + 1)
+            .some((raw) => raw.replace(TIME_PREFIX, '').startsWith('K;'));
           const awards = await awardMatchBonus(matchTally, {
             matchDurationSec: duration,
             map: currentMap,
             gametype: currentGametype,
             server,
+            minTimeEpoch: killsRemainInPass ? passEpoch : passEpoch + 1,
           });
           if (awards.length > 0) {
             result.matchBonusEventsSynced += awards.length;

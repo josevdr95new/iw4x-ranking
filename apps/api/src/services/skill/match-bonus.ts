@@ -76,6 +76,19 @@ export interface MatchBonusContext {
   map: string | null;
   gametype: string | null;
   server: string | null;
+  /**
+   * Epoch MÍNIMO (inclusivo) para el timeEpoch de los MatchBonusEvent creados.
+   * Lo fija el reader (ver gamelog.reader.ts, rama shutdown): el stream de
+   * skill ordena por (timeEpoch, id) y el desempate por id NO es comparable
+   * entre KillEvent y MatchBonusEvent (secuencias autoincrement INDEPENDIENTES,
+   * y las de kill crean mucho más rápido) → si bonus y kills de una partida
+   * comparten segundo, el orden dependería de la velocidad de la ingesta
+   * (bug CI 2026-11-08: el bonus ordenaba ANTES de los kills de su propia
+   * partida cuando la pasada cabía en <1s). Con el floor, el bonus queda
+   * SIEMPRE estrictamente después de los kills ya insertados de su pasada.
+   * `time` (DateTime) conserva el reloj real; solo se ajusta la clave de orden.
+   */
+  minTimeEpoch?: number;
 }
 
 /**
@@ -96,7 +109,10 @@ export async function awardMatchBonus(
   if (awards.length === 0) return [];
 
   const now = new Date();
-  const timeEpoch = Math.trunc(now.getTime() / 1000);
+  // Floor de orden (ver MatchBonusContext.minTimeEpoch): garantiza que el bonus
+  // ordene DESPUÉS de los kills de su partida en el stream (timeEpoch, id) del
+  // skill, INDEPENDIENTEMENTE de si la ingesta cruzó un segundo de reloj.
+  const timeEpoch = Math.max(Math.trunc(now.getTime() / 1000), context.minTimeEpoch ?? 0);
   await prisma.matchBonusEvent.createMany({
     data: awards.map((award) => {
       const row = tally.get(award.guid)!;

@@ -12,9 +12,13 @@ import { SKILL, botDecayFactor, clampAndBonus, clampElo, killEloDelta, round2, s
  *  - Solo toma eventos con `skillProcessed = false` (los nuevos de cada sync).
  *  - Orden de procesamiento: (timeEpoch ASC, id ASC) sobre el STREAM COMBINADO
  *    (determinista; el desempate por id soporta eventos cronológicos
- *    duplicados). El bonus de una partida siempre ordena DESPUÉS de los kills
- *    de su partida (se crea al detectar ShutdownGame, id mayor) y ANTES de los
- *    kills de la partida siguiente → el merge respeta la cronología real.
+ *    duplicados de UNA tabla). El bonus de una partida siempre ordena DESPUÉS
+ *    de los kills de su partida: el reader le fija un timeEpoch ESTRICTAMENTE
+ *    posterior al de los kills de su pasada (minTimeEpoch, ver
+ *    gamelog.reader.ts rama shutdown; el desempate por id NO es comparable
+ *    entre KillEvent y MatchBonusEvent: secuencias autoincrement separadas) y
+ *    ANTES de los kills de la partida siguiente → el merge respeta la
+ *    cronología real.
  *  - Mantiene el ELO en memoria POR LOTE y lo persiste (con los flags) en una
  *    transacción por lote → si el proceso muere a mitad, el lote pendiente se
  *    re-procesa entero (nada queda procesado sin skill aplicado).
@@ -79,11 +83,12 @@ export async function processSkillUpdates(): Promise<SkillProcessResult> {
   for (;;) {
     // Dos streams pendientes, cada uno ordenado cronológicamente. El lote es el
     // STREAM COMBINADO ordenado por (timeEpoch, id): el bonus de una partida
-    // siempre ordena DESPUÉS de los kills de su partida (se crea al detectar
-    // ShutdownGame, id mayor en el mismo epoch de ingesta) y ANTES de los kills
-    // de la partida siguiente. Sin filtros: la matemática ELO aplica clamp y
-    // redondeo INLINE por evento, así el resultado es independiente de por
-    // dónde caiga el límite de lote (mismo invariante que los KillEvent).
+    // siempre ordena DESPUÉS de los kills de su partida (el reader le fija un
+    // timeEpoch estrictamente posterior al de su pasada; ver gamelog.reader
+    // rama shutdown) y ANTES de los kills de la partida siguiente. Sin filtros:
+    // la matemática ELO aplica clamp y redondeo INLINE por evento, así el
+    // resultado es independiente de por dónde caiga el límite de lote (mismo
+    // invariante que los KillEvent).
     const [kills, bonuses] = await Promise.all([
       prisma.killEvent.findMany({
         where: { skillProcessed: false },
