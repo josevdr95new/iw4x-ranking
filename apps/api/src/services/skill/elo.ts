@@ -7,9 +7,10 @@
  *  - daño alto → bonus creciente por encima del daño letal típico (100).
  *  - teamkill → penalidad plana al atacante; la víctima NO recibe nada (no hay
  *    farming por matar compañeros).
- *  - víctima "world"/suicidio → pierde poco (no hay pool del cual robar); solo
- *    se alcanza si algún evento así llegara a almacenarse (la ingesta por log
- *    NO almacena world/suicidio, es comportamiento defensivo para mocks/fuentes).
+ *  - víctima "world"/suicidio → pierde poco (no hay pool del cual robar).
+ *    La ingesta del games_mp.log SÍ almacena estos casos desde 2026-11-08:
+ *    KillEvent con originGuid = víctima y targetGuid = '' (marcador de "sin
+ *    atacante", bots excluidos) → esta rama aplica WORLD_LOSS=4 al que muere.
  *  - Floor/cap del ELO base para evitar skill infinita o skill por debajo del floor.
  *  - Streak: multiplicador SUAVE aplicado en el compute final (no por evento)
  *    sobre Player.bestStreak (mantenido por la ingesta).

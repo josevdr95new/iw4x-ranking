@@ -3,6 +3,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { guidHexToDecimal, ingestGameLog, parseGameLogLine } from '../src/services/sync/gamelog.reader.js';
+import { processSkillUpdates } from '../src/services/skill/skill.service.js';
+import { SKILL } from '../src/services/skill/elo.js';
+import { getWeaponsRanking } from '../src/services/weapons.service.js';
 import { prisma } from '../src/lib/prisma.js';
 import { req, resetDb } from './helpers.js';
 
@@ -35,9 +38,9 @@ const SYNTHETIC_LINES = [
   `  0:06 J;${HEX_C};2;Charlie`,
   `  0:07 D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`, // daño: Alpha RECIBE 50 de Bravo
   `  0:10 K;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;120;MOD_RIFLE_BULLET;head`, // Bravo (2º bloque) mata a Alpha con HEADSHOT
-  `  0:12 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`, // world: Charlie (1º bloque) muere, sin evento
+  `  0:12 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`, // world: Charlie (1º bloque) muere → evento world (targetGuid='') para el skill
   `  0:14 K;${HEX_B};1;axis;Bravo;${HEX_C};2;axis;Charlie;ak74u;90;MOD_RIFLE_BULLET;torso_lower`, // Charlie teamkill-ea a Bravo (axis/axis)
-  `  0:16 K;${HEX_C};2;axis;Charlie;${HEX_C};2;axis;Charlie;semtex;300;MOD_GRENADE;none`, // suicidio (sin evento)
+  `  0:16 K;${HEX_C};2;axis;Charlie;${HEX_C};2;axis;Charlie;semtex;300;MOD_GRENADE;none`, // suicidio → evento world (targetGuid='') para el skill
   '  0:17 línea-basura-no-reconocida',
   '  0:18 ExitLevel: executed',
   `  0:20 Q;${HEX_C};2;Charlie`,
@@ -212,7 +215,7 @@ describe('ingestGameLog (integración con Prisma)', () => {
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
 
     expect(result.ok).toBe(true);
-    expect(result.killEventsSynced).toBe(2); // Bravo→Alpha (head) y Charlie→Bravo (teamkill); world y suicidio no crean evento
+    expect(result.killEventsSynced).toBe(4); // Bravo→Alpha (head), Charlie world, Charlie→Bravo (teamkill) y suicidio de Charlie (eventos world/suicidio desde 2026-11-08)
     expect(result.linesParsed).toBe(10); // InitGame + 3 J + D + 4 K + Q
     expect(result.linesIgnored).toBe(3); // separador + basura + ExitLevel
     expect(result.sessionsOpened).toBe(3); // 3 J
@@ -259,7 +262,7 @@ describe('ingestGameLog (integración con Prisma)', () => {
     // KillEvents con weapon/damage/hitloc/headshot/teamkill/map/gametype.
     // La DB guarda semántica stock: originGuid = KILLER, targetGuid = VÍCTIMA.
     const events = await prisma.killEvent.findMany({ orderBy: [{ id: 'asc' }] });
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(4); // kill + world + teamkill + suicidio (eventos world/suicidio desde 2026-11-08)
     expect(events[0]).toMatchObject({
       originGuid: DEC_B, // Bravo (2º bloque) = killer
       targetGuid: DEC_A, // Alpha (1er bloque) = víctima
@@ -273,6 +276,17 @@ describe('ingestGameLog (integración con Prisma)', () => {
       server: SERVER_LABEL,
     });
     expect(events[1]).toMatchObject({
+      originGuid: DEC_C, // Charlie world (0:12): origin = VÍCTIMA (sin atacante)
+      targetGuid: '', // marcador world → skill aplica WORLD_LOSS plano
+      weapon: 'none',
+      mod: 'MOD_FALLING',
+      damage: 100,
+      headshot: false,
+      isTeamkill: false,
+      map: 'mp_rust',
+      gametype: 'war',
+    });
+    expect(events[2]).toMatchObject({
       originGuid: DEC_C, // Charlie (2º bloque) = killer (teamkiller)
       targetGuid: DEC_B, // Bravo (1er bloque) = víctima
       weapon: 'ak74u',
@@ -283,6 +297,22 @@ describe('ingestGameLog (integración con Prisma)', () => {
       map: 'mp_rust',
       gametype: 'war',
     });
+    expect(events[3]).toMatchObject({
+      originGuid: DEC_C, // suicidio (0:16): origin = víctima
+      targetGuid: '',
+      weapon: 'semtex',
+      mod: 'MOD_GRENADE',
+      damage: 300,
+      headshot: false,
+      isTeamkill: false,
+    });
+    // El orden por id respeta la cronología del log: kill, world, teamkill, suicidio.
+    expect(events.map((e) => [e.originGuid, e.targetGuid])).toEqual([
+      [DEC_B, DEC_A], // Bravo→Alpha (0:10)
+      [DEC_C, ''], // world (0:12)
+      [DEC_C, DEC_B], // Charlie→Bravo teamkill (0:14)
+      [DEC_C, ''], // suicidio (0:16)
+    ]);
 
     // Sesiones: J abre, Q cierra. Charlie tiene sesión cerrada; Alpha/Bravo en curso.
     const sessions = await prisma.session.findMany();
@@ -685,7 +715,7 @@ describe('FIXTURES REALES de esta build: víctima-primero (regresión de formato
     ]);
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(result.ok).toBe(true);
-    expect(result.killEventsSynced).toBe(2); // 3:04 y 3:17; world y suicidio sin evento
+    expect(result.killEventsSynced).toBe(4); // 3:04, world de Mandango (0:39), 3:17 y suicidio real (19:30): los world/suicidio HUMANOS también crean evento (2026-11-08)
 
     // El dueño (un solo Player por guid — NUNCA duplicados por nick: pollacaballo,
     // admin y TESTPROBE comparten guid y colapsan por el upsert sobre guid @unique).
@@ -826,7 +856,8 @@ describe('knifeKills/knifeDeaths (MOD_MELEE) y feed enriquecido del perfil', () 
       `  0:06 D;${HEX_A};0;allies;Alpha^7;${HEX_B};1;axis;Bravo;ak47;50;MOD_RIFLE_BULLET;chest`,
       KNIFE_LINE, // Bravo cuchillea a Alpha (138)
       RIFLE_LINE, // Alpha mata a Bravo con rifle + headshot (120)
-      // Charlie muere por world: NO crea evento (knifeDeaths no aplica), solo death.
+      // Charlie muere por world: crea evento world (targetGuid='') SOLO para el
+      // skill; knifeDeaths/feed/armas lo excluyen (targetGuid != '').
       `  0:20 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`,
       '\n',
     ]);
@@ -902,5 +933,149 @@ describe('knifeKills/knifeDeaths (MOD_MELEE) y feed enriquecido del perfil', () 
     expect(charlieBody.player.knifeKills).toBe(0);
     expect(charlieBody.player.knifeDeaths).toBe(0);
     expect(charlieBody.player.damagePerKill).toBeNull();
+  });
+});
+
+// ── WORLD/SUICIDIO → KillEvent + WORLD_LOSS (2026-11-08) ────────────────────
+// Antes la muerte por world/suicidio solo hacía deaths++ SIN crear KillEvent:
+// el skill NUNCA se enteraba (el reporte «40 kills → 1375.39; 1 muerte → sigue
+// 1375.39» venía de exactamente eso). Ahora el reader crea el evento con
+// originGuid = víctima y targetGuid = '' (marcador de "sin atacante"): el motor
+// skill existente aplica la pérdida plana SKILL.WORLD_LOSS = 4 sin tocar skill/.
+// Los consumidores de stats (feed/armas/mapas/streak) filtran targetGuid == ''
+// → el evento world SOLO mueve skill, nada más.
+describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
+  it('muerte por WORLD (humano): crea KillEvent originGuid=víctima targetGuid="" y aplica −4 al skill', async () => {
+    // Fixture = caso REAL del dueño (0:39, MOD_FALLING, killer world sin guid).
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:04 J;${HEX_A};0;Alpha`,
+      `  0:39 K;${HEX_A};0;allies;Alpha;;-1;world;;none;100;MOD_FALLING;none\n`,
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(1); // el world AHORA crea evento
+
+    // Counters clásicos intactos: deaths++ y daño recibido, sin kills.
+    const alpha = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_A } });
+    expect(alpha.deaths).toBe(1);
+    expect(alpha.damageTaken).toBe(100);
+    expect(alpha.kills).toBe(0);
+    expect(alpha.bestStreak).toBe(0); // morir por world NO es kill (ni suma ni resetea racha)
+
+    // KillEvent: originGuid = víctima, targetGuid = '' (marcador world).
+    const event = await prisma.killEvent.findFirstOrThrow();
+    expect(event).toMatchObject({
+      originGuid: DEC_A,
+      targetGuid: '',
+      isKill: true,
+      isTeamkill: false,
+      headshot: false,
+      weapon: 'none',
+      mod: 'MOD_FALLING',
+      damage: 100,
+      map: 'mp_rust',
+      gametype: 'war',
+      server: SERVER_LABEL,
+      skillProcessed: false, // pendiente para processSkillUpdates
+    });
+
+    // El motor skill EXISTENTE aplica WORLD_LOSS=4 (sin tocar skill/).
+    await processSkillUpdates();
+    const after = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_A } });
+    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS); // 1000 − 4 = 996
+    expect(after.skill).toBe(SKILL.START - SKILL.WORLD_LOSS); // bestStreak 0 → sin bonus
+    const processed = await prisma.killEvent.findFirstOrThrow();
+    expect(processed.skillProcessed).toBe(true); // la línea quedó skillProcessed=1
+
+    // El evento world NO contamina stats: feed sin entradas y ranking de armas
+    // sin la pseudo-arma "none" del log.
+    const profileRes = await req().get(`/api/players/${DEC_A}`);
+    expect(profileRes.status).toBe(200);
+    const profile = profileRes.body as { player: { kills: number; knifeKills: number }; recentEvents: unknown[] };
+    expect(profile.player.kills).toBe(0);
+    expect(profile.player.knifeKills).toBe(0);
+    expect(profile.recentEvents).toHaveLength(0); // world filtrado del feed
+    const weapons = await getWeaponsRanking({ sort: 'kills', order: 'desc' });
+    expect(weapons.total).toBe(0); // "none" del world NO entra al ranking global
+  });
+
+  it('SUICIDIO (humano): mismo tratamiento — evento con targetGuid="" y skill −4', async () => {
+    // Fixture = suicidio REAL del dueño (19:30, semtex, mismo guid en ambos bloques).
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:04 J;${HEX_B};1;Bravo`,
+      `  0:16 K;${HEX_B};1;axis;Bravo;${HEX_B};1;axis;Bravo;semtex;300;MOD_GRENADE;none\n`,
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(1);
+
+    // deaths++ se mantiene (UNA sola vez: el evento nuevo no re-cuenta la muerte).
+    const bravo = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_B } });
+    expect(bravo.deaths).toBe(1);
+    expect(bravo.damageTaken).toBe(300);
+    expect(bravo.kills).toBe(0); // el suicidio NO suma kill
+
+    const event = await prisma.killEvent.findFirstOrThrow();
+    expect(event).toMatchObject({ originGuid: DEC_B, targetGuid: '', damage: 300, mod: 'MOD_GRENADE', skillProcessed: false });
+
+    await processSkillUpdates();
+    const after = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_B } });
+    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS);
+    const processed = await prisma.killEvent.findFirstOrThrow();
+    expect(processed.skillProcessed).toBe(true);
+  });
+
+  it('BOT que muere por world/suicidio: SOLO counters (deaths++/daño), NINGÚN evento ni skill −4', async () => {
+    const BOT6 = BigInt('0xb07000000000006').toString(10);
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  0:04 J;bot6;16;BotSix',
+      '  0:16 K;bot6;16;allies;BotSix;;-1;world;;none;100;MOD_FALLING;none', // world de BOT
+      '  0:18 K;bot6;16;allies;BotSix;bot6;16;allies;BotSix;semtex;300;MOD_GRENADE;none\n', // suicidio de BOT
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(0); // bots excluidos: sin eventos
+    expect(await prisma.killEvent.count()).toBe(0);
+
+    // Los counters del bot se mantienen EXACTAMENTE como antes del fix.
+    const bot = await prisma.player.findUniqueOrThrow({ where: { guid: BOT6 } });
+    expect(bot.deaths).toBe(2); // world + suicidio
+    expect(bot.damageTaken).toBe(400); // 100 + 300
+    expect(bot.kills).toBe(0);
+
+    // El skill del bot NO recibe el −4 (queda en el START inicial).
+    await processSkillUpdates();
+    const after = await prisma.player.findUniqueOrThrow({ where: { guid: BOT6 } });
+    expect(after.skillElo).toBe(SKILL.START);
+  });
+
+  it('RECOMPUTE determinista con eventos world: replay desde cero → mismo skill final', async () => {
+    // Dos muertes world del mismo humano: −4 cada una. El recompute:skill solo
+    // recorre KillEvent YA almacenados (los eventos viejos del log NO se
+    // re-leen: el cursor los consumió) → fix-forward sin reset, como se acordó.
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      `  0:04 J;${HEX_C};2;Charlie`,
+      `  0:39 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_FALLING;none`,
+      `  1:10 K;${HEX_C};2;axis;Charlie;;-1;world;;none;100;MOD_TRIGGER_HURT;none\n`,
+    ]);
+    await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    await processSkillUpdates();
+    const before = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_C } });
+    expect(before.skillElo).toBe(SKILL.START - 2 * SKILL.WORLD_LOSS); // 992
+
+    // Flujo EXACTO de npm run recompute:skill.
+    await prisma.killEvent.updateMany({ where: {}, data: { skillProcessed: false } });
+    await prisma.player.updateMany({ where: {}, data: { skillElo: 0, skill: 0 } });
+    await processSkillUpdates();
+    const after = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_C } });
+    expect(after.skillElo).toBe(before.skillElo);
+    expect(after.skill).toBe(before.skill);
+    expect(await prisma.killEvent.count()).toBe(2);
+    const rows = await prisma.killEvent.findMany();
+    expect(rows.every((e) => e.skillProcessed)).toBe(true);
   });
 });

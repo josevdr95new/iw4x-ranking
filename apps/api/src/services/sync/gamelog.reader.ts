@@ -69,6 +69,13 @@ import { awardMatchBonus, type MatchPlayerTally } from '../skill/match-bonus.js'
  *  - Rutas UNC de red soportadas (ej. \\192.168.2.251\iw4x-logs\games_mp.log):
  *    fs de Node abre rutas UNC en Windows de forma transparente; el archivo
  *    remoto debe estar compartido (SMB) con permiso de LECTURA.
+ *
+ * WORLD/SUICIDIO (desde 2026-11-08): la muerte por world (killer sin guid) o
+ * el suicidio (mismo guid en ambos bloques) TAMBIÉN crea KillEvent para
+ * HUMANOS, con originGuid = víctima y targetGuid = '' (marcador de "sin
+ * atacante"): el motor skill aplica la pérdida plana SKILL.WORLD_LOSS=4.
+ * Ese evento NO cuenta como kill en ningún agregado (streak/feed/armas/mapas
+ * filtran targetGuid == ''). Los BOTS no generan evento (solo counters).
  */
 
 export interface GameLogConnect {
@@ -469,8 +476,11 @@ async function recomputeDerived(guid: string, now: Date): Promise<void> {
   }
 
   // ── bestStreak desde eventos ordenados ────────────────────────
+  // targetGuid != '': EXCLUYE los eventos world/suicidio (origin=víctima,
+  // target=''): morir por world/suicidio NO es un kill (no suma racha) ni
+  // reinicia la racha vigente (semántica previa a los eventos world).
   const events = await prisma.killEvent.findMany({
-    where: { OR: [{ originGuid: guid }, { targetGuid: guid }] },
+    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], targetGuid: { not: '' } },
     orderBy: [{ timeEpoch: 'asc' }, { id: 'asc' }],
     select: { originGuid: true, targetGuid: true },
     take: 20_000,
@@ -487,8 +497,10 @@ async function recomputeDerived(guid: string, now: Date): Promise<void> {
   }
 
   // ── matchesPlayed: mapas distintos (eventos + sesiones) ───────
+  // Igual que bestStreak: los eventos world/suicidio (target='') no cuentan
+  // como actividad de mapa (solo kills reales y sesiones).
   const eventMaps = await prisma.killEvent.findMany({
-    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], map: { not: null } },
+    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], map: { not: null }, targetGuid: { not: '' } },
     distinct: ['map'],
     select: { map: true },
   });
@@ -680,7 +692,8 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         // K: kill (semántica de ESTA BUILD: primer bloque = VÍCTIMA).
         //  - victimGuid (1er bloque) SIEMPRE tiene guid: es quien muere.
         //  - killerGuid (2º bloque): world (null) o == victimGuid (suicidio)
-        //    → solo death + daño recibido de la víctima, sin evento.
+        //    → death + daño recibido de la víctima + KillEvent world/suicidio
+        //    (targetGuid='') SOLO si es humano: el skill aplica WORLD_LOSS.
         const isSuicide = event.killerGuid !== null && event.killerGuid === event.victimGuid;
         const killerGuid = isSuicide ? null : event.killerGuid;
         const victimGuid = event.victimGuid;
@@ -743,6 +756,33 @@ export async function ingestGameLog(path: string, server: string | null): Promis
           // Alias de la víctima; el "killer" world no tiene guid → skip.
           if (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now })) {
             result.aliasesUpserted += 1;
+          }
+          // KILL EVENT world/suicidio (2026-11-08): originGuid = víctima y
+          // targetGuid = '' (marcador canónico de "sin atacante/víctima
+          // distinta"). El motor skill (skill.service) detecta targetGuid ''
+          // → aplica la pérdida plana SKILL.WORLD_LOSS=4 al que muere, sin
+          // tocar nada de skill/. SOLO HUMANOS: un bot que muere por
+          // world/suicidio no genera evento (solo sus counters de arriba).
+          if (!isBotGuid(victimGuid)) {
+            await prisma.killEvent.create({
+              data: {
+                originGuid: victimGuid,
+                targetGuid: '', // world/suicidio: skill aplica WORLD_LOSS plano
+                isKill: true,
+                damage: event.damage,
+                weapon: event.weapon,
+                mod: event.mod,
+                hitloc: event.hitloc,
+                headshot: false, // sin atacante no hay headshot
+                isTeamkill: false, // world/suicidio nunca es teamkill
+                map: currentMap,
+                gametype: currentGametype,
+                server,
+                time: now,
+                timeEpoch: Math.trunc(now.getTime() / 1000),
+              },
+            });
+            result.killEventsSynced += 1;
           }
           touched.add(victimGuid);
         }

@@ -43,7 +43,9 @@ export async function getWeaponsRanking(query: unknown): Promise<WeaponsRankingR
 
   const rows = await prisma.killEvent.groupBy({
     by: ['weapon'],
-    where: { isKill: true, weapon: { not: null } },
+    // targetGuid != '': excluye world/suicidio (sin arma real; el log trae
+    // "none" y no es una kill contra nadie).
+    where: { isKill: true, weapon: { not: null }, targetGuid: { not: '' } },
     _count: { _all: true, targetGuid: true },
     _sum: { damage: true },
   });
@@ -52,7 +54,7 @@ export async function getWeaponsRanking(query: unknown): Promise<WeaponsRankingR
   const victimRows = await prisma.$queryRaw<Array<{ weapon: string | null; victims: number | bigint }>>`
     SELECT "weapon", COUNT(DISTINCT "targetGuid") AS victims
     FROM "KillEvent"
-    WHERE "isKill" = 1 AND "weapon" IS NOT NULL
+    WHERE "isKill" = 1 AND "weapon" IS NOT NULL AND "targetGuid" != ''
     GROUP BY "weapon"`;
   const victimsByWeapon = new Map(
     victimRows.map((row) => [row.weapon ?? '', Number(row.victims ?? 0)] as const),
@@ -134,7 +136,9 @@ export async function getPlayerWeapons(guidRaw: string): Promise<PlayerWeaponBre
   const [killRows, deathRows] = await Promise.all([
     prisma.killEvent.groupBy({
       by: ['weapon'],
-      where: { isKill: true, originGuid: guid, weapon: { not: null } },
+      // targetGuid != '': excluye world/suicidio (son muertes propias, no kills
+      // con arma; evita la pseudo-arma "none" del log en el ranking).
+      where: { isKill: true, originGuid: guid, weapon: { not: null }, targetGuid: { not: '' } },
       _count: { _all: true },
       _sum: { damage: true },
     }),
@@ -206,7 +210,9 @@ export async function getPlayerMaps(guidRaw: string): Promise<PlayerMapsBreakdow
   if (!player) throw Errors.playerNotFound(guid);
 
   const events = await prisma.killEvent.findMany({
-    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], map: { not: null } },
+    // targetGuid != '': los world/suicidio no son kills de mapa (evita inflar
+    // kills/damageDealt del mapa con muertes propias).
+    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], map: { not: null }, targetGuid: { not: '' } },
     select: { map: true, gametype: true, originGuid: true, headshot: true, damage: true },
   });
 

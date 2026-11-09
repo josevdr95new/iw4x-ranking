@@ -186,24 +186,28 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
       : null;
   const medal = medalFor(player.skill, skillRank);
 
+  // Feed de eventos: EXCLUYE world/suicidio (targetGuid=''): son eventos de
+  // pérdida plana de skill, no kills reales (evita "kills" fantasma en el feed
+  // y en el agregado porServer).
   const events = await prisma.killEvent.findMany({
-    where: { OR: [{ originGuid: guid }, { targetGuid: guid }] },
+    where: { OR: [{ originGuid: guid }, { targetGuid: guid }], targetGuid: { not: '' } },
     orderBy: [{ timeEpoch: 'desc' }],
     take: 300,
   });
 
   // Favoritos del resumen + conteos de cuchillo (MOD_MELEE) computados al
   // vuelo sobre KillEvent: fuente única de verdad, sin counters derivables.
+  // Todos los agregados del ORIGIN filtran targetGuid != '' (sin world/suicidio).
   const [weaponRows, mapRows, aliases, knifeKills, knifeDeaths] = await Promise.all([
     prisma.killEvent.groupBy({
       by: ['weapon'],
-      where: { originGuid: guid, isKill: true, weapon: { not: null } },
+      where: { originGuid: guid, isKill: true, weapon: { not: null }, targetGuid: { not: '' } },
       _count: { _all: true },
       _sum: { damage: true },
     }),
     prisma.killEvent.groupBy({
       by: ['map'],
-      where: { originGuid: guid, isKill: true, map: { not: null } },
+      where: { originGuid: guid, isKill: true, map: { not: null }, targetGuid: { not: '' } },
       _count: { _all: true },
       _sum: { damage: true },
     }),
@@ -212,7 +216,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     // mismo filtro que los favoritos). Con el histórico borrado por db:zero el
     // conteo parte de 0 y crece con el juego (decisión del dueño: el histórico
     // pre-zero NO existe).
-    prisma.killEvent.count({ where: { originGuid: guid, isKill: true, mod: MELEE_MOD } }),
+    prisma.killEvent.count({ where: { originGuid: guid, isKill: true, mod: MELEE_MOD, targetGuid: { not: '' } } }),
     // Muertes a cuchillo: el jugador como VÍCTIMA de un evento MOD_MELEE.
     prisma.killEvent.count({ where: { targetGuid: guid, mod: MELEE_MOD } }),
   ]);

@@ -170,8 +170,9 @@ async function processBatch(batch: SkillEvent[]): Promise<void> {
     const victimGuid = event.targetGuid === '' ? null : event.targetGuid;
     const originElo = elo.get(event.originGuid) ?? SKILL.START;
 
-    // World/suicidio (defensivo: la ingesta por log no almacena estos casos):
-    // sin atacante no hay pool de quien robar → pérdida plana pequeña.
+    // World/suicidio (la ingesta del gamelog SÍ crea estos eventos desde
+    // 2026-11-08: originGuid = víctima, targetGuid = ''): sin atacante no hay
+    // pool de quien robar → pérdida plana pequeña (WORLD_LOSS).
     if (victimGuid === null || victimGuid === event.originGuid) {
       elo.set(event.originGuid, clampRound(originElo - SKILL.WORLD_LOSS));
       continue;

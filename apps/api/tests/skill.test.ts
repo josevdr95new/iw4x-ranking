@@ -465,3 +465,81 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
     expect(await skillsOf(['200000000000000078', BOT_1])).toEqual(before);
   });
 });
+
+// ── REGRESIÓN 2026-11-08: la VÍCTIMA SIEMPRE pierde su delta ────────────────
+// Reporte original: "40 kills → 1375.39; 1 muerte → SIGUE 1375.39". El evento
+// de esa muerte concreta resultó ser world (MOD_TRIGGER_HURT, sin atacante:
+// la ingesta no lo almacena como KillEvent → nada que aplicar). Estos tests
+// fijan el contrato del motor para el CASO QUE SÍ llega a la DB: cualquiera
+// que sea el rol del humano (atacante o víctima), la víctima del kill pierde
+// exactamente el delta aplicado (decayado contra bots, pleno contra humanos).
+describe('REGRESIÓN víctima siempre pierde |delta| (kill events almacenados)', () => {
+  it('bot mata a humano a skill medio-alto (~1335, el caso del reporte): la víctima PIERDE ELO decayado', async () => {
+    // Réplica del escenario reportado: humano ~1335.39 muere ante un bot ~1000.
+    // El decay usa el skill VIGENTE del HUMANO (aquí la VÍCTIMA) → ~0.97.
+    const VICTIM_ELO = 1335.39;
+    await seedDuel('200000000000000081', 'Admin', BOT_1, 'BotUno');
+    await prisma.player.update({ where: { guid: '200000000000000081' }, data: { skillElo: VICTIM_ELO, skill: VICTIM_ELO } });
+    await killEvent({ origin: BOT_1, target: '200000000000000081', epoch: 6001 });
+    await processSkillUpdates();
+
+    const decayed = killEloDelta(SKILL.START, VICTIM_ELO, PLAIN_EVENT) * botDecayFactor(VICTIM_ELO, BOT_DECAY);
+    expect(decayed).toBeGreaterThan(20); // sanidad: la pérdida es sustanciosa (NO ~0)
+    const humano = (await skillsOf(['200000000000000081']))[0]!;
+    const bot = (await skillsOf([BOT_1]))[0]!;
+    expect(humano.skillElo).toBe(round2(VICTIM_ELO - decayed)); // la víctima SÍ baja
+    expect(humano.skillElo).toBeLessThan(VICTIM_ELO);
+    expect(bot.skillElo).toBe(round2(SKILL.START + decayed)); // zero-sum decayado
+    expect(round2(VICTIM_ELO - humano.skillElo)).toBe(round2(bot.skillElo - SKILL.START));
+  });
+
+  it('bot mata a humano a ELO base: la víctima pierde el delta PLENO (factor 1.0 bajo soft)', async () => {
+    await seedDuel('200000000000000082', 'Novato', BOT_1, 'BotUno');
+    await killEvent({ origin: BOT_1, target: '200000000000000082', epoch: 6002 });
+    await processSkillUpdates();
+
+    const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT); // ~20, sin decay
+    const humano = (await skillsOf(['200000000000000082']))[0]!;
+    const bot = (await skillsOf([BOT_1]))[0]!;
+    expect(humano.skillElo).toBe(round2(SKILL.START - fullDelta));
+    expect(bot.skillElo).toBe(round2(SKILL.START + fullDelta));
+    expect(SKILL.START - humano.skillElo).toBeCloseTo(bot.skillElo - SKILL.START, 6);
+  });
+
+  it('invariante en los 3 combos de roles: humano→humano, humano→bot y bot→humano — la víctima SIEMPRE baja', async () => {
+    const H1 = '200000000000000083';
+    const H2 = '200000000000000084';
+
+    // humano → humano: víctima pierde el delta pleno (simétrico, zero-sum).
+    await seedDuel(H1, 'Atacante', H2, 'Víctima');
+    await killEvent({ origin: H1, target: H2, epoch: 6003 });
+    await processSkillUpdates();
+    const [atacante, victima] = await skillsOf([H1, H2]);
+    const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT);
+    expect(victima!.skillElo).toBe(round2(SKILL.START - fullDelta)); // la víctima BAJA
+    expect(atacante!.skillElo).toBe(round2(SKILL.START + fullDelta));
+    expect(round2(atacante!.skillElo + victima!.skillElo)).toBe(round2(2 * SKILL.START)); // zero-sum
+
+    // humano → bot: el bot (víctima) pierde el delta decayado por el skill del humano.
+    await seedDuel(H1, 'Grinder', BOT_1, 'BotUno');
+    await prisma.player.update({ where: { guid: H1 }, data: { skillElo: 1800, skill: 1800 } });
+    await killEvent({ origin: H1, target: BOT_1, epoch: 6004 });
+    await processSkillUpdates();
+    const decayedGrind = killEloDelta(1800, SKILL.START, PLAIN_EVENT) * botDecayFactor(1800, BOT_DECAY);
+    const botVictima = (await skillsOf([BOT_1]))[0]!;
+    expect(botVictima.skillElo).toBe(round2(SKILL.START - decayedGrind)); // el bot-víctima BAJA decayado
+    expect(botVictima.skillElo).toBeLessThan(SKILL.START);
+
+    // bot → humano: el humano (víctima) pierde el delta decayado por SU skill.
+    await seedDuel(H2, 'Victima1800', BOT_1, 'BotUno');
+    await prisma.player.update({ where: { guid: H2 }, data: { skillElo: 1800, skill: 1800 } });
+    await killEvent({ origin: BOT_1, target: H2, epoch: 6005 });
+    await processSkillUpdates();
+    const decayedLoss = killEloDelta(SKILL.START, 1800, PLAIN_EVENT) * botDecayFactor(1800, BOT_DECAY);
+    const humanoVictima = (await skillsOf([H2]))[0]!;
+    expect(humanoVictima.skillElo).toBe(round2(1800 - decayedLoss)); // la víctima BAJA decayado
+    expect(humanoVictima.skillElo).toBeLessThan(1800);
+    // "Pierde poco" relativo: el decay mordió (menos del delta pleno a ese skill).
+    expect(1800 - humanoVictima.skillElo).toBeLessThan(killEloDelta(SKILL.START, 1800, PLAIN_EVENT));
+  });
+});
