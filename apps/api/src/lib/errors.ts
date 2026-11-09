@@ -104,6 +104,22 @@ export const Errors = {
   internal(message = 'Error interno del servidor.'): AppError {
     return new AppError(500, 'INTERNAL', message);
   },
+  /** Dump de clases: el texto enviado no contiene la sección customClasses. */
+  classesNotFound(): AppError {
+    return new AppError(
+      400,
+      'CLASSES_NOT_FOUND',
+      'El texto enviado no contiene la sección customClasses: ejecuta /dumpPlayerData en la consola del juego y pega el contenido del console_mp.log.',
+    );
+  },
+  /** Dump de clases: la cuenta no tiene NINGÚN GUID vinculado a quién atribuir las clases. */
+  sinIdentity(): AppError {
+    return new AppError(
+      400,
+      'SIN_IDENTITY',
+      'Tu cuenta no tiene ningún GUID vinculado: vincula primero tu cuenta (POST /api/link/start) antes de subir clases.',
+    );
+  },
   /** Guid de BOT (rango 0xb07…): los bots no son cuentas, jamás se vinculan. */
   botGuidNotLinkable(guid: string): AppError {
     return new AppError(

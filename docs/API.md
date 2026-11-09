@@ -46,6 +46,8 @@ Todo error (4xx/5xx) responde:
 | `SAVE_NOT_FOUND`         | 404  | Cloud save: la cuenta nunca subió un save |
 | `SAVE_VERSION_NOT_FOUND` | 404  | Cloud save: la `version` pedida no existe o fue podada (se conservan las últimas 10) |
 | `SAVE_FILE_NOT_FOUND`    | 404  | Cloud save: ese `path` no está en la versión pedida |
+| `CLASSES_NOT_FOUND`      | 400  | Clases: el `dumpText` no contiene la sección `customClasses` (no es un dump de `/dumpPlayerData`) |
+| `SIN_IDENTITY`           | 400  | Clases: la cuenta no tiene ningún GUID vinculado a quién atribuir las clases |
 | `INTERNAL`               | 500  | Error no controlado |
 
 ---
@@ -314,7 +316,7 @@ Request:
 }
 ```
 
-Errores: `400 VALIDATION_ERROR` (path fuera de whitelist — incluye todo intento de traversal `../`, absolutos y backslashes —, >12 archivos, base64 >256KB, ruta duplicada), `400 SHA_MISMATCH` (hash declarado ≠ contenido real).
+Errores: `400 VALIDATION_ERROR` (path fuera de whitelist — incluye todo intento de traversal `../`, absolutos y backslashes —, >24 archivos, base64 >256KB, ruta duplicada), `400 SHA_MISMATCH` (hash declarado ≠ contenido real).
 
 Response **200** (nuevo snapshot):
 
@@ -718,7 +720,8 @@ Response **200** (ejemplo real):
       "headshots": 61,
       "level": 35,
       "lastConnection": "2026-11-02T21:59:06.318Z",
-      "linked": false
+      "linked": false,
+      "medal": { "tier": 1, "tierId": 1, "name": "RECLUTA", "assetId": "medal-1-recluta", "stars": 2, "globalRank": null, "eliteTop12": false }
     },
     {
       "rank": 2,
@@ -733,7 +736,8 @@ Response **200** (ejemplo real):
       "headshots": 48,
       "level": 70,
       "lastConnection": "2026-10-04T21:59:06.318Z",
-      "linked": true
+      "linked": true,
+      "medal": { "tier": 2, "tierId": 2, "name": "SOLDADO", "assetId": "medal-2-soldado", "stars": 2, "globalRank": null, "eliteTop12": false }
     }
   ]
 }
@@ -742,6 +746,8 @@ Response **200** (ejemplo real):
 Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo). `level` = nivel parseado del cloud save de la cuenta vinculada (`null` si ese guid nunca tuvo un save parseado con éxito; con `sort=level` los null van al final en `desc`) — ver "Parse del iw4x.stat" en la sección Cloud save.
 
 > **`rank` es SIEMPRE la posición GLOBAL** del jugador en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, el único match de un jugador que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
+
+> **`medal`** (ver sección "Medallas ELO"): medalla ELO derivada del skill actual de cada entrada. En tiers 1–7 trae `stars` 1–5; en LEYENDA (`tier: 8`) `stars` es `null` y trae `globalRank` + `eliteTop12`. La UI copia los PNG `medal.assetId + ".png"` de `apps/launcher/assets/medals/`.
 
 Errores: `400 VALIDATION_ERROR` (p. ej. `sort=hacks`).
 
@@ -796,6 +802,7 @@ Response **200** (ejemplo real, truncado):
     "linked": false
   },
   "rank": 1,
+  "medal": { "tier": 1, "tierId": 1, "name": "RECLUTA", "assetId": "medal-1-recluta", "stars": 2, "globalRank": null, "eliteTop12": false },
   "recentEvents": [
     {
       "id": 8925,
@@ -819,6 +826,7 @@ Response **200** (ejemplo real, truncado):
 Notas para el frontend:
 
 - `rank`: posición global del jugador con el **mismo criterio por defecto del leaderboard** (`sort=kills&order=desc`, empate por `name` asc). Es `null` solo si el jugador no clasifica en ese ranking (con los criterios actuales, todo jugador sincronizado tiene rank). Evita hacer lookup al top-N para calcular la posición.
+- `medal` (ver sección "Medallas ELO"): medalla ELO derivada del skill ACTUAL del jugador (nunca persistida). En LEYENDA (`tier: 8`, skill 2050+): `stars: null` + `globalRank` (posición global por skill entre humanos con actividad ELO) + `eliteTop12` (rank ≤ 12). En tiers 1–7: `stars` 1–5 y `globalRank: null`. Descensos automáticos: el ELO baja con muertes y la medalla se recalcula en cada lectura.
 - `recentEvents`: últimos 20 eventos del jugador, más reciente primero. `direction` es `kill` (el jugador fue el origen) o `death` (fue el objetivo). `isKill: false` = evento no letal registrado por IW4MAdmin.
 - `weapon`: con fuente IW4MAdmin es el **id crudo** (número como string); con fuente log (games_mp.log) es el **nombre base del arma** (`ak47`, `m1014`, ...). El mapping a nombre legible no está implementado aún.
 - `server` puede ser `null` si la fuente no expone servidor. Con fuente log es el valor de `GAME_SERVER_ADDRESS`.
@@ -826,6 +834,7 @@ Notas para el frontend:
 - `timePlayed` (fuente log) = suma de sesiones reales J→Q (las abiertas cuentan como en curso, cap 4h).
 - `linked`: si el GUID tiene cuenta web vinculada.
 - `save` (cloud save parseado): `{ level, prestige, xp, parsedAt }` con la progresión del `iw4x.stat` de la cuenta vinculada; `null` si el guid nunca tuvo un save parseado con éxito (sin cuenta vinculada, o el último blob no era parseable). `parsedAt` = cuándo se parseó por última vez con éxito (ISO). Detalle de confianza/sanity: ver "Parse del iw4x.stat" en la sección Cloud save.
+- `classes` / `classesUpdatedAt`: las 15 clases de loadout (customClasses) que el dueño subió desde el juego con `/dumpPlayerData` (ver sección "Clases de loadout"); `null` si nunca subió un dump.
 - `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres: si el leaderboard muestra dos filas con el mismo displayName (son 2 entidades/GUIDs distintas, es verdad), el perfil con `aliases` desambigua quién es quién.
 
 ```json
@@ -943,6 +952,85 @@ Errores: `400 VALIDATION_ERROR` (sort inválido, page/pageSize fuera de rango).
 
 ---
 
+## Clases de loadout (dump `/dumpPlayerData`)
+
+Las clases (customClasses 0-14: armas, attachments, camos, perks, granadas) viven en la región 3643+ del `iw4x.stat` — **inaccesible por GSC server-side** (`GetStat` acotado a índices 0..3499) y el blob está cifrado. La vía probada (same que usa la comunidad): el **CLIENTE** ejecuta `/dumpPlayerData` en su consola del juego → el árbol DDL completo queda en su `console_mp.log` → ese TEXTO se envía a la API, que lo parsea y guarda.
+
+### Instrucciones para el dueño (una vez por PC/cuenta)
+
+1. Arranca el juego (con tu cuenta ya vinculada en la web).
+2. Abre la consola (`~`) y ejecuta: `/dumpPlayerData`
+3. Abre `%LOCALAPPDATA%\iw4x\console_mp.log`, cópialo **entero** (no hace falta recortar: el parser busca la sección `customClasses`).
+4. Pega el contenido como `dumpText` en `POST /api/players/classes` con tu JWT (el launcher/web puede hacerlo por ti).
+
+### `POST /api/players/classes` 🔒
+
+Request:
+
+```json
+{ "dumpText": "[  18215383]     customClasses\n[  18215383]       [0]\n[  18215383]         _deathstreak\t= specialty_null\n..." }
+```
+
+- `dumpText`: string 1..900.000 chars. Puede ser el `console_mp.log` entero (con timestamps de consola, basura alrededor, otros comandos) o solo la sección `customClasses`. También se acepta el formato CFG histórico (líneas `setPlayerData customClasses <idx> <field> ...`, el que genera el editor web); si ambos aparecen, el árbol gana.
+- NO se validan enums: armas/camos/perks de mods (ej. `peacekeeper`, `ak47classic`) se guardan tal cual — el dump es verdad del cliente. Los códigos de color `^N` del name se preservan en crudo.
+
+Response **200**:
+
+```json
+{
+  "guid": "341831007923465200",
+  "classesUpdatedAt": "2026-11-08T22:00:00.000Z",
+  "count": 15,
+  "classes": [
+    {
+      "slot": 0,
+      "name": "THE NOOB2",
+      "inUse": true,
+      "primaryWeapon": "ump45",
+      "primaryAttach1": "silencer",
+      "primaryAttach2": "none",
+      "primaryCamo": "none",
+      "secondaryWeapon": "beretta393",
+      "secondaryAttach1": "silencer",
+      "secondaryAttach2": "none",
+      "secondaryCamo": "none",
+      "equipment": "frag_grenade_mp",
+      "specialGrenade": "concussion_grenade",
+      "perk1": "specialty_scavenger",
+      "perk2": "specialty_coldblooded",
+      "perk3": "specialty_heartbreaker",
+      "deathstreak": "specialty_combathigh"
+    }
+  ]
+}
+```
+
+Notas del shape:
+
+- `classes` contiene SIEMPRE 15 slots (los que no vienen en el dump van como defaults de producción: nombre `Custom Class N`, `inUse: false`, m4/usp/defaults del juego). `count` = clases realmente halladas en el dump (0 = dump válido pero vacío).
+- `equipment` es el LETHAL (perks[0] del dump: `frag_grenade_mp`, `semtex_mp`, …); `deathstreak` es perks[4] (`specialty_null` = ninguno). `specialGrenade` va SIN sufijo `_mp`.
+- Slot vacío válido: una clase sin `name` y sin `inUse` en el dump se guarda como default (`inUse: false`), NO es error.
+
+Atribución al jugador:
+
+- La cuenta del token debe tener **exactamente 1 GUID vinculado** → se guardan ahí.
+- **0 GUIDs** → `400 SIN_IDENTITY`.
+- **N GUIDs** (PCs compartidas) → se guardan en el de `lastConnection` **más reciente** (el guid que el dueño usó por última vez es el que trajo esas clases).
+- Re-post = sobrescribe (el último dump gana) y refresca `classesUpdatedAt`.
+
+Errores: `400 VALIDATION_ERROR` (sin `dumpText`, vacío o >900k chars), `400 CLASSES_NOT_FOUND` (el texto no es un dump), `400 SIN_IDENTITY`, `401 UNAUTHORIZED`.
+
+### Exposición
+
+El perfil `GET /api/players/:guid` incluye en `player`:
+
+```json
+"classes": [ { "slot": 0, "name": "THE NOOB2", "inUse": true, "primaryWeapon": "ump45", "...": "..." } ],
+"classesUpdatedAt": "2026-11-08T22:00:00.000Z"
+```
+
+`classes: null` + `classesUpdatedAt: null` si el guid nunca subió un dump (200 normal, no 404). Nota frontend: los `name` pueden traer códigos de color `^N` (`^1` rojo, `^2` verde, `^7` blanco, …) — parsearlos solo para DISPLAY, guardarlos tal cual.
+
 ## skill (ELO real por eventos)
 
 `skill` sigue siendo un `number` en leaderboard/perfil/players/:guid (shape sin cambios), pero ya NO es una heurística por agregados: es **ELO calculado sobre KillEvents** (fuente única de stats = log / IW4MAdmin; IW4MAdmin NUNCA escribe en esta DB). Implementación: `apps/api/src/services/skill/`.
@@ -954,14 +1042,70 @@ Fórmula resumida (constantes en `apps/api/src/services/skill/elo.ts`):
 - `mult` (bonus del atacante): headshot ×1.25; hitloc difícil (`neck`) ×1.1; daño sobre 100: +1% cada 10 dmg, cap +25%. Combinación acotada por 1.6 (guard).
 - Teamkill: penalidad plana de 24 al atacante (la víctima no gana nada → sin farming de compañeros).
 - World/suicidio (defensivo; la ingesta por log no almacena estos eventos): pérdida plana de 4.
+- **Decay contra BOTS (anti-farmeo)**: si uno de los dos lados del kill es un bot (rango `0xb07…`), el delta del evento se multiplica por `botFactor(skill VIGENTE del humano)`: **1.0 con skill ≤ 1300**, **lineal hasta 0.15 con skill ≥ 2400**, clamp 0.15 arriba. Env: `BOT_ELO_DECAY_MIN=0.15`, `BOT_ELO_DECAY_SOFT=1300`, `BOT_ELO_DECAY_HARD=2400`. El bot gana/pierde ESE MISMO delta decayado (zero-sum); **contra HUMANOS el decay NO aplica** (ELO pleno solo jugando contra personas) y bot-vs-bot tampoco. Ejemplos con los defaults: skill 1200 vs bot → 100% (~+20/kill); 1800 → 61.4% (~+12); 2000 → 45.9% (~+9); 2400+ → 15% (~+3). El `recompute:skill` lo reproduce NATURALMENTE: el factor se calcula con el skill en memoria del momento del evento, y el reprocess secuencial reconstruye los mismos skills intermedios → mismos factores → mismo skill final (función pura `botDecayFactor` en `src/services/skill/elo.ts`, aplicada en `skill.service.ts`).
 - ELO base con **floor 150** y **cap 2500**; start 1000. Determinista: mismo set de eventos en el mismo orden (`timeEpoch ASC, id ASC`) → mismo skill.
 - Valor expuesto: `skill = skillElo + bonus de racha` (+2 por kill de la mejor racha, cap racha 20 → máximo +40). **Rango típico expuesto: ~150–2540**, con la mayoría de la población entre ~850 y ~1600 (útil para el tooltip del frontend).
 
-Procesamiento **incremental e idempotente**: cada sync aplica SOLO los KillEvent con `skillProcessed = false` (los nuevos), en orden cronológico, y los marca en la misma transacción (lotes de 2000). Los players sin eventos se inicializan a 1000.
+Procesamiento **incremental e idempotente**: cada sync aplica SOLO los eventos con `skillProcessed = false` (los nuevos), en orden cronológico sobre el STREAM COMBINADO KillEvent + MatchBonusEvent (orden `(timeEpoch ASC, id ASC)`), y los marca en la misma transacción (lotes de 2000 kills / 500 bonus). Los players sin eventos se inicializan a 1000.
 
-Recompute FROM SCRATCH (tras un reset de DB o recalibración del modelo): `npm run recompute:skill` desde la raíz del monorepo — desmarca TODOS los eventos, resetea `skillElo` y reprocesa el histórico completo en orden. El bootstrap de datos previos al deploy fue automático: los eventos existentes quedaron con `skillProcessed=false` por default y el primer sync los procesó todos.
+### Bonus top-3 de fin de partida (MatchBonusEvent)
+
+Al detectar `ShutdownGame`, la ingesta del games_mp.log premia el **top-3 de KILLS de esa partida entre HUMANOS**: **1º +15, 2º +10, 3º +5** de ELO directo (constantes `MATCH_BONUS_*` en `src/services/skill/elo.ts`; ranking determinista en `src/services/skill/match-bonus.ts`). El log del server registra: `Bonus top-3 partida: 1º <nick> +15, 2º <nick> +10, 3º <nick> +5`.
+
+Condiciones anti-abuso (todas obligatorias):
+
+- La partida duró **≥ 3 minutos de LOG** (segundo de log del `InitGame` → `ShutdownGame`, prefijos `m:ss`). Si el reader no vio el `InitGame` (arranque a mitad de partida), no hay bonus.
+- **≥ 2 humanos participantes** (líneas J/K de la partida). Partidas contra puros bots no premian.
+- Cada premiado requiere **≥ 5 kills** en la partida; los **bots NUNCA califican** (el tally por partida solo acumula humanos; el guid `botN`/rango `0xb07…` se excluye).
+- Desempate: `kills DESC → deaths ASC → name ASC → guid ASC`.
+- El tally **se reinicia en cada `InitGame`**: cero leaks entre mapas de la rotación.
+
+Implementación: cada premio se persiste como una fila en `MatchBonusEvent` (una por jugador premiado: `guid`, `position` 1|2|3, `delta`, `killsInMatch`, `humansInMatch`, `matchDurationSec`, mapa/modo/server, `skillProcessed=false`). El motor de skill los consume en el MISMO stream cronológico que los KillEvent — el bonus de una partida siempre ordena DESPUÉS de los kills de su partida (se crea al detectar el ShutdownGame) y ANTES de los kills de la partida siguiente — y aplica el delta directo sobre el ELO base (con floor/cap como siempre).
+
+Recompute FROM SCRATCH (tras un reset de DB o recalibración del modelo): `npm run recompute:skill` desde la raíz del monorepo — desmarca TODOS los KillEvent **y MatchBonusEvent**, resetea `skillElo` y reprocesa el histórico completo en orden. **Reproducibilidad**: mismo set de partidas → mismos MatchBonusEvent → mismos deltas → mismo skill (el bonus no se recalcula ni duplica: se re-procesan los eventos ya existentes). El bootstrap de datos previos al deploy fue automático: los eventos existentes quedaron con `skillProcessed=false` por default y el primer sync los procesó todos.
 
 BOTS (`+spawnBot`): el guid literal `botN` que escribe el engine en games_mp.log se mapea DETERMINISTA a un guid del rango dedicado `0xb07…` → cada bot tiene perfil estable que acumula stats y participa del ELO como cualquier player.
+
+---
+
+## Medallas ELO (tiers + estrellas + LEYENDA)
+
+**Derivadas, sin persistencia**: la medalla se calcula SIEMPRE desde el skill actual (`medalFor(skill, globalRank)` en `apps/api/src/lib/medals.ts`); nunca se guarda como estado. Como el ELO ya baja con las muertes (delta simétrico), los **descensos son automáticos**: al cruzar un umbral hacia abajo, la medalla baja de tier/estrella sin migración alguna. Implementación: `apps/api/src/lib/medals.ts` (puro, testeado); assets PNG en `apps/launcher/assets/medals/` (la UI los copia; el backend SOLO manda `assetId`).
+
+Los 8 tiers (constante exportada `MEDAL_TIERS` — la UI consume nombres/assets de ahí). **Escala dura: 200 puntos por tier, LEYENDA en 2400+** (el cap del ELO base 2500 NO cambia):
+
+| tierId | Nombre | Skill | assetId | Estrellas |
+| --- | --- | --- | --- | --- |
+| 1 | RECLUTA | 1000–1199 | `medal-1-recluta` | 1–5 |
+| 2 | SOLDADO | 1200–1399 | `medal-2-soldado` | 1–5 |
+| 3 | CABO | 1400–1599 | `medal-3-cabo` | 1–5 |
+| 4 | SARGENTO | 1600–1799 | `medal-4-sargento` | 1–5 |
+| 5 | TENIENTE | 1800–1999 | `medal-5-teniente` | 1–5 |
+| 6 | CAPITÁN | 2000–2199 | `medal-6-capitan` | 1–5 |
+| 7 | COMANDANTE | 2200–2399 | `medal-7-comandante` | 1–5 |
+| 8 | LEYENDA | 2400+ | `medal-8-leyenda` | — (muestra `globalRank`) |
+
+- **Estrellas (tiers 1–7)**: progreso continuo dentro del tier: `stars = min(5, floor((skill − tierMin) / 200 × 5) + 1)` → 1★ al entrar al tier, 5★ cerca del techo (≥ tierMin + 160). Skill por debajo de 1000 (floor 150): tier 1 con 1★ (clamp, sin tier 0).
+- **Llegar arriba vs BOTS es MUY lento por diseño** (ver "Decay contra BOTS" en la sección skill): contra bots el kill se decae desde skill 1300 (61% a 1800, 46% a 2000, 15% a 2400+) → en los últimos tiers un kill vs bot vale ~4-8 puntos. Contra HUMANOS el ELO es pleno: la escalera se sube jugando contra personas.
+- **LEYENDA (tier 8)**: SIN estrellas (`stars: null`); en su lugar expone `globalRank` (posición global por skill) y `eliteTop12` (`true` si `globalRank ≤ 12`).
+- **Población del `globalRank`** (por skill): solo humanos (`isBot=false`) que realmente jugaron: `kills ≥ 1` O `skillElo ≠ 1000` (su ELO se movió). Excluye a quienes solo se conectaron (skill base exacto, 0 kills) y a los bots. Orden: `skill DESC` (el mismo número expuesto que la medalla → siempre coherentes), empate `name ASC`. Implementación: `getSkillGlobalRanksByGuid` / `computeSkillGlobalRank` en `src/services/ranking.service.ts`.
+
+Shape del objeto `medal` (perfil y cada entrada del leaderboard):
+
+```json
+{
+  "tier": 8,
+  "tierId": 8,
+  "name": "LEYENDA",
+  "assetId": "medal-8-leyenda",
+  "stars": null,
+  "globalRank": 1,
+  "eliteTop12": true
+}
+```
+
+- En tiers 1–7: `stars` 1–5, `globalRank: null`, `eliteTop12: false` (el rank solo es cosa de LEYENDA; el backend ni siquiera consulta la población salvo que haya LEYENDAS en la página).
+- Nota para el frontend: `assetId + ".png"` dentro de la carpeta de medallas del launcher. El `tier`/`tierId` son el mismo valor (1..8).
 
 ---
 

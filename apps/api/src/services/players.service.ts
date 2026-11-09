@@ -7,6 +7,8 @@ import { MEDAL_LEGEND_MIN_SKILL, medalFor, type Medal } from '../lib/medals.js';
 import { computeDefaultRank, computeSkillGlobalRank } from './ranking.service.js';
 import { getPlayerAliases, type PlayerAliasDto } from './alias.service.js';
 import { MELEE_MOD } from './sync/gamelog.reader.js';
+import { getStoredPlayerClasses } from './classes.service.js';
+import type { ParsedLoadoutClass } from '../lib/classes/parse-console-log.js';
 
 type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true } } } }>;
 
@@ -49,6 +51,13 @@ export interface PlayerDto {
    * con éxito (sin cuenta vinculada o último blob no parseable). Ver docs/API.md.
    */
   save: { level: number | null; prestige: number | null; xp: number | null; parsedAt: string } | null;
+  /**
+   * Clases de loadout (customClasses 0-14) parseadas del dump `/dumpPlayerData`
+   * que el dueño subió (POST /api/players/classes); null si nunca subió. Ver docs/API.md.
+   */
+  classes: ParsedLoadoutClass[] | null;
+  /** Cuándo se guardaron las clases por última vez (ISO); null si nunca. */
+  classesUpdatedAt: string | null;
   firstConnection: string | null;
   lastConnection: string | null;
   linked: boolean;
@@ -142,6 +151,7 @@ function toPlayerDto(
       player.saveParsedAt !== null
         ? { level: player.saveLevel ?? null, prestige: player.savePrestige ?? null, xp: player.saveXp ?? null, parsedAt: player.saveParsedAt.toISOString() }
         : null,
+    ...getStoredPlayerClasses(player.classesJson, player.classesUpdatedAt),
     firstConnection: player.firstConnection?.toISOString() ?? null,
     lastConnection: player.lastConnection?.toISOString() ?? null,
     linked: player.accountLinks.length > 0,

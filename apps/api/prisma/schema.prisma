@@ -79,6 +79,13 @@ model Player {
   saveLevel    Int?
   savePrestige Int?
   saveParsedAt DateTime?
+  /// Clases de loadout (customClasses 0-14) parseadas del dump
+  /// `/dumpPlayerData` del CLIENTE (console_mp.log → POST /api/players/classes).
+  /// JSON del array COMPLETO (15 slots; los vacíos con inUse=false y defaults).
+  /// El blob iw4x.stat está cifrado y la región de clases (offset 3643) es
+  /// inaccesible por GSC: la única fuente fiable es el dump de texto.
+  classesJson     String?
+  classesUpdatedAt DateTime?
   firstConnection DateTime?
   lastConnection  DateTime?
   updatedAt       DateTime  @updatedAt
