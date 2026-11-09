@@ -2,10 +2,9 @@
  * Tests de la INGESTA LIVE (snapshot GSC del server) + DETECTOR unlockstats
  * + endpoints /api/admin/server/livestats y /api/admin/server/anti-unlock.
  *
- * Fixture: archivo sintético con el MISMO formato que emite
- * apps/api/gsc/iw4x-ranking.gsc (cabecera # + líneas
- * guid;xp;prestigio;kills;deaths;headshots;timePlayed;name), con humanos,
- * bots y líneas basura.
+ * Fixture: archivo sintético con los formatos que emite
+ * apps/api/gsc/iw4x-ranking.gsc — v4 calibrado (`guid;xp;kills;name`, índices
+ * 2266/2059) y v2 legacy de 8 campos — con humanos, bots y líneas basura.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -101,16 +100,118 @@ describe('parseLiveStatsText', () => {
   it('descarga la línea ENTERA si cualquier campo no pasa sanity', () => {
     const entries = parseLiveStatsText(
       [
+        '#iw4x-ranking v1', // cabecera legacy: exige 8 campos (4..7 → fuera)
         line(UNLINKED_DEC, 99999999), // xp > MAX
         line(UNLINKED_DEC, 1000, 99), // prestigio > 10
         line(UNLINKED_DEC, 1000, 0, -5), // kills negativos
-        `${UNLINKED_DEC};1000;0;1;1`, // sin campos suficientes
+        `${UNLINKED_DEC};1000;0;1;1`, // sin campos suficientes (5 < 8)
         line(UNLINKED_DEC, 12345678901234), // kills > cap
         line(UNLINKED_DEC, 1000), // válida
       ].join('\n'),
     );
     expect(entries).toHaveLength(1);
     expect(entries[0]?.xp).toBe(1000);
+  });
+});
+
+// ── Parser v4 (formato corto guid;xp;kills;name del GSC v4 calibrado) ───────
+
+describe('parseLiveStatsText v4 (guid;xp;kills;name)', () => {
+  it('parsea el formato v4 por cabecera y deja null lo que no trae', () => {
+    const entries = parseLiveStatsText(['#iw4x-ranking v4', `${UNLINKED_DEC};5120;14;Owner`].join('\n'));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual({
+      guid: UNLINKED_DEC,
+      name: 'Owner',
+      xp: 5120,
+      kills: 14,
+      prestige: null,
+      deaths: null,
+      headshots: null,
+      timePlayed: null,
+    });
+  });
+
+  it('AUTODETECTA v4 sin cabecera (4 campos) y toma el name completo con ";"', () => {
+    const entries = parseLiveStatsText([`${HEX_GUID};5120;14;Guy;Malone`, 'basura', `${UNLINKED_DEC};1;2`].join('\n'));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ guid: HEX_AS_DEC, xp: 5120, kills: 14, name: 'Guy;Malone' });
+  });
+
+  it('acepta AMBOS formatos mezclados en el mismo snapshot (transición v2→v4)', () => {
+    const entries = parseLiveStatsText(
+      ['#iw4x-ranking v4', `${UNLINKED_DEC};5120;14;V4Owner`, line(HEX_GUID, 100000, 3, 11, 22, 33, 444, 'Legacy')].join('\n'),
+    );
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ guid: UNLINKED_DEC, xp: 5120, kills: 14, prestige: null });
+    expect(entries[1]).toMatchObject({ guid: HEX_AS_DEC, xp: 100000, prestige: 3, kills: 11, deaths: 22, headshots: 33, timePlayed: 444 });
+  });
+
+  it('rechaza basura v4: sanity XP/kills, <4 campos, name vacío y bots', () => {
+    const entries = parseLiveStatsText(
+      [
+        `${UNLINKED_DEC};${LEVEL_XP_TABLE[LEVEL_XP_TABLE.length - 1] + 1};5;Max`, // xp > 2516000
+        `${UNLINKED_DEC};5120;-3;Neg`, // kills negativos
+        `${UNLINKED_DEC};5120;14`, // 3 campos: sin name
+        `${UNLINKED_DEC};5120;14;`, // name vacío
+        `bot5;5120;14;Bot`, // bot por prefijo
+        `${UNLINKED_DEC};5120;14;Válido`,
+      ].join('\n'),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.name).toBe('Válido');
+  });
+
+  it('la cabecera v4 no contamina líneas legacy de 8 campos del mismo archivo y viceversa', () => {
+    const entries = parseLiveStatsText(
+      ['#iw4x-ranking v4', line(UNLINKED_DEC, 1000, 2, 11, 22, 33, 444, 'OchoCampos')].join('\n'),
+    );
+    // 8 campos bajo cabecera v4: cae al branch legacy por >= 8 campos → se parsea completo.
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ xp: 1000, prestige: 2, kills: 11, timePlayed: 444 });
+  });
+});
+
+// ── Ingesta v4 → Player ─────────────────────────────────────────────────────
+
+describe('ingesta live v4 (runLiveStatsTick)', () => {
+  const T0 = 1_700_000_000_000;
+
+  it('línea v4 real del dueño (xp 5120 → LVL 4 derivado) actualiza saveXp/saveLevel', async () => {
+    writeSnapshot(['#iw4x-ranking v4', `${UNLINKED_DEC};5120;14;Owner`]);
+    const result = await runLiveStatsTick({ file: FIXTURE_FILE, now: T0 });
+
+    expect(result.read).toBe(true);
+    expect(result.entries).toBe(1);
+    expect(result.playersUpdated).toBe(1);
+
+    const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    expect(player?.saveXp).toBe(5120);
+    expect(player?.saveLevel).toBe(4); // Private First Class, deriva de levelFromXp(5120)
+    expect(player?.saveParsedAt).not.toBeNull();
+
+    const view = getLiveStatsSnapshot()?.players[0];
+    expect(view).toMatchObject({ guid: UNLINKED_DEC, xp: 5120, kills: 14, level: 4, prestige: 0 });
+  });
+
+  it('v4 NO pisa savePrestige existente (el formato no lo trae)', async () => {
+    await prisma.player.create({ data: { guid: UNLINKED_DEC, name: 'Con Prestigio', savePrestige: 5, saveXp: 1000, saveParsedAt: new Date(T0 - 60_000) } });
+    writeSnapshot(['#iw4x-ranking v4', `${UNLINKED_DEC};5120;14;Owner`]);
+    await runLiveStatsTick({ file: FIXTURE_FILE, now: T0 });
+
+    const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    expect(player?.saveXp).toBe(5120); // xp actualizada
+    expect(player?.savePrestige).toBe(5); // prestigio intacto
+  });
+
+  it('legacy v2 (8 campos) SIGUE pisando savePrestige (regresión del formato viejo)', async () => {
+    await prisma.player.create({ data: { guid: UNLINKED_DEC, name: 'Con Prestigio', savePrestige: 5, saveXp: 1000, saveParsedAt: new Date(T0 - 60_000) } });
+    writeSnapshot([line(UNLINKED_DEC, 5120, 2)]);
+    await runLiveStatsTick({ file: FIXTURE_FILE, now: T0 });
+
+    const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    expect(player?.saveXp).toBe(5120);
+    expect(player?.savePrestige).toBe(2); // la línea legacy sí lo trae
   });
 });
 

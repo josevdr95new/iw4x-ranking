@@ -2,11 +2,22 @@
  * INGESTA LIVE de stats del server dedicado IW4x + DETECTOR unlockstats.
  *
  * Fuente: el script GSC server-side `apps/api/gsc/iw4x-ranking.gsc` (instalado
- * en `<raíz del juego>/userraw/scripts/`) lee con `GetStat` (SV_GetClientStat,
- * mismos índices que src/lib/save-parser/parse-stat-blob.ts) las stats
- * DESCIFRADAS de cada cliente conectado y REESCRIBE cada ~60s un snapshot en
- * `userraw/scriptdata/iw4x-ranking.json` (FileWrite relativo a userraw):
+ * en `<raíz del juego>/userraw/scripts/`) lee con `GetStat` (SV_GetClientStat)
+ * las stats DESCIFRADAS de cada cliente conectado y REESCRIBE cada ~60s un
+ * snapshot en `userraw/scriptdata/iw4x-ranking.json` (FileWrite relativo a
+ * userraw). FORMATOS de línea aceptados (autodetectados por cabecera
+ * `#iw4x-ranking vN` o, en su ausencia, por cantidad de campos; name SIEMPRE
+ * al final porque los nicks pueden traer ';'):
  *
+ *   v4 (GSC >= v4, índices CALIBRADOS empíricamente: XP=2266, KILLS=2059):
+ *   #iw4x-ranking v4
+ *   <guid>;<xp>;<kills>;<name>
+ *   → prestige/deaths/headshots/timePlayed quedan null (el formato no los
+ *     trae; los índices del grupo =1 siguen sin desambiguar). El upsert NO
+ *     pisa savePrestige cuando es null.
+ *
+ *   v2 legacy (GSC <= v3, índices viejos que leían basura; se mantiene por
+ *   compatibilidad con snapshots viejos / rollbacks del script):
  *   #iw4x-ranking v1
  *   <guid>;<xp>;<prestige>;<kills>;<deaths>;<headshots>;<timePlayed>;<name>
  *
@@ -65,12 +76,16 @@ export interface LiveStatEntry {
   /** Nombre RAW (puede traer códigos de color ^X). */
   name: string;
   xp: number;
-  prestige: number;
   kills: number;
-  deaths: number;
-  headshots: number;
-  /** Minutos totales (índice 2324). */
-  timePlayed: number;
+  /**
+   * null = el formato de línea NO lo trae (v4 solo calibró XP/kills; el grupo
+   * =1 {2490,2511,2515,2556,2572,2593,2594,3205} sigue sin desambiguar).
+   */
+  prestige: number | null;
+  deaths: number | null;
+  headshots: number | null;
+  /** Minutos totales (índice 2324; solo presente en líneas legacy v2). */
+  timePlayed: number | null;
 }
 
 /** Sanity por campo: TODO el campo numérico debe ser un entero en rango. */
@@ -96,23 +111,66 @@ function normalizeGuid(raw: string): string | null {
 }
 
 /**
+ * Última cabecera `#iw4x-ranking vN` vista en el texto (determina el formato
+ * de las líneas siguientes). null = sin cabecera → se autodetecta por
+ * cantidad de campos.
+ */
+function parseHeaderVersion(trimmed: string): 'v4' | 'v2' | null {
+  const m = trimmed.match(/^#iw4x-ranking\s+v(\d+)$/i);
+  if (m === null) return null;
+  return m[1] === '4' ? 'v4' : 'v2';
+}
+
+/**
  * Parsea el contenido crudo del snapshot. Tolerante: líneas vacías y `#`
- * comentarios se ignoran; el name es TODO lo que sigue al 7mo ';' (los nicks
- * pueden contener ';'). Una línea con CUALQUIER campo fuera de sanity se
- * descarga ENTERA (conservador: nunca se actualiza a medias).
+ * comentarios se ignoran (una cabecera `#iw4x-ranking v4|v1|v2` fija el
+ * formato de las líneas que siguen); el name es TODO lo que sigue al último
+ * campo fijo (los nicks pueden contener ';'). Una línea con CUALQUIER campo
+ * fuera de sanity se descarga ENTERA (conservador: nunca se actualiza a
+ * medias).
+ *
+ * Formatos (ver cabecera del archivo):
+ *  - v4: `guid;xp;kills;name` → prestige/deaths/headshots/timePlayed = null.
+ *  - v2 legacy: `guid;xp;prestige;kills;deaths;headshots;timePlayed;name`.
+ * Detección por LÍNEA: >= 8 campos → legacy (inequívoco, gana a la cabecera);
+ * 4..7 campos → v4 solo si no hay cabecera v2 activa; con cabecera
+ * `#iw4x-ranking v2|v1` se exige legacy y `v4` permite líneas cortas.
  */
 export function parseLiveStatsText(text: string): LiveStatEntry[] {
   const entries: LiveStatEntry[] = [];
+  let header: 'v4' | 'v2' | null = null;
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    if (trimmed === '') continue;
+    if (trimmed.startsWith('#')) {
+      const seen = parseHeaderVersion(trimmed);
+      if (seen !== null) header = seen;
+      continue;
+    }
     const parts = trimmed.split(';');
-    // mínimo: guid + 6 números + name (name puede venir con ';' extra)
-    if (parts.length < 8) continue;
+    // PRECEDENCIA: la cantidad de campos GANA a la cabecera. Una línea con
+    // >= 8 partes es inequívocamente legacy (8 campos fijos + name); 4..7
+    // campos solo pueden ser v4 (salvo cabecera v2, que exige 8 → skip).
+    const isLegacy = parts.length >= 8;
+    const isV4 = !isLegacy && header !== 'v2';
 
     const guid = normalizeGuid(parts[0] ?? '');
     if (guid === null) continue;
 
+    if (isV4) {
+      // mínimo: guid + xp + kills + name (name puede venir con ';' extra)
+      if (parts.length < 4) continue;
+      const xp = saneInt(parts[1] ?? '', 0, UNLOCKSTATS_MAX_XP);
+      const kills = saneInt(parts[2] ?? '', 0, CAREER_CAP);
+      if (xp === null || kills === null) continue; // campo insane → línea entera fuera
+      const name = parts.slice(3).join(';').trim();
+      if (name === '') continue;
+      entries.push({ guid, name, xp, kills, prestige: null, deaths: null, headshots: null, timePlayed: null });
+      continue;
+    }
+
+    // v2 legacy: mínimo guid + 6 números + name.
+    if (parts.length < 8) continue;
     const xp = saneInt(parts[1] ?? '', 0, UNLOCKSTATS_MAX_XP);
     const prestige = saneInt(parts[2] ?? '', 0, 10);
     const kills = saneInt(parts[3] ?? '', 0, CAREER_CAP);
@@ -348,27 +406,23 @@ export async function runLiveStatsTick(options: { now?: number; file?: string } 
 
     // Persistencia: upsert ÚNICO. NUNCA se tocan kills/deaths/skill (esos son
     // agregados del ranking por log) ni timePlayed/connections: solo name +
-    // progresión save*. Aplica a guids CON o SIN AccountLink (el perfil y el
-    // leaderboard exponen save* de cualquier player; la fuente más reciente
-    // gana por saveParsedAt).
+    // progresión save*. savePrestige SOLO si la línea lo trajo (v2 legacy):
+    // en v4 el formato no lo trae → no se pisa el valor del cloud save.
+    // Aplica a guids CON o SIN AccountLink (el perfil y el leaderboard exponen
+    // save* de cualquier player; la fuente más reciente gana por saveParsedAt).
+    // levelFromXp nunca da null aquí: la sanity ya acotó xp a 0..2516000.
+    const saveProgress = {
+      name: entry.name,
+      saveXp: entry.xp,
+      saveLevel: levelFromXp(entry.xp) ?? 1,
+      ...(entry.prestige !== null ? { savePrestige: entry.prestige } : {}),
+      saveParsedAt: new Date(now),
+    };
     try {
       await prisma.player.upsert({
         where: { guid: entry.guid },
-        create: {
-          guid: entry.guid,
-          name: entry.name,
-          saveXp: entry.xp,
-          saveLevel: levelFromXp(entry.xp),
-          savePrestige: entry.prestige,
-          saveParsedAt: new Date(now),
-        },
-        update: {
-          name: entry.name,
-          saveXp: entry.xp,
-          saveLevel: levelFromXp(entry.xp),
-          savePrestige: entry.prestige,
-          saveParsedAt: new Date(now),
-        },
+        create: { guid: entry.guid, ...saveProgress },
+        update: saveProgress,
       });
       result.playersUpdated += 1;
     } catch (err) {
@@ -401,11 +455,13 @@ export async function runLiveStatsTick(options: { now?: number; file?: string } 
       name: entry.name,
       xp: entry.xp,
       level: levelFromXp(entry.xp),
-      prestige: entry.prestige,
+      // Campos que el formato v4 no trae → 0 en la VISTA (placeholder; el
+      // shape del endpoint se mantiene estable). En DB no se escriben.
+      prestige: entry.prestige ?? 0,
       kills: entry.kills,
-      deaths: entry.deaths,
-      headshots: entry.headshots,
-      timePlayed: entry.timePlayed,
+      deaths: entry.deaths ?? 0,
+      headshots: entry.headshots ?? 0,
+      timePlayed: entry.timePlayed ?? 0,
       suspicious: state.flaggedAt !== null, // flag VIGENTE (no solo el de este ciclo)
       reason: state.reason,
       previousXp: sighting.previousXp,
