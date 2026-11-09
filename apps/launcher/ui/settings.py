@@ -24,6 +24,11 @@ que aplica en caliente sigue aplicando (cliente API + dropdown de home).
 SESIÓN (cyber-café): checkbox "Mantener mi sesión abierta al cerrar el
 launcher" (remember_session, default DESMARCADO) — desmarcado, al cerrar
 se borra el token y la próxima apertura pide LOGIN.
+
+CLASES AL PERFIL WEB: checkbox "Exportar mis clases al perfil web (se
+genera al arrancar el juego)" (export_classes, default MARCADO) — el
+launcher inyecta +dumpPlayerData al abrir el juego y al cerrarlo sube el
+dump del console_mp.log del cliente a la API (sin pasos manuales).
 """
 from __future__ import annotations
 
@@ -194,6 +199,22 @@ class SettingsFrame(ctk.CTkFrame):
         )
         self.cloud_save_check.pack(anchor="w", pady=(0, SP["s"]))
 
+        # --- Exportación de clases al perfil web (dump /dumpPlayerData) ------
+        # Default MARCADO (decisión del dueño): al arrancar el juego el
+        # launcher inyecta +dumpPlayerData y al cerrarlo sube el dump del
+        # console_mp.log del cliente → las 15 clases aparecen en el perfil
+        # web sin pasos manuales.
+        self.export_classes_check = ctk.CTkCheckBox(
+            inner,
+            text="Exportar mis clases al perfil web "
+                 "(se genera al arrancar el juego)",
+            font=font(12), fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            checkmark_color=COLORS["on_accent"], text_color=COLORS["text"],
+            border_color=COLORS["border_strong"], corner_radius=2,
+        )
+        self.export_classes_check.pack(anchor="w", pady=(0, SP["s"]))
+
         # --- Auto-guardado periódico (evita perder progreso si la PC muere) --
         autosave_row = ctk.CTkFrame(inner, fg_color="transparent")
         autosave_row.pack(fill="x", pady=(0, SP["m"]))
@@ -290,6 +311,11 @@ class SettingsFrame(ctk.CTkFrame):
             self.cloud_save_check.select()
         else:
             self.cloud_save_check.deselect()
+        # Exportación de clases (dump al perfil web): default MARCADO.
+        if cfg.export_classes:
+            self.export_classes_check.select()
+        else:
+            self.export_classes_check.deselect()
         # Auto-guardado: el valor SIEMPRE va al entry (visible aunque sea 0);
         # el checkbox refleja si está activo (>0).
         self.autosave_minutes.delete(0, "end")
@@ -553,6 +579,9 @@ class SettingsFrame(ctk.CTkFrame):
             cfg.set("servers", servers)
             cfg.set("default_server", default_idx)
             cfg.set("cloud_save", bool(self.cloud_save_check.get()))
+            # Exportación de clases al perfil web (+dumpPlayerData → dump →
+            # POST /players/classes): marcado por defecto.
+            cfg.set("export_classes", bool(self.export_classes_check.get()))
             # Auto-guardado: solo cuenta si el checkbox está activo; el valor es
             # entero ≥0 (0 = desactivado). Basura en el entry → 0 (sin crash).
             autosave_minutes = self._autosave_minutes_value()

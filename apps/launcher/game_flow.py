@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from api_client import ApiClient, ApiError, NetworkError
+from classes_export import default_store_path, export_player_classes
 from logging_setup import app_data_dir
 from save_sync import (UPLOAD_LOCK, decide_guid_action,
                        decide_guid_validation, decide_stat_action,
@@ -61,13 +62,15 @@ def build_game_args(
     game_path: str,
     server_address: str,
     display_name: str = "",
+    export_classes: bool = True,
 ) -> List[str]:
     """Construye el comando de arranque del juego (función pura, testeable).
 
     Devuelve una LISTA de argumentos (nunca string para shell): así los
     espacios en el nick no rompen nada. Formato:
 
-        [iw4x.exe, +set, name, <nick>, +connect, <ip:puerto>]
+        [iw4x.exe, +set, name, <nick>, +connect, <ip:puerto>
+         (, +dumpPlayerData)]
 
     El nick del ranking SIEMPRE viaja en el comando (decisión del dueño: el
     juego arranca con el displayName de la cuenta, sin toggle ni config).
@@ -75,12 +78,21 @@ def build_game_args(
     que el nick queda vigente para la sesión aunque el config del juego
     tenga guardado otro nombre. Si ``display_name`` viene vacío no se añade
     el ``+set`` — GameFlow bloquea el arranque antes de llegar aquí.
+
+    ``+dumpPlayerData`` (export_classes, default True) va AL FINAL, después
+    de ``+connect``: los ``+`` comandos se ejecutan en orden tras cargar las
+    configs, así el dump de clases (customClasses → console_mp.log del
+    cliente) corre con el playerdata ya inicializado. Al cerrar la sesión,
+    el launcher lee ese log y sube las clases a la API (ver
+    ``classes_export.export_player_classes``).
     """
     args = [game_path]
     nick = (display_name or "").strip()
     if nick:
         args += ["+set", "name", nick]
     args += ["+connect", server_address]
+    if export_classes:
+        args += ["+dumpPlayerData"]
     return args
 
 
@@ -172,11 +184,13 @@ class GameFlow:
         simulate: bool = False,
         display_name: str = "",
         cloud_save: bool = True,
+        export_classes: bool = True,
         game_dir: str = "",
         user_id: str = "",
         guid_path: Optional[str] = None,
         quarantine_root_path: Optional[Path] = None,
         stat_quarantine_root_path: Optional[Path] = None,
+        classes_store_path: Optional[Path] = None,
     ) -> None:
         self.api = api
         self.token = token
@@ -188,6 +202,10 @@ class GameFlow:
         self.simulate = simulate
         self.display_name = display_name
         self.cloud_save = cloud_save
+        # Exportación de clases (dump /dumpPlayerData → perfil web) y su
+        # store de hash INYECTABLE (tests: jamás toca el %APPDATA% real).
+        self.export_classes = export_classes
+        self._classes_store_path = classes_store_path or default_store_path()
         self.user_id = user_id
         # Rutas INYECTABLES (tests): nunca tocar guid.dat ni saves reales en
         # pruebas.
@@ -321,6 +339,28 @@ class GameFlow:
         except Exception:  # nunca tumbar el flujo/cierre por un upload
             self._upload_result = "error"
             log.exception("Upload post-sesión falló de forma inesperada")
+        # Exportación de clases (dump del +dumpPlayerData → perfil web):
+        # DESPUÉS del save, best-effort, con la misma filosofía no-bloqueante.
+        self._maybe_upload_classes()
+
+    def _maybe_upload_classes(self) -> Optional[str]:
+        """Exporta las clases del dump del cliente (best-effort, nunca lanza).
+
+        Solo con ``export_classes`` activo, ``game_dir`` conocido y fuera de
+        simulación. ``export_player_classes`` ya traga red/API/disco (WARNING
+        o skip dim); aquí solo se blinda lo inesperado para no tumbar el
+        flujo/cierre del launcher.
+        """
+        if not (self.export_classes and self.game_dir) or self.simulate:
+            return None
+        try:
+            return export_player_classes(
+                self.api, self.token, self.game_dir, log_cb=self._log,
+                store_path=self._classes_store_path,
+            )
+        except Exception:  # jamás bloquea jugar ni el cierre por esto
+            log.exception("Exportación de clases falló de forma inesperada")
+            return None
 
     def _await_game_and_upload(self) -> None:
         """POST-sesión: espera al cierre de iw4x.exe y sube el progreso.
@@ -594,7 +634,8 @@ class GameFlow:
             return False
 
         cmd = build_game_args(
-            self.game_path, self.server_address, self.display_name
+            self.game_path, self.server_address, self.display_name,
+            export_classes=self.export_classes,
         )
 
         if self.simulate:
@@ -610,6 +651,9 @@ class GameFlow:
                 retry=False,
             )
             self._maybe_restore_quarantined_files()
+            # Arranque fallido temprano: si quedó un dump nuevo de una sesión
+            # previa sin subir, es el momento barato de intentarlo.
+            self._maybe_upload_classes()
             return False
 
         self._log(f"Abriendo juego… {subprocess.list2cmdline(cmd[1:])}")
@@ -620,6 +664,7 @@ class GameFlow:
         except OSError as exc:
             self._failed(f"No se pudo abrir el juego: {exc}", retry=True)
             self._maybe_restore_quarantined_files()
+            self._maybe_upload_classes()
             return False
 
     def _prepare_session(self) -> None:

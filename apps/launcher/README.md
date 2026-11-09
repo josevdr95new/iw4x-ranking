@@ -51,6 +51,7 @@ ratón).
   ],
   "default_server": 0,
   "simulate_game": false,
+  "export_classes": true,
   "autosave_minutes": 10
 }
 ```
@@ -70,6 +71,7 @@ ratón).
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
 | `cloud_save`            | **true** por defecto: sincroniza el progreso (`players\iw4x.stat`, `iw4x_config.cfg`, `mods\<mod>\iw4x.stat`) con la cuenta antes de abrir el juego y al cerrarlo (backup automático previo en `%APPDATA%\iw4x-ranking-launcher\save-backups\`). Editable en Ajustes. |
+| `export_classes`        | **true** por defecto: al arrancar el juego el launcher inyecta el comando nativo **`+dumpPlayerData`** (después de `+connect`) y al cerrarlo lee el `console_mp.log` del CLIENTE, extrae el dump de clases (sección `customClasses`) y lo sube a la API → las 15 clases aparecen en tu perfil web sin pasos manuales. Editable en Ajustes ("Exportar mis clases al perfil web (se genera al arrancar el juego)"). Ver [Clases de loadout al perfil web](#clases-de-loadout-al-perfil-web-sin-pasos-manuales). |
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el flujo JUGAR contra la API). |
 | `remember_session`      | **false** por defecto (cyber-café): al **CERRAR** el launcher se **borra el token guardado** (log `Sesión cerrada. Hasta la próxima.`) y al **ABRIR** aparece el **LOGIN** — cada quien hace su propio login, nadie hereda sesiones. `true` = auto-login con el token como siempre. Editable en Ajustes ("Mantener mi sesión abierta al cerrar el launcher"). |
 | `autosave_minutes`      | **Auto-guardado** del progreso en la nube cada X minutos (default **10**; **0 = desactivado**). Evita perder progreso si la PC muere a mitad de sesión: sube solo lo que cambió, respeta lo más nuevo y no consulta la API si nada cambió. Editable en Ajustes. |
@@ -118,13 +120,15 @@ estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
    guid nuevo), el cuarentenado se repone. Si el manifiesto ya trae
    `guid.dat`, el sync lo restaura como siempre; ante un fallo de red se
    conserva la identidad local sin tocar nada.
-3. Lanza `iw4x.exe +set name <displayName> +connect <server>` (subprocess con
-   lista de args, cwd = carpeta del juego). El nick del ranking es
-   **OBLIGATORIO y SIEMPRE viaja** en el comando (`+set name`): los engines
-   Q3 lo procesan tras cargar configs, así el displayName de la cuenta gana
-   al nick guardado en el config del juego, sin tocar archivos. Si la
+3. Lanza `iw4x.exe +set name <displayName> +connect <server> +dumpPlayerData`
+   (subprocess con lista de args, cwd = carpeta del juego). El nick del
+   ranking es **OBLIGATORIO y SIEMPRE viaja** en el comando (`+set name`): los
+   engines Q3 lo procesan tras cargar configs, así el displayName de la cuenta
+   gana al nick guardado en el config del juego, sin tocar archivos. Si la
    cuenta no tiene displayName, el juego **no se lanza** y se pide
-   actualizarlo en Mi Cuenta (web).
+   actualizarlo en Mi Cuenta (web). Con `export_classes` activo (default), el
+   `+dumpPlayerData` va AL FINAL para que el dump de clases corra con el
+   playerdata ya inicializado (ver la sección de clases).
 4. El botón héroe pasa a **DETENER** mientras el juego (que este launcher
    abrió) siga vivo; al cerrarse el juego solo, vuelve a JUGAR. Los stats
    siguen refrescando cada 30s como siempre.
@@ -133,6 +137,54 @@ estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
    `iw4x_config.cfg`, `mods\<mod>\iw4x.stat` y el `guid.dat` de identidad con
    backup automático; al cerrar iw4x.exe sube el progreso de la sesión. Los
    errores de sync NUNCA impiden jugar.
+
+## Clases de loadout al perfil web (sin pasos manuales)
+
+Con `export_classes` (default **true**, checkbox *"Exportar mis clases al
+perfil web (se genera al arrancar el juego)"* en Ajustes) las 15 clases del
+jugador llegan a su perfil web SIN pasos manuales:
+
+1. **Arranque**: el launcher añade `+dumpPlayerData` al FINAL del comando
+   (igual que `+unlockstats` y `+connect`): el cliente imprime el árbol DDL
+   de clases (sección `customClasses`) en su `console_mp.log`.
+2. **Cierre del juego**: el launcher localiza el log del CLIENTE, comprueba
+   si el dump cambió desde la última subida (hash SHA-256 persistido en
+   `%APPDATA%\iw4x-ranking-launcher\classes-export.json`) y sube los últimos
+   800k caracteres del log a `POST /api/players/classes` con el JWT de la
+   cuenta. Log de éxito: `Clases exportadas a tu perfil web ✓`.
+
+**Ubicación del log del cliente** (hallazgo real en la PC del dueño, por
+mtimes y cabecera de cada archivo):
+
+| Archivo                                     | Qué es                                                      | ¿Se usa? |
+| ------------------------------------------- | ------------------------------------------------------------ | -------- |
+| `<game>\main\console_mp.log`                | **CLIENTE** — lo escribe el cliente al arrancar sin `fs_game` (cabecera con el comando vacío, sin `-dedicated`). Ahí cae el dump. | ✅ |
+| `<game>\console_mp.log`                     | Candidato normativo (raíz); hoy no existe en esta build, se escanea por si aparece. | ✅ |
+| `%LOCALAPPDATA%\iw4x\console_mp.log`        | Candidato normativo (homepath de cliente); hoy no existe, se escanea. | ✅ |
+| `<game>\userraw\console_mp.log`             | **SERVER dedicado** (cabecera `-dedicated`): jamás se usa aunque sea el más reciente. | ❌ |
+| `<game>\mods\<mod>\console_mp.log`          | Servers dedicados con mod (también `-dedicated`).            | ❌ |
+
+La regla de detección (clase `classes_export.find_client_dump_log`): un
+candidato vale SOLO si su texto contiene la sección `customClasses` con
+contenido real (`name = "`, `_deathstreak`, `weaponSetups`, `specialGrenade`)
+y su cabecera NO es de server (`-dedicated`); de los válidos gana el de mtime
+más reciente.
+
+Filosofía cloud-sync: la subida es **best-effort** — un error de la API es un
+WARNING sin bloquear (`⚠ Exportación de clases omitida: …`), la API caída es
+un skip silencioso (solo al archivo de log) y nunca se impide jugar ni
+cerrar. Si la sesión muere antes de tiempo pero el dump ya quedó escrito, la
+subida se intenta igual tras el fallo de arranque.
+
+### Fallback manual (si el dump no se generara solo)
+
+Si alguna build del juego no escribiera el log o el dump no apareciera, el
+paso manual sigue disponible y el launcher lo detecta igual: abre la consola
+del juego (`~`), ejecuta `/dumpPlayerData`, y el launcher subirá el dump del
+`console_mp.log` en su próxima revisión post-sesión (mismo hash/cambio). Si
+el log quedara en una ruta no listada arriba, se puede añadir a mano
+editando `classes_export.candidate_log_paths` (la detección es la misma:
+sección con contenido real y cabecera de cliente).
 
 ## Auto-guardado periódico (contra pérdida de progreso)
 

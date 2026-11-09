@@ -663,6 +663,7 @@ class App(ctk.CTk):
             simulate=self.cfg.simulate_game,
             display_name=display_name,
             cloud_save=self.cfg.cloud_save,
+            export_classes=self.cfg.export_classes,
             game_dir=os.path.dirname(self.cfg.game_path) if self.cfg.game_path else "",
             user_id=str((self.user or {}).get("id") or ""),
         )

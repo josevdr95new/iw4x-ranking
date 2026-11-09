@@ -35,6 +35,12 @@ Qué verifica:
                  CUARENTENA el guid.dat local, "el juego" (Popen falso) crea
                  identidad nueva y el upload post-sesión la incluye; y la
                  restauración de seguridad si la sesión muere <10s sin guid.
+  7c.(lógica)   Clases al perfil web: +dumpPlayerData al final del comando
+                 (solo con export_classes=true), dump del console_mp.log del
+                 CLIENTE (fixture real) subido a POST /api/players/classes
+                 con stub tras la sesión, guard de hash anti-repetido, sin
+                 export con el checkbox off y subida igual en arranque
+                 fallido temprano.
   8. (GUI)      login compacto: ENTRAR y CREAR CUENTA dentro del viewport en
                  geometría mínima 980x640 (login y registro), franja CONEXIÓN
                  colapsable (clic en la caption; colapsada tras el 1er éxito)
@@ -1500,6 +1506,9 @@ class StubApi:
         self.last_guid_b64: Optional[str] = None
         self.guid_answer: Dict[str, Any] = {"ownedByMe": True}
         self.guid_from_file_error: Optional[Exception] = None
+        # Clases (dump del +dumpPlayerData → POST /players/classes).
+        self.upload_classes_calls = 0
+        self.last_dump_text: Optional[str] = None
 
     def link_start(self, token):
         # SE CONSERVA como espía: el flujo simplificado NO debe llamarlo.
@@ -1561,6 +1570,13 @@ class StubApi:
         self.claim_fresh_calls += 1
         return {"ok": True, "claimFreshAt": "2026-11-08T00:00:00.000Z",
                 "linkedGuids": []}
+
+    def upload_classes(self, token, dump_text):
+        self.upload_classes_calls += 1
+        self.last_dump_text = dump_text
+        return {"guid": "stub-guid",
+                "classesUpdatedAt": "2026-11-08T00:00:00.000Z",
+                "count": 15, "classes": []}
 
 
 def flow_once(stub: StubApi, display_name: str = "El Tester", **kw):
@@ -2249,6 +2265,153 @@ def phase_stat_isolation_pipeline() -> None:
           str(logs_b))
     check("stat B: flujo en éxito",
           any(e["t"] == "success" for e in evs_b), str([e["t"] for e in evs_b]))
+
+
+def phase_classes_export_flow() -> None:
+    """Fase lógica: clases al perfil web (+dumpPlayerData → dump → API, stubs).
+
+    Idea aprobada del dueño: el launcher inyecta ``+dumpPlayerData`` al FINAL
+    del comando (después de ``+connect``) y al terminar la sesión lee el
+    console_mp.log del CLIENTE (hallazgo real: ``<game>\\main\\console_mp.log``;
+    el de ``userraw\\`` es del server dedicado y se descarta por cabecera
+    ``-dedicated``), y si trae la sección customClasses con contenido nuevo la
+    sube a ``POST /api/players/classes``. Todo con STUB de API + el fixture
+    real (tests/fixtures/console-dump.log, generado por el builder de
+    apps/api): NUNCA se lanza el juego cliente para probar.
+
+    - A: export_classes=true → comando con el dump al final; al cerrar el
+      juego el dump llega a la API (stub) con el log exacto; una segunda
+      pasada con el MISMO dump → 'noop' (guard de hash persistente).
+    - B: export_classes=false → sin arg en el comando y SIN subida (aunque
+      hubiera un dump en disco: el checkbox manda).
+    - C: arranque fallido temprano (exe ausente) con dump nuevo pendiente →
+      se intenta la subida igual (best-effort, sin bloquear el 'failed').
+    """
+    print("\n=== Fase clases al perfil web: +dumpPlayerData → dump → API (stubs) ===")
+    import tempfile
+
+    import game_flow as gf
+
+    fixture_path = (Path(__file__).resolve().parent / "fixtures"
+                    / "console-dump.log")
+    fixture_text = fixture_path.read_text(encoding="utf-8")
+
+    # --- Comando puro: el arg viaja SOLO con export_classes=true -------------
+    args_on = build_game_args("iw4x.exe", "127.0.0.1:28961", "El Tester")
+    args_off = build_game_args("iw4x.exe", "127.0.0.1:28961", "El Tester",
+                               export_classes=False)
+    check("clases comando: export_classes=true → +dumpPlayerData AL FINAL "
+          "(tras +connect)",
+          args_on[-1] == "+dumpPlayerData"
+          and args_on[-2] == "127.0.0.1:28961", str(args_on))
+    check("clases comando: export_classes=false → SIN el arg (+connect último)",
+          "+dumpPlayerData" not in args_off
+          and args_off[-1] == "127.0.0.1:28961", str(args_off))
+
+    class DumpProc:
+        """Doble del Popen: 'el juego' escribe el dump en el log del cliente
+        (como el +dumpPlayerData real: el dump queda en console_mp.log)."""
+
+        def __init__(self, cmd, log_path: Path):
+            self.pid = 425100
+            self.cmd = cmd
+            self._exited = False
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                fixture_text + "\n[  500] session-marker-clases",
+                encoding="utf-8")
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+
+        def kill(self):
+            self._exited = True
+
+    def make_escenario(name: str):
+        tmp = Path(tempfile.mkdtemp(prefix=f"iw4x-classes-flow-{name}-"))
+        gd = tmp / "gd"
+        (gd / "players").mkdir(parents=True)
+        (gd / "players" / "iw4x.stat").write_bytes(b"PROGRESO-CON-CLASES-1")
+        exe = tmp / "iw4x.exe"
+        exe.write_bytes(b"MZ-fake")  # existe: pasa el guard de _launch_game
+        return {"tmp": tmp, "gd": gd, "exe": exe,
+                "log": gd / "main" / "console_mp.log",
+                "store": tmp / "classes-store.json"}
+
+    def correr(esc: Dict[str, Path], export_classes: bool,
+               exe: Optional[Path] = None):
+        stub = StubApi()
+        events: List[Dict[str, Any]] = []
+        flow = GameFlow(stub, "tok", str(exe or esc["exe"]), "127.0.0.1:28961",
+                        events.append, already_linked=True, simulate=False,
+                        display_name="El Tester", cloud_save=True,
+                        export_classes=export_classes,
+                        game_dir=str(esc["gd"]), user_id="u-900",
+                        classes_store_path=esc["store"])
+        orig_popen = gf.subprocess.Popen
+        gf.subprocess.Popen = (
+            lambda cmd, **kw: DumpProc(cmd, esc["log"]))
+        try:
+            flow.run()
+        finally:
+            gf.subprocess.Popen = orig_popen
+        logs = [str(e.get("msg", "")) for e in events if e.get("t") == "log"]
+        return flow, stub, events, logs
+
+    # --- A: con la exportación activa → dump subido tras la sesión -----------
+    esc_a = make_escenario("sube")
+    flow_a, stub_a, evs_a, logs_a = correr(esc_a, export_classes=True)
+    cmd_line = next((str(e.get("msg", "")) for e in evs_a
+                     if "Abriendo juego" in str(e.get("msg", ""))), "")
+    check("clases A: el comando lanzado termina en +dumpPlayerData",
+          cmd_line.rstrip().endswith("+dumpPlayerData"), cmd_line)
+    check("clases A: al cerrar el juego el dump llegó a la API (stub)",
+          stub_a.upload_classes_calls == 1
+          and "customClasses" in (stub_a.last_dump_text or ""),
+          f"calls={stub_a.upload_classes_calls}")
+    check("clases A: log exacto 'Clases exportadas a tu perfil web ✓'",
+          "Clases exportadas a tu perfil web ✓" in logs_a, str(logs_a))
+    check("clases A: el flujo sigue en éxito (la exportación no bloquea)",
+          any(e["t"] == "success" for e in evs_a)
+          and not any(e["t"] == "failed" for e in evs_a),
+          str([e["t"] for e in evs_a]))
+    r_again = flow_a._maybe_upload_classes()
+    check("clases A: MISMO dump → 'noop' sin repetir el POST (hash guardado)",
+          r_again == "noop" and stub_a.upload_classes_calls == 1,
+          f"r={r_again} calls={stub_a.upload_classes_calls}")
+
+    # --- B: con la exportación apagada → ni arg ni subida --------------------
+    esc_b = make_escenario("apagada")
+    _flow_b, stub_b, evs_b, logs_b = correr(esc_b, export_classes=False)
+    cmd_b = next((str(e.get("msg", "")) for e in evs_b
+                  if "Abriendo juego" in str(e.get("msg", ""))), "")
+    check("clases B: sin export → el comando NO lleva +dumpPlayerData",
+          "+dumpPlayerData" not in cmd_b, cmd_b)
+    check("clases B: sin export → CERO subidas aunque el juego dejara un dump",
+          stub_b.upload_classes_calls == 0
+          and not any("Clases exportadas" in x for x in logs_b),
+          f"calls={stub_b.upload_classes_calls} logs={logs_b}")
+
+    # --- C: arranque fallido temprano con dump pendiente → subida igual ------
+    esc_c = make_escenario("fallo")
+    (esc_c["log"].parent).mkdir(parents=True, exist_ok=True)
+    esc_c["log"].write_text(fixture_text, encoding="utf-8")  # dump ya en disco
+    _flow_c, stub_c, evs_c, logs_c = correr(
+        esc_c, export_classes=True,
+        exe=esc_c["tmp"] / "no-existe.exe")  # el juego NO se puede abrir
+    check("clases C: arranque fallido → 'failed' reportado igual",
+          any(e["t"] == "failed" for e in evs_c), str([e["t"] for e in evs_c]))
+    check("clases C: el dump pendiente se sube aun con el arranque roto",
+          stub_c.upload_classes_calls == 1
+          and "customClasses" in (stub_c.last_dump_text or ""),
+          f"calls={stub_c.upload_classes_calls}")
+    check("clases C: log de éxito de la exportación presente",
+          any("Clases exportadas a tu perfil web ✓" in x for x in logs_c),
+          str(logs_c))
 
 
 def phase_hero_stop_button() -> None:
@@ -3376,6 +3539,7 @@ def main() -> int:
     phase_guid_quarantine_pipeline()
     phase_guid_ownership()
     phase_stat_isolation_pipeline()
+    phase_classes_export_flow()
     phase_hero_stop_button()
     phase_exit_hook()
     phase_autosave_close()

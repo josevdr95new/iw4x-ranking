@@ -282,6 +282,21 @@ class ApiClient:
             "POST", "/identity/claim-fresh", token=token, json_body={}
         )
 
+    # --- Clases de loadout (dump /dumpPlayerData del cliente) ---------------
+    def upload_classes(self, token: str, dump_text: str) -> Dict[str, Any]:
+        """POST /api/players/classes → {guid, classesUpdatedAt, count, classes}.
+
+        Ingesta del TEXTO del console_mp.log del CLIENTE (puede ser el log
+        entero: el parser del backend busca la sección ``customClasses``).
+        El backend lo atribuye al Player vinculado a la cuenta del token y
+        expone ``player.classes`` en GET /api/players/:guid. Si el texto no
+        contiene la sección responde 400 CLASSES_NOT_FOUND (no rompe).
+        """
+        return self._request(
+            "POST", "/players/classes", token=token,
+            json_body={"dumpText": dump_text},
+        )
+
     # --- Vinculación cuenta ↔ GUID -----------------------------------------
     def link_start(self, token: str) -> Dict[str, Any]:
         """POST /api/link/start — registra el intento de vinculación."""

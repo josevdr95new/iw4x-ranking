@@ -10,10 +10,16 @@ Qué verifica (mismo estilo [OK]/[FALLO] que test_smoke.py):
   2. save_sync: aislamiento de identidad por cuenta (fix cyber-café):
       decide_guid_action (restore/quarantine/none + manifest None) y
       quarantine_local_guid (movimiento a cuarentena, rutas inyectadas).
-  3. game_flow: build_game_args (nick SIEMPRE forzado con +set name).
-  4. app_config: DEFAULT_CONFIG y el merge de claves (propiedades con
+  3. game_flow: build_game_args (nick SIEMPRE forzado con +set name y
+      +dumpPlayerData al final con export_classes; sin él con false).
+  4. classes_export: detección del dump del cliente (sección customClasses
+      con contenido real, descarte de logs '-dedicated', mtime más reciente),
+      cap de 800k chars, decisión de subida por hash, store persistente y el
+      flujo completo contra un STUB de API con el fixture real
+      (tests/fixtures/console-dump.log, generado por el builder de apps/api).
+  5. app_config: DEFAULT_CONFIG y el merge de claves (propiedades con
       defaults, acotes y limpieza de servers inválidos).
-  5. app_config: normalize_api_url (esquema http:// faltante, barra final,
+  6. app_config: normalize_api_url (esquema http:// faltante, barra final,
       espacios, vacío → default; JAMÁS inventa/corrige puertos).
 
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
@@ -353,28 +359,40 @@ def phase_save_sync_pure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. build_game_args: armado del comando (nick SIEMPRE forzado).
+# 3. build_game_args: armado del comando (nick SIEMPRE + dump de clases).
 def phase_command_args() -> None:
-    print("\n=== Units: comando de arranque (+set name siempre) ===")
+    print("\n=== Units: comando de arranque (+set name + dumpPlayerData) ===")
 
     args = build_game_args(r"D:\Games\Call of Duty 6\iw4x.exe",
                            "192.168.2.251:28960", "Mandango ProMax")
-    check("comando: exe primero, +connect último",
+    check("comando: exe primero y +dumpPlayerData ÚLTIMO (tras +connect)",
           args[0] == r"D:\Games\Call of Duty 6\iw4x.exe"
-          and args[-1] == "192.168.2.251:28960", str(args))
-    check("comando: +set name <nick> (con espacios) ANTES de +connect",
-          args[1:5] == ["+set", "name", "Mandango ProMax", "+connect"], str(args))
-    check("comando: lista plana de 6 argumentos (sin shell)",
-          len(args) == 6 and all(isinstance(a, str) for a in args), str(args))
+          and args[-1] == "+dumpPlayerData", str(args))
+    check("comando: +set name <nick> (con espacios) y +connect ANTES del dump",
+          args[1:6] == ["+set", "name", "Mandango ProMax", "+connect",
+                        "192.168.2.251:28960"], str(args))
+    check("comando: lista plana de 7 argumentos (sin shell)",
+          len(args) == 7 and all(isinstance(a, str) for a in args), str(args))
 
     args = build_game_args("iw4x.exe", "1.2.3.4:28960", "  Spam Bot  ")
     check("nick con espacios en extremos se recorta",
           args == ["iw4x.exe", "+set", "name", "Spam Bot", "+connect",
-                   "1.2.3.4:28960"], str(args))
+                   "1.2.3.4:28960", "+dumpPlayerData"], str(args))
 
     args = build_game_args("iw4x.exe", "1.2.3.4:28960", "")
     check("sin nick la función no emite +set (GameFlow bloquea antes)",
-          args == ["iw4x.exe", "+connect", "1.2.3.4:28960"], str(args))
+          args == ["iw4x.exe", "+connect", "1.2.3.4:28960", "+dumpPlayerData"],
+          str(args))
+
+    # export_classes=False → SIN el dump (checkbox de Ajustes desmarcado).
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "Nick",
+                           export_classes=False)
+    check("export_classes=false → sin +dumpPlayerData (+connect queda último)",
+          args == ["iw4x.exe", "+set", "name", "Nick", "+connect",
+                   "1.2.3.4:28960"], str(args))
+    check("export_classes=true explícito → con +dumpPlayerData al final",
+          build_game_args("iw4x.exe", "1.2.3.4:28960", "Nick",
+                          export_classes=True)[-1] == "+dumpPlayerData")
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +712,259 @@ def phase_wait_process_exit() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 9. classes_export: detección del dump del cliente + subida al perfil web.
+def phase_classes_export() -> None:
+    print("\n=== Units: classes_export (dump del cliente → POST /players/classes) ===")
+    import os
+    import tempfile
+    from typing import List, Optional
+
+    from api_client import ApiError, NetworkError
+    import classes_export as ce
+    from classes_export import (
+        candidate_log_paths,
+        decide_classes_upload,
+        dump_hash,
+        export_player_classes,
+        find_client_dump_log,
+        has_classes_dump,
+        is_server_log,
+        load_classes_hash,
+        read_dump_text,
+        save_classes_hash,
+    )
+
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "console-dump.log"
+    fixture_text = fixture_path.read_text(encoding="utf-8")
+
+    # --- Config: export_classes (default True) -------------------------------
+    check("classes config: clave nueva en DEFAULT_CONFIG (default True)",
+          DEFAULT_CONFIG.get("export_classes") is True,
+          str(DEFAULT_CONFIG.get("export_classes")))
+    check("classes config: dict vacío → True; false explícito → False",
+          AppConfig({}).export_classes is True
+          and AppConfig({"export_classes": False}).export_classes is False)
+
+    # --- Detección de la sección con contenido real ---------------------------
+    check("dump: fixture REAL (builder de la API, 15 clases) → sección detectada",
+          has_classes_dump(fixture_text))
+    check("dump: línea 'customClasses' sola SIN contenido → no es un dump",
+          not has_classes_dump("customClasses\notra_seccion = 1\n"))
+    check("dump: 'customClasses' mencionada en otra línea (chat) → no cuenta",
+          not has_classes_dump('[  1] say_team: mira mi customClasses\n'))
+    sin_ts = fixture_text.replace("[  18215383]", "").replace("[  18215001]", "")
+    check("dump: detección idéntica con y sin timestamps de consola",
+          has_classes_dump(sin_ts))
+    check("dump: log de CLIENTE sin sección (el real del 11/5) → False",
+          not has_classes_dump(
+              "[      5883] ''\n[      5883] Build 37a alterIWnet.\n"
+              "Current search path:\n"))
+
+    # --- Regla anti-server: cabecera '-dedicated' -----------------------------
+    server_text = ("[      2462] '-dedicated +set fs_game  +set sv_lanonly 1 "
+                   "+set net_port 28961 +exec server.cfg +set logfile 2'\n"
+                   "[      2462] Build r5318. Logfile opened on 11/08/26\n")
+    check("server log: cabecera '-dedicated' (userraw real) → es de server",
+          is_server_log(server_text))
+    check("server log: el log real del server NO trae sección customClasses",
+          not has_classes_dump(server_text))
+    check("server log: cabecera de CLIENTE (comando vacío '') → no es server",
+          not is_server_log("[      5883] ''\nBuild 37a alterIWnet.\n"))
+    server_con_dump = server_text + fixture_text
+    check("server log: aunque contuviera un dump, '-dedicated' lo excluye",
+          has_classes_dump(server_con_dump) and is_server_log(server_con_dump))
+
+    # --- find_client_dump_log con archivos reales (%TEMP%, rutas inyectadas) --
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-classes-"))
+    gd = tmp / "game"
+    (gd / "main").mkdir(parents=True)
+    (gd / "userraw").mkdir(parents=True)
+    (gd / "mods" / "mp_bots").mkdir(parents=True)
+    cliente = gd / "main" / "console_mp.log"        # hallazgo real del cliente
+    server = gd / "userraw" / "console_mp.log"      # server dedicado (hoy)
+    server_mod = gd / "mods" / "mp_bots" / "console_mp.log"  # server viejo
+    cliente.write_text(fixture_text, encoding="utf-8")
+    server.write_text(server_text, encoding="utf-8")
+    server_mod.write_text(server_text, encoding="utf-8")
+    pasado = time.time() - 3600
+    os.utime(cliente, (pasado, pasado))  # el server queda MÁS NUEVO
+    found = find_client_dump_log(
+        [str(server), str(server_mod), str(cliente)])
+    check("detección: el server MÁS NUEVO se descarta y gana el cliente "
+          "(main\\) con dump",
+          found is not None and Path(found) == cliente, str(found))
+    check("detección: solo logs de server → None (nada usable)",
+          find_client_dump_log([str(server), str(server_mod)]) is None)
+    check("detección: candidato inexistente → None sin explotar",
+          find_client_dump_log([str(gd / "nope.log")]) is None)
+    check("detección: lista vacía → None", find_client_dump_log([]) is None)
+
+    # Dos clientes con dump: gana el de mtime MÁS RECIENTE.
+    viejo = gd / "console_mp.log"  # raíz del juego (candidato normativo)
+    viejo.write_text(fixture_text.replace("THE NOOB2", "RAIZ-VIEJA"),
+                     encoding="utf-8")
+    os.utime(viejo, (pasado - 7200, pasado - 7200))
+    found2 = find_client_dump_log([str(viejo), str(cliente)])
+    check("detección: dos clientes con dump → el MÁS RECIENTE (main\\)",
+          found2 is not None and Path(found2) == cliente, str(found2))
+
+    # --- read_dump_text: cap de 800k chars (contrato ≤900k del body) ----------
+    grande = "PREFIX-" + "a" * (ce.MAX_DUMP_CHARS + 50)
+    cola = read_dump_text(str(_escribir(tmp / "grande.log", grande)))
+    check("dump text: log enorme → últimos 800k chars (cap del contrato)",
+          cola is not None and len(cola) == ce.MAX_DUMP_CHARS
+          and not cola.startswith("PREFIX"), len(cola or ""))
+    check("dump text: log pequeño → texto completo sin recortar",
+          read_dump_text(str(_escribir(tmp / "chico.log", fixture_text)))
+          == fixture_text)
+    check("dump text: archivo ilegible → None",
+          read_dump_text(str(tmp / "nope.log")) is None)
+
+    # --- decide_classes_upload (pura): matriz ----------------------------------
+    check("decide: sin dump → nunca sube (aunque el hash difiera)",
+          not decide_classes_upload(False, "h1", None))
+    check("decide: dump nuevo y sin hash previo → sube",
+          decide_classes_upload(True, "h1", None))
+    check("decide: mismo hash que la última subida → NO repite",
+          not decide_classes_upload(True, "h1", "h1"))
+    check("decide: hash distinto al último → sube",
+          decide_classes_upload(True, "h2", "h1"))
+    check("decide: hash vacío → no sube (defensa)",
+          not decide_classes_upload(True, "", None))
+    check("dump_hash: determinista y sensible al contenido",
+          dump_hash("abc") == dump_hash("abc") and dump_hash("abc") != dump_hash("abd"))
+
+    # --- Store del hash: roundtrip, roto → None -------------------------------
+    store = tmp / "store" / "classes-export.json"
+    check("store: sin archivo → None", load_classes_hash(store) is None)
+    check("store: save → load devuelve el hash",
+          save_classes_hash("abc123", store) and load_classes_hash(store) == "abc123")
+    store.write_text("{roto", encoding="utf-8")
+    check("store: JSON roto → None sin explotar", load_classes_hash(store) is None)
+    store.write_text('{"otro": 1}', encoding="utf-8")
+    check("store: dict sin sha256 → None", load_classes_hash(store) is None)
+
+    # --- Flujo de subida con STUB de API + fixture real -----------------------
+    class StubClassesApi:
+        def __init__(self, error: Optional[Exception] = None) -> None:
+            self.calls = 0
+            self.last_text: Optional[str] = None
+            self.error = error
+
+        def upload_classes(self, token, dump_text):
+            self.calls += 1
+            self.last_text = dump_text
+            if self.error is not None:
+                raise self.error
+            return {"guid": "g1", "classesUpdatedAt": "2026-11-08T00:00:00.000Z",
+                    "count": 15, "classes": []}
+
+    gd_live = tmp / "live"
+    (gd_live / "main").mkdir(parents=True)
+    live_log = gd_live / "main" / "console_mp.log"
+    live_log.write_text(fixture_text, encoding="utf-8")
+    live_store = tmp / "live-store.json"
+
+    stub = StubClassesApi()
+    logs: List[str] = []
+    r = export_player_classes(stub, "tok", str(gd_live), log_cb=logs.append,
+                              store_path=live_store)
+    check("flujo: dump nuevo → sube ('uploaded') una vez",
+          r == "uploaded" and stub.calls == 1, f"r={r} calls={stub.calls}")
+    check("flujo: el body trae el texto del log con la sección (tail ≤800k)",
+          stub.last_text is not None
+          and "customClasses" in stub.last_text
+          and len(stub.last_text) <= ce.MAX_DUMP_CHARS,
+          f"chars={len(stub.last_text or '')}")
+    check("flujo: log exacto 'Clases exportadas a tu perfil web ✓'",
+          "Clases exportadas a tu perfil web ✓" in logs, str(logs))
+    check("flujo: hash persistido tras subir",
+          load_classes_hash(live_store) == dump_hash(stub.last_text or ""))
+
+    logs.clear()
+    r = export_player_classes(stub, "tok", str(gd_live), log_cb=logs.append,
+                              store_path=live_store)
+    check("flujo: mismo dump → 'noop' SIN repetir el POST",
+          r == "noop" and stub.calls == 1, f"r={r} calls={stub.calls}")
+    check("flujo: 'noop' es silencioso para la consola (sin logs)",
+          logs == [], str(logs))
+
+    live_log.write_text(fixture_text + "\n[  99] experience = 424242",
+                        encoding="utf-8")
+    r = export_player_classes(stub, "tok", str(gd_live), log_cb=logs.append,
+                              store_path=live_store)
+    check("flujo: dump cambió (hash distinto) → sube de nuevo",
+          r == "uploaded" and stub.calls == 2
+          and stub.last_text.endswith("[  99] experience = 424242"),
+          f"r={r} calls={stub.calls}")
+
+    # Error de la API → WARNING visible sin bloquear y SIN actualizar hash.
+    # El dump CAMBIA primero (como una sesión nueva): el guard de hash decide
+    # subir, y ahí la API falla.
+    live_log.write_text(fixture_text + "\n[ 100] experience = 555",
+                        encoding="utf-8")
+    stub_err = StubClassesApi(error=ApiError(400, "CLASSES_NOT_FOUND",
+                                             "sin sección customClasses"))
+    logs.clear()
+    r = export_player_classes(stub_err, "tok", str(gd_live),
+                              log_cb=logs.append, store_path=live_store)
+    check("API 400 → 'error' con WARNING sin bloquear",
+          r == "error" and stub_err.calls == 1, f"r={r} calls={stub_err.calls}")
+    check("API 400 → WARNING exacto '⚠ Exportación de clases omitida: …'",
+          any(x.startswith("⚠ Exportación de clases omitida") and "400" in x
+              for x in logs), str(logs))
+    check("API 400 → el hash NO se marca como subido (reintento próximo turno)",
+          load_classes_hash(live_store) != dump_hash(
+              read_dump_text(str(live_log)) or ""))
+
+    # API caída → skip silencioso dim (nada a la consola; solo al archivo).
+    # Otro dump nuevo: mismo camino del guard de hash con red rota.
+    live_log.write_text(fixture_text + "\n[ 101] experience = 777",
+                        encoding="utf-8")
+    stub_down = StubClassesApi(error=NetworkError("No se pudo conectar."))
+    logs.clear()
+    r = export_player_classes(stub_down, "tok", str(gd_live),
+                              log_cb=logs.append, store_path=live_store)
+    check("API caída → 'error' skip silencioso (cero logs a la consola)",
+          r == "error" and stub_down.calls == 1 and logs == [],
+          f"r={r} logs={logs}")
+
+    # Sin dump de cliente → no-dump sin tocar la API.
+    gd_vacio = tmp / "vacio"
+    gd_vacio.mkdir()
+    stub2 = StubClassesApi()
+    r = export_player_classes(stub2, "tok", str(gd_vacio),
+                              log_cb=logs.append, store_path=live_store)
+    check("sin console_mp.log de cliente → 'no-dump' sin llamada",
+          r == "no-dump" and stub2.calls == 0, f"r={r} calls={stub2.calls}")
+
+    gd_server = tmp / "solo-server"
+    (gd_server / "userraw").mkdir(parents=True)
+    (gd_server / "userraw" / "console_mp.log").write_text(
+        server_text, encoding="utf-8")
+    r = export_player_classes(stub2, "tok", str(gd_server),
+                              log_cb=logs.append, store_path=live_store)
+    check("solo log de SERVER (userraw) → 'no-dump' (jamás se usa)",
+          r == "no-dump" and stub2.calls == 0, f"r={r} calls={stub2.calls}")
+
+    # Candidatos por defecto de un game_dir (los del hallazgo real).
+    cands = candidate_log_paths(str(gd))
+    check("candidatos: main\\, userraw\\, raíz, %LOCALAPPDATA% y mods\\*",
+          str(Path(str(gd)) / "main" / "console_mp.log") in cands
+          and str(Path(str(gd)) / "userraw" / "console_mp.log") in cands
+          and str(Path(str(gd)) / "console_mp.log") in cands
+          and any("mp_bots" in c for c in cands)
+          and any(c.lower().endswith("iw4x\\console_mp.log") for c in cands),
+          str(cands))
+
+
+def _escribir(path: Path, texto: str) -> Path:
+    """Helper del phase: escribe un fixture temporal y devuelve su ruta."""
+    path.write_text(texto, encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # 8. autosave: decisión de subida, caché, server más nuevo, lectura rota.
 def phase_autosave() -> None:
     print("\n=== Units: autosave (decide_sync upload-only, caché, server nuevo) ===")
@@ -936,6 +1207,7 @@ def main() -> int:
     phase_stat_isolation()
     phase_save_sync_pure()
     phase_command_args()
+    phase_classes_export()
     phase_app_config()
     phase_servers_validation()
     phase_normalize_api_url()

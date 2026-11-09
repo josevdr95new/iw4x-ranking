@@ -29,6 +29,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Cloud-sync del progreso (iw4x.stat/config/mods) antes de jugar y al
     # cerrar el juego. Descargable/subible con la cuenta del ranking.
     "cloud_save": True,
+    # Exportación de clases al perfil web: el launcher inyecta
+    # +dumpPlayerData al arrancar el juego y al cerrarlo sube el dump del
+    # console_mp.log del CLIENTE a POST /api/players/classes (sin pasos
+    # manuales). Editable en Ajustes.
+    "export_classes": True,
     # Auto-guardado periódico del progreso en la nube (pedido del dueño:
     # evitar pérdida de progreso si la PC muere a mitad de sesión).
     # 0 = desactivado. Editable en Ajustes.
@@ -227,6 +232,15 @@ class AppConfig:
     @property
     def cloud_save(self) -> bool:
         return bool(self.data.get("cloud_save", True))
+
+    @property
+    def export_classes(self) -> bool:
+        """¿Inyectar +dumpPlayerData y subir el dump de clases al perfil web?
+
+        Default True (decisión del dueño): las 15 clases aparecen en el
+        perfil sin pasos manuales. false → no se añade el arg ni se sube.
+        """
+        return bool(self.data.get("export_classes", True))
 
     @property
     def autosave_minutes(self) -> int:
