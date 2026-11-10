@@ -23,7 +23,12 @@
  *
  * Este servicio:
  *  - Lee el snapshot cada LIVE_STATS_INTERVAL_MS (default 30s; archivo
- *    ausente/corrupto → silencioso, nunca lanza).
+ *    ausente/corrupto → silencioso, nunca lanza). LIVE_STATS_FILE acepta
+ *    VARIAS rutas separadas por COMA (una por sala de juego, ej.
+ *    `/home/cod/server/userraw/scriptdata/iw4x-ranking.json,/home/cod/server2/...`):
+ *    se leen TODAS y los players se COMBINAN por guid en un solo snapshot
+ *    (dedupe: si el mismo guid aparece en 2 archivos, gana el de orden
+ *    posterior; un archivo vacío/ausente aporta 0 players).
  *  - Actualiza el Player de cada guid visto: name + saveXp/saveLevel
  *    (levelFromXp)/savePrestige/saveParsedAt → el LVL EN VIVO aparece en
  *    perfil/leaderboard sin depender del blob cifrado. La fuente del "save"
@@ -292,11 +297,11 @@ export interface LiveStatsSnapshot {
 }
 
 export interface LiveStatsTickResult {
-  /** Ruta del archivo configurada (null = ingesta desactivada). */
+  /** Spec configurado SIN separar (null = ingesta desactivada). Con multi-archivo es la lista cruda "p1,p2". */
   file: string | null;
-  /** true si el archivo existía y se leyó. */
+  /** true si AL MENOS UN archivo configurado existía y se leyó. */
   read: boolean;
-  /** Entradas válidas parseadas. */
+  /** Entradas válidas parseadas TRAS el merge multi-archivo (por guid). */
   entries: number;
   /** Filas Player upsertadas (nuevas o actualizadas). */
   playersUpdated: number;
@@ -304,6 +309,10 @@ export interface LiveStatsTickResult {
   suspicious: number;
   /** Kicks enviados (solo con anti_unlock_autokick ON + rcon). */
   kicked: number;
+  /** Rutas configuradas (tras separar por coma y trim). */
+  filesTotal: number;
+  /** Rutas que existían y se leyeron (las ausentes aportan 0, silencioso). */
+  filesRead: number;
 }
 
 let lastSnapshot: LiveStatsSnapshot | null = null;
@@ -360,27 +369,67 @@ async function kickSuspicious(entry: LiveStatEntry, name: string): Promise<boole
 // ── Un ciclo de ingesta ─────────────────────────────────────────────────────
 
 /**
- * Un tick: lee el snapshot, actualiza Players y corre el detector. NUNCA
+ * Separa el spec LIVE_STATS_FILE en rutas individuales: coma como separador,
+ * trim de cada segmento, descarta vacíos. Un solo path (convención previa)
+ * → lista de 1. Exportado para tests.
+ */
+export function splitLiveStatsFiles(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * Un tick: lee el/los snapshots, actualiza Players y corre el detector. NUNCA
  * lanza: cualquier error (archivo, DB, rcon) queda logueado y el tick
  * devuelve contadores en 0. `options.file` inyectable para tests; default
- * env LIVE_STATS_FILE (null → no-op).
+ * env LIVE_STATS_FILE (null → no-op). MULTI-ARCHIVO: el spec acepta rutas
+ * separadas por coma → se procesan TODAS y los players se combinan en un Map
+ * por guid (la entrada de orden posterior GANA: archivo listado después en el
+ * env, o línea posterior dentro del mismo archivo). Un archivo ausente,
+ * ilegible o sin líneas válidas aporta 0 al merge; si NINGUNO es legible el
+ * tick es no-op (read=false).
  */
 export async function runLiveStatsTick(options: { now?: number; file?: string } = {}): Promise<LiveStatsTickResult> {
   const file = options.file ?? env.liveStatsFile ?? null;
-  const result: LiveStatsTickResult = { file, read: false, entries: 0, playersUpdated: 0, suspicious: 0, kicked: 0 };
+  const result: LiveStatsTickResult = {
+    file,
+    read: false,
+    entries: 0,
+    playersUpdated: 0,
+    suspicious: 0,
+    kicked: 0,
+    filesTotal: 0,
+    filesRead: 0,
+  };
   lastTickResult = result;
   if (!file) return result;
 
-  let text: string;
-  try {
-    text = readFileSync(file, 'utf8');
-  } catch {
-    return result; // archivo ausente/ilegible → silencioso
+  // Merge multi-archivo por guid: cada archivo procesado en ORDEN hace
+  // upsert de sus entradas en el Map → el posterior pisa al anterior solo
+  // para guids repetidos (los demás guids se PRESERVAN: combinación, no
+  // reemplazo). El parseo tolerante por archivo ya descarta bots/basura.
+  const paths = splitLiveStatsFiles(file);
+  result.filesTotal = paths.length;
+  const merged = new Map<string, LiveStatEntry>();
+  for (const path of paths) {
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch {
+      continue; // archivo ausente/ilegible → silencioso: aporta 0
+    }
+    result.read = true;
+    result.filesRead += 1;
+    for (const entry of parseLiveStatsText(text)) {
+      merged.set(entry.guid, entry); // guid repetido → gana el posterior
+    }
   }
-  result.read = true;
+  if (!result.read) return result; // NINGÚN archivo legible → no-op silencioso
 
   const now = options.now ?? Date.now();
-  const entries = parseLiveStatsText(text);
+  const entries = [...merged.values()];
   result.entries = entries.length;
 
   const autokick = await getAntiUnlockAutokick();
@@ -489,7 +538,8 @@ export function startLiveStatsScheduler(intervalMs?: number): NodeJS.Timeout | n
   }
   const interval = intervalMs ?? env.liveStatsIntervalMs;
   const safeInterval = Number.isFinite(interval) && interval >= 1000 ? interval : 30_000;
-  console.log(`[livestats] activo cada ${safeInterval}ms sobre ${env.liveStatsFile}.`);
+  const files = splitLiveStatsFiles(env.liveStatsFile);
+  console.log(`[livestats] activo cada ${safeInterval}ms sobre ${files.length} archivo(s): ${files.join(' | ')}.`);
   const timer = setInterval(() => {
     void (async () => {
       if (liveRunning) return;

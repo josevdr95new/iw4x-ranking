@@ -10,7 +10,7 @@ import { MELEE_MOD } from './sync/gamelog.reader.js';
 import { getStoredPlayerClasses } from './classes.service.js';
 import type { ParsedLoadoutClass } from '../lib/classes/parse-console-log.js';
 
-type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true } } } }>;
+type PlayerWithLink = Prisma.PlayerGetPayload<{ include: { accountLinks: { select: { guid: true, userId: true } } } }>;
 
 export interface PlayerDto {
   guid: string;
@@ -109,6 +109,14 @@ export interface PlayerProfileDto {
    * actual, último visto primero, máx 10). Detecta PCs compartidas / renombres.
    */
   aliases: PlayerAliasDto[];
+  /**
+   * CUENTA dueña del guid (multi-PC): displayName + stats SUMADAS de todos sus
+   * guids + lista de guids (con última PC/conexión de cada uno). null si el
+   * guid no está vinculado a ninguna cuenta. Es el dato que desambigua el
+   * "mismo jugador en varias PCs" SIN duplicar filas en el leaderboard
+   * (que ahora es UNA fila por cuenta — ver docs/API.md).
+   */
+  account: AccountSummaryDto | null;
 }
 
 export interface PlayerHistoryDto {
@@ -158,10 +166,64 @@ function toPlayerDto(
   };
 }
 
+/** Resumen de la CUENTA dueña del guid (multi-PC): stats sumadas + sus otras PCs. */
+export interface AccountSummaryDto {
+  /** DisplayName de la cuenta web (la identidad real del jugador). */
+  displayName: string;
+  /** Kills/deaths/headshots SUMADOS entre TODOS los guids vinculados a la cuenta. */
+  totalKills: number;
+  totalDeaths: number;
+  totalHeadshots: number;
+  /**
+   * TODOS los guids vinculados a la cuenta (incluido el del perfil actual),
+   * orden de vinculación (más antiguo primero). "Este jugador también juega
+   * en otras PCs": así la web muestra el multi-PC sin duplicar filas.
+   */
+  guids: Array<{ guid: string; lastServer: string | null; lastConnection: string | null }>;
+}
+
+/**
+ * Cuenta dueña del guid + stats agregadas de todos sus guids. null si el guid
+ * no está vinculado a ninguna cuenta (jugador anónimo).
+ */
+async function getAccountSummary(links: Array<{ userId: number }>): Promise<AccountSummaryDto | null> {
+  const ownerLink = links[0];
+  if (!ownerLink) return null;
+
+  const [user, accountLinks] = await Promise.all([
+    prisma.user.findUnique({ where: { id: ownerLink.userId }, select: { displayName: true } }),
+    prisma.accountLink.findMany({
+      where: { userId: ownerLink.userId },
+      select: { guid: true },
+      orderBy: [{ id: 'asc' }],
+    }),
+  ]);
+  if (!user) return null; // defensivo: la FK garantiza el user, nunca debería pasar
+
+  const guids = accountLinks.map((link) => link.guid);
+  const players = await prisma.player.findMany({
+    where: { guid: { in: guids } },
+    select: { guid: true, kills: true, deaths: true, headshots: true, lastServer: true, lastConnection: true },
+  });
+  const byGuid = new Map(players.map((player) => [player.guid, player] as const));
+
+  return {
+    displayName: user.displayName,
+    totalKills: players.reduce((acc, player) => acc + player.kills, 0),
+    totalDeaths: players.reduce((acc, player) => acc + player.deaths, 0),
+    totalHeadshots: players.reduce((acc, player) => acc + player.headshots, 0),
+    guids: guids.map((linkedGuid) => ({
+      guid: linkedGuid,
+      lastServer: byGuid.get(linkedGuid)?.lastServer ?? null,
+      lastConnection: byGuid.get(linkedGuid)?.lastConnection?.toISOString() ?? null,
+    })),
+  };
+}
+
 async function getPlayerOrThrow(guid: string): Promise<PlayerWithLink> {
   const player = await prisma.player.findUnique({
     where: { guid },
-    include: { accountLinks: { select: { guid: true } } },
+    include: { accountLinks: { select: { guid: true, userId: true } } },
   });
   if (!player) throw Errors.playerNotFound(guid);
   return player;
@@ -208,7 +270,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
   // Favoritos del resumen + conteos de cuchillo (MOD_MELEE) computados al
   // vuelo sobre KillEvent: fuente única de verdad, sin counters derivables.
   // Todos los agregados del ORIGIN filtran targetGuid != '' (sin world/suicidio).
-  const [weaponRows, mapRows, aliases, knifeKills, knifeDeaths] = await Promise.all([
+  const [weaponRows, mapRows, aliases, knifeKills, knifeDeaths, account] = await Promise.all([
     prisma.killEvent.groupBy({
       by: ['weapon'],
       where: { originGuid: guid, isKill: true, weapon: { not: null }, targetGuid: { not: '' } },
@@ -229,6 +291,8 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     prisma.killEvent.count({ where: { originGuid: guid, isKill: true, mod: MELEE_MOD, targetGuid: { not: '' } } }),
     // Muertes a cuchillo: el jugador como VÍCTIMA de un evento MOD_MELEE.
     prisma.killEvent.count({ where: { targetGuid: guid, mod: MELEE_MOD } }),
+    // Cuenta dueña del guid: stats agregadas de TODOS sus guids (multi-PC).
+    getAccountSummary(player.accountLinks),
   ]);
   const favoriteWeapon =
     weaponRows
@@ -290,6 +354,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
     recentEvents,
     byServer: [...byServer.values()].sort((a, b) => b.kills + b.deaths - (a.kills + a.deaths)),
     aliases,
+    account,
   };
 }
 

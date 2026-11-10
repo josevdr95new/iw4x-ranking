@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma.js';
 import { processSkillUpdates } from '../src/services/skill/skill.service.js';
 import {
@@ -75,6 +75,13 @@ beforeAll(async () => {
   await resetDb();
 });
 
+// Escalas de BALANCE (2026-11-10, decisión del dueño — intercambio asimétrico):
+// el atacante gana delta × ESCALA_A (+50% default) y la víctima pierde
+// delta × ESCALA_V (−50% default), aplicadas al delta FINAL (tras mult de
+// evento y decay de bots). Contra bots el decay aplica ANTES de las escalas.
+const ESCALA_A = env.skillAttackGainScale; // 1.5 default
+const ESCALA_V = env.skillVictimLossScale; // 0.5 default
+
 describe('ELO: math puro (elo.ts)', () => {
   it('expectedScore sigue el clásico 1/(1+10^(dR/400))', () => {
     expect(expectedScore(SKILL.START, SKILL.START)).toBe(0.5);
@@ -132,8 +139,11 @@ describe('processSkillUpdates (incremental + determinista)', () => {
     const novatoAfterLoss = SKILL.START - (await skillsOf(['200000000000000001']))[0]!.skillElo;
 
     expect(novatoAfterWin).toBeGreaterThan(veteranoAfterWin); // upset vale más
-    expect(novatoAfterWin).toBeCloseTo(veteranoAfterLoss, 6); // zero-sum por evento
-    expect(veteranoAfterWin).toBeCloseTo(novatoAfterLoss, 6);
+    // Asimétrico: la víctima pierde delta × (0.5/1.25). Precisión 2 (no 6): el
+    // motor redondea POR EVENTO cada lado del intercambio (clampRound inline),
+    // así que la identidad proporcional tiene ±0.005 de jitter de redondeo.
+    expect(veteranoAfterLoss).toBeCloseTo(novatoAfterWin * (ESCALA_V / ESCALA_A), 2);
+    expect(novatoAfterLoss).toBeCloseTo(veteranoAfterWin * (ESCALA_V / ESCALA_A), 2);
     // Sanity: el novato sube bastante y el veterano apenas pierde al ganar
     expect(novatoAfterWin).toBeGreaterThan(20);
     expect(veteranoAfterWin).toBeLessThan(10);
@@ -254,6 +264,14 @@ describe('skill en la superficie HTTP (shape sin cambios)', () => {
     await killEvent({ origin: '200000000000000041', target: '200000000000000042', headshot: true, hitloc: 'head', epoch: 3003 });
     await processSkillUpdates();
 
+    // El leaderboard es POR CUENTA (una fila por User, docs/API.md): un guid
+    // sin AccountLink no rankea → vincula cada guid del duelo a su propia
+    // cuenta para que ambos aparezcan (single-guid → misma skill por fila).
+    const userFuerte = await prisma.user.create({ data: { email: 'lb-fuerte@test.local', passwordHash: 'test-hash', displayName: 'Fuerte' } });
+    const userDebil = await prisma.user.create({ data: { email: 'lb-debil@test.local', passwordHash: 'test-hash', displayName: 'Debil' } });
+    await prisma.accountLink.create({ data: { userId: userFuerte.id, guid: '200000000000000041' } });
+    await prisma.accountLink.create({ data: { userId: userDebil.id, guid: '200000000000000042' } });
+
     const res = await req().get('/api/leaderboard?sort=skill&order=desc&pageSize=10');
     expect(res.status).toBe(200);
     const body = res.body as {
@@ -311,7 +329,7 @@ describe('edge cases de eventos', () => {
     await processSkillUpdates();
 
     const row = (await skillsOf(['200000000000000061']))[0]!;
-    expect(row.skillElo).toBeCloseTo(SKILL.START - 2 * SKILL.WORLD_LOSS, 6);
+    expect(row.skillElo).toBeCloseTo(SKILL.START - 2 * SKILL.WORLD_LOSS * ESCALA_V, 6); // 2 muertes × 4 × 0.5 = −4 total
   });
 });
 
@@ -344,7 +362,7 @@ describe('botDecayFactor: math puro', () => {
 });
 
 describe('decay aplicado en processSkillUpdates (integraación)', () => {
-  it('skill 1200 vs bot: SIN decay (factor 1.0) y zero-sum intacto', async () => {
+  it('skill 1200 vs bot: SIN decay (factor 1.0); atacante gana pleno×1.5 y la víctima bot pierde pleno×0.5', async () => {
     await seedDuel('200000000000000071', 'NovatoVsBot', BOT_1, 'BotUno');
     await prisma.player.update({ where: { guid: '200000000000000071' }, data: { skillElo: 1200, skill: 1200 } });
     await killEvent({ origin: '200000000000000071', target: BOT_1, epoch: 5001 });
@@ -353,9 +371,11 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
     const fullDelta = killEloDelta(1200, SKILL.START, PLAIN_EVENT);
     const humano = (await skillsOf(['200000000000000071']))[0]!;
     const bot = (await skillsOf([BOT_1]))[0]!;
-    expect(humano.skillElo).toBe(round2(1200 + fullDelta)); // ELO PLENO (factor 1)
-    expect(bot.skillElo).toBe(round2(SKILL.START - fullDelta)); // el bot pierde lo mismo
-    expect(humano.skillElo + bot.skillElo).toBeCloseTo(2200, 6); // zero-sum
+    expect(humano.skillElo).toBe(round2(1200 + fullDelta * ESCALA_A)); // atacante: ganancia PLENA ×1.5
+    expect(bot.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // víctima bot: ×0.5
+    // Precisión 2 (no 6): el motor redondea POR EVENTO cada lado (clampRound
+    // inline) → la inflación esperada lleva ±0.005 de jitter de redondeo.
+    expect(humano.skillElo + bot.skillElo).toBeCloseTo(2200 + fullDelta * (ESCALA_A - ESCALA_V), 2); // inflación = delta×1.0 (aceptada)
   });
 
   it('skill 2000 vs bot: el delta se decae al factor del skill VIGENTE (~0.46)', async () => {
@@ -367,8 +387,8 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
     const decayed = killEloDelta(2000, SKILL.START, PLAIN_EVENT) * botDecayFactor(2000, BOT_DECAY);
     const humano = (await skillsOf(['200000000000000072']))[0]!;
     const bot = (await skillsOf([BOT_1]))[0]!;
-    expect(humano.skillElo).toBe(round2(2000 + decayed));
-    expect(bot.skillElo).toBe(round2(SKILL.START - decayed)); // el bot TAMBIÉN decae (zero-sum)
+    expect(humano.skillElo).toBe(round2(2000 + decayed * ESCALA_A)); // atacante: decayado ×1.5
+    expect(bot.skillElo).toBe(round2(SKILL.START - decayed * ESCALA_V)); // víctima bot: decayado ×0.5
     // Sanidad: el decay SÍ mordió (menos de la mitad del delta pleno a este skill).
     expect(humano.skillElo).toBeLessThan(2000 + killEloDelta(2000, SKILL.START, PLAIN_EVENT));
   });
@@ -381,7 +401,7 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
 
     const decayed = killEloDelta(2450, SKILL.START, PLAIN_EVENT) * 0.15;
     const humano = (await skillsOf(['200000000000000073']))[0]!;
-    expect(humano.skillElo).toBe(round2(2450 + decayed));
+    expect(humano.skillElo).toBe(round2(2450 + decayed * ESCALA_A));
     expect(humano.skillElo).toBeLessThan(2450 + 5); // claramente amortiguado
   });
 
@@ -392,13 +412,13 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
     await processSkillUpdates();
 
     // El factor sale del skill del HUMANO (2400+ → 0.15): la víctima hábil
-    // pierde poco y el bot gana ESE MISMO delta decayado.
+    // pierde decayado ×0.5 y el bot atacante gana el decayado ×1.25.
     const decayed = killEloDelta(SKILL.START, 2450, PLAIN_EVENT) * botDecayFactor(2450, BOT_DECAY);
     const humano = (await skillsOf(['200000000000000074']))[0]!;
     const bot = (await skillsOf([BOT_1]))[0]!;
-    expect(humano.skillElo).toBe(round2(2450 - decayed));
-    expect(bot.skillElo).toBe(round2(SKILL.START + decayed));
-    expect(2450 - humano.skillElo).toBeCloseTo(bot.skillElo - SKILL.START, 6); // zero-sum exacto
+    expect(humano.skillElo).toBe(round2(2450 - decayed * ESCALA_V)); // víctima: decayado ×0.5
+    expect(bot.skillElo).toBe(round2(SKILL.START + decayed * ESCALA_A)); // bot atacante: decayado ×1.5
+    expect(round2(2450 - humano.skillElo)).toBe(round2((bot.skillElo - SKILL.START) * (ESCALA_V / ESCALA_A))); // la víctima pierde menos de lo que gana el bot
   });
 
   it('vs HUMANO el decay NUNCA aplica (ELO pleno a cualquier skill)', async () => {
@@ -410,11 +430,11 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
 
     const fullDelta = killEloDelta(2450, 2450, PLAIN_EVENT);
     const [leyenda, rival] = await skillsOf(['200000000000000075', '200000000000000076']);
-    expect(leyenda!.skillElo).toBe(round2(2450 + fullDelta)); // sin factor: pleno
-    expect(rival!.skillElo).toBe(round2(2450 - fullDelta));
+    expect(leyenda!.skillElo).toBe(round2(2450 + fullDelta * ESCALA_A)); // sin factor: pleno ×1.5
+    expect(rival!.skillElo).toBe(round2(2450 - fullDelta * ESCALA_V)); // víctima: pleno ×0.5
   });
 
-  it('bot vs bot: sin decay (no hay humano que farmee)', async () => {
+  it('bot vs bot: sin decay (no hay humano que farmee); escalas de balance aplicadas igual', async () => {
     await resetDb();
     await player(BOT_1, 'BotUno', { skillElo: 1100 });
     await player(BOT_2, 'BotDos');
@@ -423,8 +443,8 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
 
     const fullDelta = killEloDelta(1100, SKILL.START, PLAIN_EVENT);
     const [bot1, bot2] = await skillsOf([BOT_1, BOT_2]);
-    expect(bot1!.skillElo).toBe(round2(1100 + fullDelta));
-    expect(bot2!.skillElo).toBe(round2(SKILL.START - fullDelta));
+    expect(bot1!.skillElo).toBe(round2(1100 + fullDelta * ESCALA_A)); // bot atacante ×1.5
+    expect(bot2!.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // bot víctima ×0.5
   });
 
   it('el decay usa el skill VIGENTE en cada evento: farmear bots a skill alto rinde mucho menos', async () => {
@@ -441,8 +461,15 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
     expect(farmer.skillElo).toBeGreaterThan(1800); // sigue subiendo…
     // …pero MUY amortiguado: si los 6 kills pagaran pleno llegaría más arriba.
     expect(farmer.skillElo).toBeLessThan(round2(1800 + 6 * fullDelta));
-    // Zero-sum decayado: el bot perdió exactamente lo que el humano ganó.
-    expect(bot.skillElo).toBe(round2(SKILL.START - (farmer.skillElo - 1800)));
+    // Intercambio asimétrico decayado: el bot-víctima pierde (ganancia ×1.5 del
+    // humano) × (0.5/1.5) = la mitad del delta decayado. La identidad es
+    // PROPORCIONAL con jitter de redondeo (el motor hace clampRound POR EVENTO
+    // en cada lado) → closeTo con tolerancia, más guardas de dirección.
+    const farmerGain = round2(farmer.skillElo - 1800);
+    const botLoss = round2(SKILL.START - bot.skillElo);
+    expect(botLoss).toBeGreaterThan(0);
+    expect(botLoss).toBeLessThan(farmerGain); // asimetría: la víctima baja MENOS de lo que sube el atacante
+    expect(botLoss).toBeCloseTo(farmerGain * (ESCALA_V / ESCALA_A), 1);
   });
 
   it('RECOMPUTE reproduce el decay: replay desde cero (solo eventos) → mismo skill final', async () => {
@@ -472,8 +499,10 @@ describe('decay aplicado en processSkillUpdates (integraación)', () => {
 // la ingesta no lo almacena como KillEvent → nada que aplicar). Estos tests
 // fijan el contrato del motor para el CASO QUE SÍ llega a la DB: cualquiera
 // que sea el rol del humano (atacante o víctima), la víctima del kill pierde
-// exactamente el delta aplicado (decayado contra bots, pleno contra humanos).
-describe('REGRESIÓN víctima siempre pierde |delta| (kill events almacenados)', () => {
+// el delta aplicado × SKILL_VICTIM_LOSS_SCALE (decayado contra bots, pleno
+// contra humanos; ×0.5 con el default del balance 2026-11-10) y el atacante
+// gana el mismo delta base × SKILL_ATTACK_GAIN_SCALE (×1.5).
+describe('REGRESIÓN víctima siempre pierde |delta| × escala (kill events almacenados)', () => {
   it('bot mata a humano a skill medio-alto (~1335, el caso del reporte): la víctima PIERDE ELO decayado', async () => {
     // Réplica del escenario reportado: humano ~1335.39 muere ante un bot ~1000.
     // El decay usa el skill VIGENTE del HUMANO (aquí la VÍCTIMA) → ~0.97.
@@ -484,13 +513,13 @@ describe('REGRESIÓN víctima siempre pierde |delta| (kill events almacenados)',
     await processSkillUpdates();
 
     const decayed = killEloDelta(SKILL.START, VICTIM_ELO, PLAIN_EVENT) * botDecayFactor(VICTIM_ELO, BOT_DECAY);
-    expect(decayed).toBeGreaterThan(20); // sanidad: la pérdida es sustanciosa (NO ~0)
+    expect(decayed).toBeGreaterThan(20); // sanidad: la pérdida BASE es sustanciosa (NO ~0)
     const humano = (await skillsOf(['200000000000000081']))[0]!;
     const bot = (await skillsOf([BOT_1]))[0]!;
-    expect(humano.skillElo).toBe(round2(VICTIM_ELO - decayed)); // la víctima SÍ baja
+    expect(humano.skillElo).toBe(round2(VICTIM_ELO - decayed * ESCALA_V)); // la víctima SÍ baja (decayado ×0.5)
     expect(humano.skillElo).toBeLessThan(VICTIM_ELO);
-    expect(bot.skillElo).toBe(round2(SKILL.START + decayed)); // zero-sum decayado
-    expect(round2(VICTIM_ELO - humano.skillElo)).toBe(round2(bot.skillElo - SKILL.START));
+    expect(bot.skillElo).toBe(round2(SKILL.START + decayed * ESCALA_A)); // bot atacante: decayado ×1.25
+    expect(round2(VICTIM_ELO - humano.skillElo)).toBe(round2(decayed * ESCALA_V));
   });
 
   it('bot mata a humano a ELO base: la víctima pierde el delta PLENO (factor 1.0 bajo soft)', async () => {
@@ -501,45 +530,169 @@ describe('REGRESIÓN víctima siempre pierde |delta| (kill events almacenados)',
     const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT); // ~20, sin decay
     const humano = (await skillsOf(['200000000000000082']))[0]!;
     const bot = (await skillsOf([BOT_1]))[0]!;
-    expect(humano.skillElo).toBe(round2(SKILL.START - fullDelta));
-    expect(bot.skillElo).toBe(round2(SKILL.START + fullDelta));
-    expect(SKILL.START - humano.skillElo).toBeCloseTo(bot.skillElo - SKILL.START, 6);
+    expect(humano.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // víctima: pleno ×0.5
+    expect(bot.skillElo).toBe(round2(SKILL.START + fullDelta * ESCALA_A)); // bot atacante: pleno ×1.25
+    expect(SKILL.START - humano.skillElo).toBeCloseTo((bot.skillElo - SKILL.START) * (ESCALA_V / ESCALA_A), 6);
   });
 
-  it('invariante en los 3 combos de roles: humano→humano, humano→bot y bot→humano — la víctima SIEMPRE baja', async () => {
+  it('invariante en los 3 combos de roles: humano→humano, humano→bot y bot→humano — la víctima SIEMPRE baja (× escala)', async () => {
     const H1 = '200000000000000083';
     const H2 = '200000000000000084';
 
-    // humano → humano: víctima pierde el delta pleno (simétrico, zero-sum).
+    // humano → humano: atacante gana pleno ×1.25; víctima pierde pleno ×0.5 (asimétrico).
     await seedDuel(H1, 'Atacante', H2, 'Víctima');
     await killEvent({ origin: H1, target: H2, epoch: 6003 });
     await processSkillUpdates();
     const [atacante, victima] = await skillsOf([H1, H2]);
     const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT);
-    expect(victima!.skillElo).toBe(round2(SKILL.START - fullDelta)); // la víctima BAJA
-    expect(atacante!.skillElo).toBe(round2(SKILL.START + fullDelta));
-    expect(round2(atacante!.skillElo + victima!.skillElo)).toBe(round2(2 * SKILL.START)); // zero-sum
+    expect(victima!.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // la víctima BAJA (la mitad)
+    expect(atacante!.skillElo).toBe(round2(SKILL.START + fullDelta * ESCALA_A)); // atacante PLENO escalado
+    expect(round2(atacante!.skillElo + victima!.skillElo)).toBe(round2(2 * SKILL.START + fullDelta * (ESCALA_A - ESCALA_V))); // inflación = delta×0.75
 
-    // humano → bot: el bot (víctima) pierde el delta decayado por el skill del humano.
+    // humano → bot: el bot (víctima) pierde el delta decayado ×0.5 por el skill del humano.
     await seedDuel(H1, 'Grinder', BOT_1, 'BotUno');
     await prisma.player.update({ where: { guid: H1 }, data: { skillElo: 1800, skill: 1800 } });
     await killEvent({ origin: H1, target: BOT_1, epoch: 6004 });
     await processSkillUpdates();
     const decayedGrind = killEloDelta(1800, SKILL.START, PLAIN_EVENT) * botDecayFactor(1800, BOT_DECAY);
     const botVictima = (await skillsOf([BOT_1]))[0]!;
-    expect(botVictima.skillElo).toBe(round2(SKILL.START - decayedGrind)); // el bot-víctima BAJA decayado
+    expect(botVictima.skillElo).toBe(round2(SKILL.START - decayedGrind * ESCALA_V)); // el bot-víctima BAJA decayado escalado
     expect(botVictima.skillElo).toBeLessThan(SKILL.START);
 
-    // bot → humano: el humano (víctima) pierde el delta decayado por SU skill.
+    // bot → humano: el humano (víctima) pierde el delta decayado ×0.5 por SU skill.
     await seedDuel(H2, 'Victima1800', BOT_1, 'BotUno');
     await prisma.player.update({ where: { guid: H2 }, data: { skillElo: 1800, skill: 1800 } });
     await killEvent({ origin: BOT_1, target: H2, epoch: 6005 });
     await processSkillUpdates();
     const decayedLoss = killEloDelta(SKILL.START, 1800, PLAIN_EVENT) * botDecayFactor(1800, BOT_DECAY);
     const humanoVictima = (await skillsOf([H2]))[0]!;
-    expect(humanoVictima.skillElo).toBe(round2(1800 - decayedLoss)); // la víctima BAJA decayado
+    expect(humanoVictima.skillElo).toBe(round2(1800 - decayedLoss * ESCALA_V)); // la víctima BAJA decayado escalado
     expect(humanoVictima.skillElo).toBeLessThan(1800);
-    // "Pierde poco" relativo: el decay mordió (menos del delta pleno a ese skill).
+    // Exacto: pierde decayedLoss × escala de víctima (el decay YA mordió antes de la escala).
+    expect(round2(1800 - humanoVictima.skillElo)).toBe(round2(decayedLoss * ESCALA_V));
     expect(1800 - humanoVictima.skillElo).toBeLessThan(killEloDelta(SKILL.START, 1800, PLAIN_EVENT));
+  });
+});
+
+// ── BALANCE 2026-11-10: SKILL_ATTACK_GAIN_SCALE (atacante +50%) + SKILL_VICTIM_LOSS_SCALE (víctima −50%) ──
+// Contrato del intercambio ASIMÉTRICO pedido por el dueño: subir premia +50%
+// y bajar duele la mitad. Ambas escalas van sobre el delta FINAL (fuera del
+// cap ×1.6 de eventMult); el decay de bots aplica ANTES de las escalas.
+describe('escalas de balance (atacante ×1.5 / víctima ×0.5)', () => {
+  it('humano→humano: atacante gana EXACTAMENTE killEloDelta×1.5 (fórmula intacta + escala) y la víctima pierde ×0.5', async () => {
+    await seedDuel('200000000000000091', 'Ganador', '200000000000000092', 'Perdedor');
+    await killEvent({ origin: '200000000000000091', target: '200000000000000092', epoch: 7001 });
+    await processSkillUpdates();
+
+    const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT); // mult de evento = 1 dentro
+    const [ganador, perdedor] = await skillsOf(['200000000000000091', '200000000000000092']);
+    expect(ganador!.skillElo).toBe(round2(SKILL.START + fullDelta * ESCALA_A)); // +50%: la fórmula del atacante NO cambió
+    expect(perdedor!.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // −50%
+    // Dirección del balance: antes era +20/−20 → ahora +30/−10.
+    expect(ganador!.skillElo).toBeGreaterThan(SKILL.START + fullDelta);
+    expect(perdedor!.skillElo).toBeGreaterThan(SKILL.START - fullDelta);
+  });
+
+  it('humano→bot: el atacante humano gana decayado×1.5 (+50% SOBRE el decayado) y el bot víctima pierde decayado×0.5', async () => {
+    await seedDuel('200000000000000093', 'GrinderEscala', BOT_1, 'BotUno');
+    await prisma.player.update({ where: { guid: '200000000000000093' }, data: { skillElo: 1800, skill: 1800 } });
+    await killEvent({ origin: '200000000000000093', target: BOT_1, epoch: 7002 });
+    await processSkillUpdates();
+
+    const decayed = killEloDelta(1800, SKILL.START, PLAIN_EVENT) * botDecayFactor(1800, BOT_DECAY);
+    const humano = (await skillsOf(['200000000000000093']))[0]!;
+    const bot = (await skillsOf([BOT_1]))[0]!;
+    expect(humano.skillElo).toBe(round2(1800 + decayed * ESCALA_A)); // decay del humano PRIMERO, escala DESPUÉS
+    expect(bot.skillElo).toBe(round2(SKILL.START - decayed * ESCALA_V));
+  });
+
+  it('bot→humano: la escala de atacante aplica IGUAL para bots (gana decayado×1.5); la víctima pierde ×0.5', async () => {
+    await seedDuel('200000000000000094', 'VictimaEscala1375', BOT_1, 'BotUno');
+    await prisma.player.update({ where: { guid: '200000000000000094' }, data: { skillElo: 1375.39, skill: 1375.39 } });
+    await killEvent({ origin: BOT_1, target: '200000000000000094', epoch: 7003 });
+    await processSkillUpdates();
+
+    const decayed = killEloDelta(SKILL.START, 1375.39, PLAIN_EVENT) * botDecayFactor(1375.39, BOT_DECAY);
+    const humano = (await skillsOf(['200000000000000094']))[0]!;
+    const bot = (await skillsOf([BOT_1]))[0]!;
+    expect(bot.skillElo).toBe(round2(SKILL.START + decayed * ESCALA_A));
+    expect(humano.skillElo).toBe(round2(1375.39 - decayed * ESCALA_V));
+  });
+
+  it('teamkill SIN escalas: −24 plano al atacante (ni ×1.25 ni ×0.5) y la víctima no cambia', async () => {
+    await seedDuel('200000000000000095', 'TkAtacante', '200000000000000096', 'TkCompañero');
+    await killEvent({ origin: '200000000000000095', target: '200000000000000096', isTeamkill: true, epoch: 7004 });
+    await processSkillUpdates();
+
+    const [atacante, companero] = await skillsOf(['200000000000000095', '200000000000000096']);
+    expect(atacante!.skillElo).toBeCloseTo(SKILL.START - SKILL.TEAMKILL_PENALTY, 6); // −24 FIJO
+    expect(companero!.skillElo).toBe(SKILL.START);
+  });
+
+  it('world/suicidio: SOLO escala de víctima (WORLD_LOSS 4 → −2 efectivos); sin ganancia de atacante', async () => {
+    await resetDb();
+    await player('200000000000000097', 'SuicidaEscala');
+    await killEvent({ origin: '200000000000000097', target: null, epoch: 7005 }); // world (sin atacante)
+    await killEvent({ origin: '200000000000000097', target: '200000000000000097', epoch: 7006 }); // suicidio
+    await processSkillUpdates();
+
+    const row = (await skillsOf(['200000000000000097']))[0]!;
+    expect(row.skillElo).toBe(round2(SKILL.START - 2 * SKILL.WORLD_LOSS * ESCALA_V)); // 1000 − 2×(4×0.5) = 996
+    expect(row.skillElo).toBe(996); // exacto con los defaults
+  });
+
+  it('env override EN CALIENTE del atacante: skillAttackGainScale=0.5 → gana delta×0.5 (la escala de víctima NO cambia)', async () => {
+    const original = env.skillAttackGainScale;
+    (env as { skillAttackGainScale: number }).skillAttackGainScale = 0.5;
+    try {
+      await seedDuel('200000000000000098', 'OverrideA', '200000000000000099', 'OverrideB');
+      await killEvent({ origin: '200000000000000098', target: '200000000000000099', epoch: 7007 });
+      await processSkillUpdates();
+
+      const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT);
+      const [atacante, victima] = await skillsOf(['200000000000000098', '200000000000000099']);
+      expect(atacante!.skillElo).toBe(round2(SKILL.START + fullDelta * 0.5)); // escala SOBRESCRITA por env
+      expect(victima!.skillElo).toBe(round2(SKILL.START - fullDelta * ESCALA_V)); // víctima intacta
+    } finally {
+      (env as { skillAttackGainScale: number }).skillAttackGainScale = original;
+    }
+  });
+
+  it('env override EN CALIENTE de la víctima: skillVictimLossScale=1 → pierde delta completo (atacante con su ×1.25 intacto)', async () => {
+    const original = env.skillVictimLossScale;
+    (env as { skillVictimLossScale: number }).skillVictimLossScale = 1;
+    try {
+      await seedDuel('200000000000000100', 'OverrideV', '200000000000000101', 'OverrideW');
+      await killEvent({ origin: '200000000000000100', target: '200000000000000101', epoch: 7008 });
+      await processSkillUpdates();
+
+      const fullDelta = killEloDelta(SKILL.START, SKILL.START, PLAIN_EVENT);
+      const [atacante, victima] = await skillsOf(['200000000000000100', '200000000000000101']);
+      expect(victima!.skillElo).toBe(round2(SKILL.START - fullDelta)); // escala SOBRESCRITA por env
+      expect(atacante!.skillElo).toBe(round2(SKILL.START + fullDelta * ESCALA_A)); // atacante intacto
+    } finally {
+      (env as { skillVictimLossScale: number }).skillVictimLossScale = original;
+    }
+  });
+
+  it('SKILL_VICTIM_LOSS_SCALE y SKILL_ATTACK_GAIN_SCALE se PARSEAN de process.env (zod, defaults 0.5/1.25)', async () => {
+    expect(env.skillVictimLossScale).toBe(0.5); // default del schema
+    expect(env.skillAttackGainScale).toBe(1.5);
+
+    process.env.SKILL_VICTIM_LOSS_SCALE = '0.25';
+    process.env.SKILL_ATTACK_GAIN_SCALE = '2';
+    vi.resetModules();
+    try {
+      const fresh = await import('../src/config/env.js');
+      expect(fresh.env.skillVictimLossScale).toBe(0.25);
+      expect(fresh.env.skillAttackGainScale).toBe(2);
+    } finally {
+      delete process.env.SKILL_VICTIM_LOSS_SCALE;
+      delete process.env.SKILL_ATTACK_GAIN_SCALE;
+      vi.resetModules();
+    }
+    // El módulo YA cargado conserva sus valores (el reset solo afecta re-imports).
+    expect(env.skillVictimLossScale).toBe(0.5);
+    expect(env.skillAttackGainScale).toBe(1.5);
   });
 });

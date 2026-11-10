@@ -96,6 +96,19 @@ describe('Sync desde IW4MAdmin (defensivo, read-only)', () => {
 });
 
 describe('GET /api/leaderboard', () => {
+  beforeAll(async () => {
+    // El leaderboard es POR CUENTA (una fila por User, no por GUID): vincula
+    // cada player del mock a su propia cuenta (displayName = nick del player)
+    // para que los 12 rankeen como cuentas de guid único.
+    const players = await prisma.player.findMany({ orderBy: [{ id: 'asc' }] });
+    for (const [index, player] of players.entries()) {
+      const user = await prisma.user.create({
+        data: { email: `lb${index}@test.local`, passwordHash: 'test-hash', displayName: player.name },
+      });
+      await prisma.accountLink.create({ data: { userId: user.id, guid: player.guid } });
+    }
+  });
+
   it('ordena por kills desc y pagina', async () => {
     const res = await req().get('/api/leaderboard?sort=kills&order=desc&page=1&pageSize=5');
     expect(res.status).toBe(200);
@@ -115,9 +128,9 @@ describe('GET /api/leaderboard', () => {
     expect([...kills].sort((a, b) => b - a)).toEqual(kills);
     expect(body.players[0]?.rank).toBe(1);
     expect(body.players[4]?.rank).toBe(5);
-    // Campo nuevo: linked (en tests, el mock no tiene cuentas vinculadas aún).
+    // Campo nuevo: linked (filas POR CUENTA → SIEMPRE true: nacen de un AccountLink).
     expect(body.players.every((player) => typeof player.linked === 'boolean')).toBe(true);
-    expect(body.players[0]?.linked).toBe(false);
+    expect(body.players[0]?.linked).toBe(true);
   });
 
   it('rank es SIEMPRE la posición global, incluso con búsqueda y paginación', async () => {

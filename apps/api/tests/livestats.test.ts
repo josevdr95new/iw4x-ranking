@@ -19,11 +19,14 @@ import {
   parseLiveStatsText,
   resetLiveStatsState,
   runLiveStatsTick,
+  splitLiveStatsFiles,
 } from '../src/services/livestats.service.js';
 import { FakeRconServer, LIVE_STATUS_FIXTURE } from './fake-rcon.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_FILE = resolve(here, 'data', 'livestats-snapshot.json');
+const FIXTURE_FILE_2 = resolve(here, 'data', 'livestats-snapshot-2.json'); // segunda "sala"
+const FIXTURE_FILE_MISSING = resolve(here, 'data', 'livestats-que-no-existe.json'); // nunca se crea
 
 // GUIDs de prueba (decimal = formato Player.guid / getguid() humano).
 const LINKED_HEX = 'AB12CD34EF567890'; // el humano del fixture rcon (slot 0)
@@ -41,6 +44,11 @@ function line(guid: string, xp: number, prestige = 0, kills = 10, deaths = 5, he
 
 function writeSnapshot(lines: string[]): void {
   writeFileSync(FIXTURE_FILE, ['#iw4x-ranking v1', ...lines].join('\n'), 'utf8');
+}
+
+/** Escribe un snapshot v4 en un archivo ARBITRARIO (para tests multi-archivo). */
+function writeSnapshotTo(file: string, lines: string[]): void {
+  writeFileSync(file, ['#iw4x-ranking v4', ...lines].join('\n'), 'utf8');
 }
 
 const SAVED_ENV: Record<string, string | undefined> = {
@@ -61,6 +69,8 @@ beforeAll(() => {
 
 afterAll(async () => {
   rmSync(FIXTURE_FILE, { force: true });
+  rmSync(FIXTURE_FILE_2, { force: true });
+  rmSync(FIXTURE_FILE_MISSING, { force: true });
   await resetDb();
   for (const [key, value] of Object.entries(SAVED_ENV)) {
     if (value === undefined) delete process.env[key];
@@ -212,6 +222,100 @@ describe('ingesta live v4 (runLiveStatsTick)', () => {
     const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
     expect(player?.saveXp).toBe(5120);
     expect(player?.savePrestige).toBe(2); // la línea legacy sí lo trae
+  });
+});
+
+// ── Multi-archivo (LIVE_STATS_FILE con comas: una ruta por sala) ────────────
+
+describe('ingesta multi-archivo (LIVE_STATS_FILE="p1,p2")', () => {
+  const T0 = 1_700_000_000_000;
+  const GUID_SALA2_DEC = '98765432109876543'; // humano "de la sala 2"
+
+  it('splitLiveStatsFiles separa por coma, hace trim y descarta vacíos', () => {
+    expect(splitLiveStatsFiles('/a/b.json,/c/d.json')).toEqual(['/a/b.json', '/c/d.json']);
+    expect(splitLiveStatsFiles(' /a/b.json ,  , /c/d.json ')).toEqual(['/a/b.json', '/c/d.json']);
+    expect(splitLiveStatsFiles('/solo/path.json')).toEqual(['/solo/path.json']);
+    expect(splitLiveStatsFiles(',,')).toEqual([]);
+  });
+
+  it('dedupe: MISMO guid en ambos archivos → 1 entrada, gana el archivo posterior', async () => {
+    writeSnapshotTo(FIXTURE_FILE, [`${UNLINKED_DEC};1000;10;Sala1`]);
+    writeSnapshotTo(FIXTURE_FILE_2, [`${UNLINKED_DEC};2000;20;Sala2`]);
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE},${FIXTURE_FILE_2}`, now: T0 });
+
+    expect(result.read).toBe(true);
+    expect(result.filesTotal).toBe(2);
+    expect(result.filesRead).toBe(2);
+    expect(result.entries).toBe(1); // dedupe por guid
+    expect(result.playersUpdated).toBe(1);
+
+    const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    expect(player?.saveXp).toBe(2000); // el archivo POSTERIOR (sala2) gana
+    expect(player?.name).toBe('Sala2');
+
+    const snapshot = getLiveStatsSnapshot();
+    expect(snapshot?.players).toHaveLength(1);
+    expect(snapshot?.players[0]).toMatchObject({ guid: UNLINKED_DEC, xp: 2000, name: 'Sala2', kills: 20 });
+  });
+
+  it('el archivo posterior gana AUNQUE traiga MENOS xp (orden posterior, no máximo)', async () => {
+    writeSnapshotTo(FIXTURE_FILE, [`${UNLINKED_DEC};3000;30;Sala1`]);
+    writeSnapshotTo(FIXTURE_FILE_2, [`${UNLINKED_DEC};500;5;Sala2`]);
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE},${FIXTURE_FILE_2}`, now: T0 });
+
+    expect(result.entries).toBe(1);
+    const player = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    expect(player?.saveXp).toBe(500); // posterior gana, aunque sea menor
+  });
+
+  it('guids DISTINTOS → se COMBINAN: ambos players upsertados, snapshot con 2', async () => {
+    writeSnapshotTo(FIXTURE_FILE, [`${UNLINKED_DEC};1000;10;Sala1`]);
+    writeSnapshotTo(FIXTURE_FILE_2, [`${GUID_SALA2_DEC};4000;40;Sala2`]);
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE},${FIXTURE_FILE_2}`, now: T0 });
+
+    expect(result.read).toBe(true);
+    expect(result.entries).toBe(2);
+    expect(result.playersUpdated).toBe(2);
+
+    const sala1 = await prisma.player.findUnique({ where: { guid: UNLINKED_DEC } });
+    const sala2 = await prisma.player.findUnique({ where: { guid: GUID_SALA2_DEC } });
+    expect(sala1?.saveXp).toBe(1000);
+    expect(sala2?.saveXp).toBe(4000);
+    expect(getLiveStatsSnapshot()?.players.map((p) => p.guid).sort()).toEqual([GUID_SALA2_DEC, UNLINKED_DEC].sort());
+  });
+
+  it('archivo VACÍO (solo cabecera) → aporta 0; el otro archivo alimenta la ingesta', async () => {
+    writeSnapshotTo(FIXTURE_FILE, []); // cabecera v4 sin líneas: 0 entradas
+    writeSnapshotTo(FIXTURE_FILE_2, [`${GUID_SALA2_DEC};2000;20;Sala2`]);
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE},${FIXTURE_FILE_2}`, now: T0 });
+
+    expect(result.read).toBe(true);
+    expect(result.filesRead).toBe(2);
+    expect(result.entries).toBe(1);
+    expect(result.playersUpdated).toBe(1);
+    const sala2Player = await prisma.player.findUnique({ where: { guid: GUID_SALA2_DEC } });
+    expect(sala2Player?.saveXp).toBe(2000);
+  });
+
+  it('archivo AUSENTE entre varios → silencioso, aporta 0, el resto se procesa', async () => {
+    writeSnapshotTo(FIXTURE_FILE_2, [`${GUID_SALA2_DEC};2500;25;Sala2`]);
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE_MISSING},${FIXTURE_FILE_2}`, now: T0 });
+
+    expect(result.read).toBe(true); // al menos UNO se leyó
+    expect(result.filesTotal).toBe(2);
+    expect(result.filesRead).toBe(1); // el ausente no cuenta
+    expect(result.entries).toBe(1);
+    expect(result.playersUpdated).toBe(1);
+    expect(await prisma.player.count()).toBe(1);
+  });
+
+  it('TODOS los archivos ausentes → no-op (read=false, DB intacta, sin throw)', async () => {
+    const result = await runLiveStatsTick({ file: `${FIXTURE_FILE_MISSING},${FIXTURE_FILE_MISSING}` });
+    expect(result.read).toBe(false);
+    expect(result.filesTotal).toBe(2);
+    expect(result.filesRead).toBe(0);
+    expect(result.entries).toBe(0);
+    expect(await prisma.player.count()).toBe(0);
   });
 });
 

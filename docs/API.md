@@ -410,7 +410,7 @@ El archivo `iw4x.stat` que el juego escribe en `players\` **NO es el buffer plan
 **Dónde se expone:**
 
 - `GET /api/players/:guid` → `player.save`: `{ level, prestige, xp, parsedAt } | null` (null = sin cuenta vinculada o último blob no parseable). P. ej. `"save": { "level": 35, "prestige": 1, "xp": 502700, "parsedAt": "2026-11-08T09:00:00.000Z" }`.
-- `GET /api/leaderboard` → cada entrada incluye `"level": number | null`; ordenable con `sort=level` (SQLite: nulls al final en `desc`).
+- `GET /api/leaderboard` → cada entrada (por CUENTA) incluye `"level": number | null` = el MAX `saveLevel` entre los guids de la cuenta; ordenable con `sort=level` (SQLite: nulls al final en `desc`).
 - Los career stats y clases parseados NO se exponen aún por API (quedan en el parser + tests a la espera del fixture real del dueño).
 
 ---
@@ -680,19 +680,40 @@ Errores: `401`.
 
 ### `GET /api/leaderboard`
 
+> **UNA FILA POR CUENTA (User), no por GUID** (refactor multi-PC 2026-11-10).
+> ROOT CAUSE: en el cyber-café un usuario juega desde VARIAS PCs; cada PC genera su propio guid que se
+> auto-vincula (por sesión) a la MISMA cuenta — multi-PC es una FEATURE y los links NUNCA se borran.
+> Con el ranking por GUID el mismo jugador aparecía VARIAS VECES ("admin" con 14 kills + "admin" con
+> 40 kills). Ahora la identidad es la CUENTA:
+>
+> - Rankean solo las cuentas con al menos 1 guid humano vinculado (los guids sin cuenta no rankean;
+>   las cuentas sin guids tampoco aparecen). Con exigir-launcher, un anónimo no debería existir.
+> - `name` = **displayName de la CUENTA** (nunca el último nick del juego — ese fue el origen de la
+>   confusión admin/pepe).
+> - Stats de sus guids **SUMADAS**: `kills`, `deaths`, `headshots`, `timePlayed`, `connections`
+>   (`kd` recalculado sobre los sumas).
+> - `skill` = **el MÁXIMO** de los skills de sus guids (su mejor rendimiento; la alternativa promedio
+>   se descartó porque penaliza el multi-PC).
+> - `level` = el máximo `saveLevel` entre sus guids (el `saveXp`/`prestige` coherente con ese mismo
+>   guid viven en el perfil per-guid); `lastConnection` = la más reciente entre sus guids.
+> - `guid` = el "guid primario" de la cuenta (el de MAYOR skill; empate: kills desc, guid menor) —
+>   mantiene el shape y permite navegar al perfil per-guid desde la fila.
+> - `linked` SIEMPRE `true` en filas de cuenta. Los bots NO son cuentas: con `includeBots=true`
+>   aparecen per-guid (como siempre) con `linked: false`.
+
 Query params (todos opcionales):
 
 | Param       | Valores / default                          |
 | ----------- | ------------------------------------------ |
-| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` \| `headshots` \| `level` |
+| `sort`      | `kills` (default) \| `deaths` \| `kd` \| `timePlayed` \| `skill` \| `headshots` \| `level` — TODOS operan sobre los valores AGREGADOS de la cuenta |
 | `order`     | `desc` (default) \| `asc`                  |
-| `search`    | substring del nombre (case-insensitive, ASCII) |
+| `search`    | substring (case-insensitive, ASCII): matchea el **displayName de la cuenta** Y los **nicks de juego de cualquiera de sus guids** (buscar "pepe" encuentra la cuenta aunque la fila sea por cuenta) |
 | `page`      | ≥ 1 (default 1)                            |
 | `pageSize`  | 1–100 (default 20)                         |
-| `minMatches`| filtra `connections >= N` (default 0 = sin filtro) |
+| `minMatches`| filtra `connections >= N` sobre las conexiones SUMADAS de la cuenta (default 0 = sin filtro) |
 | `includeBots` | `true` \| `false` (default **false**: el ranking público es SOLO-humanos; los bots están marcados con `Player.isBot` y excluidos) |
 
-> Los bots (guids del rango `0xb07…`) quedan fuera del leaderboard por defecto en TODOS los sorts (incluido `sort=skill`). Con `includeBots=true` vuelven a aparecer. Si el frontend necesita una vista "con bots", pásale el param y rotúlalo.
+> Los bots (guids del rango `0xb07…`) quedan fuera del leaderboard por defecto en TODOS los sorts (incluido `sort=skill`). Con `includeBots=true` se añaden como filas **per-guid** (los bots no son cuentas) y desplazan los ranks de las cuentas en esa vista. Si el frontend necesita una vista "con bots", pásale el param y rotúlalo.
 
 Ejemplo: `GET /api/leaderboard?sort=kills&order=desc&page=1&pageSize=2`
 
@@ -720,7 +741,7 @@ Response **200** (ejemplo real):
       "headshots": 61,
       "level": 35,
       "lastConnection": "2026-11-02T21:59:06.318Z",
-      "linked": false,
+      "linked": true,
       "medal": { "tier": 1, "tierId": 1, "name": "RECLUTA", "assetId": "medal-1-recluta", "stars": 2, "globalRank": null, "eliteTop12": false }
     },
     {
@@ -743,11 +764,11 @@ Response **200** (ejemplo real):
 }
 ```
 
-Unidades: `timePlayed` en **segundos**; `linked` es `true` si ese GUID tiene una cuenta web vinculada (ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo). `level` = nivel parseado del cloud save de la cuenta vinculada (`null` si ese guid nunca tuvo un save parseado con éxito; con `sort=level` los null van al final en `desc`) — ver "Parse del iw4x.stat" en la sección Cloud save.
+Unidades: `timePlayed` en **segundos** (SUMADO entre los guids de la cuenta); `linked` es SIEMPRE `true` (toda fila de cuenta nace de un AccountLink; ver sección Vinculación). `headshots` = kills con hitloc `head`/`helmet` SUMADAS (acreditadas al KILLER; con `sort=headshots` el leaderboard ordena por este campo). `level` = el MÁXIMO nivel parseado del cloud save entre los guids de la cuenta (`null` si ninguno tuvo un save parseado con éxito; con `sort=level` los null van al final en `desc`) — ver "Parse del iw4x.stat" en la sección Cloud save.
 
-> **`rank` es SIEMPRE la posición GLOBAL** del jugador en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, el único match de un jugador que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
+> **`rank` es SIEMPRE la posición GLOBAL de la CUENTA** en el ranking por defecto (`kills` desc, empate por `name` asc), **independientemente de la búsqueda, los filtros y la paginación**. Con una búsqueda activa, la única cuenta match que es #39 global se muestra con `rank: 39` (no `#1`). En paginación, la página 2 muestra ranks globales continuos (`6, 7, 8…`), no `1, 2, 3`.
 
-> **`medal`** (ver sección "Medallas ELO"): medalla ELO derivada del skill actual de cada entrada. En tiers 1–7 trae `stars` 1–5; en LEYENDA (`tier: 8`) `stars` es `null` y trae `globalRank` + `eliteTop12`. La UI copia los PNG `medal.assetId + ".png"` de `apps/launcher/assets/medals/`.
+> **`medal`** (ver sección "Medallas ELO"): medalla ELO derivada del skill actual de la CUENTA (el MAX de sus guids; una sola medalla por fila). En tiers 1–7 trae `stars` 1–5; en LEYENDA (`tier: 8`) `stars` es `null` y trae `globalRank` (posición de la CUENTA entre cuentas de la población ELO) + `eliteTop12`. La UI copia los PNG `medal.assetId + ".png"` de `apps/launcher/assets/medals/`.
 
 Errores: `400 VALIDATION_ERROR` (p. ej. `sort=hacks`).
 
@@ -819,13 +840,26 @@ Response **200** (ejemplo real, truncado):
   ],
   "byServer": [
     { "server": "192.168.3.99:28961", "kills": 20, "deaths": 10 }
-  ]
+  ],
+  "aliases": [
+    { "name": "AlphaOld", "firstSeenAt": "2026-11-06T21:00:00.000Z", "lastSeenAt": "2026-11-07T01:30:00.000Z", "occurrences": 4 }
+  ],
+  "account": {
+    "displayName": "CarePackage_Sniper",
+    "totalKills": 319,
+    "totalDeaths": 205,
+    "totalHeadshots": 68,
+    "guids": [
+      { "guid": "341831007923465200", "lastServer": "192.168.3.99:28961", "lastConnection": "2026-11-02T21:59:06.318Z" },
+      { "guid": "615534551553455100", "lastServer": "192.168.3.100:28962", "lastConnection": "2026-10-30T03:12:00.000Z" }
+    ]
+  }
 }
 ```
 
 Notas para el frontend:
 
-- `rank`: posición global del jugador con el **mismo criterio por defecto del leaderboard** (`sort=kills&order=desc`, empate por `name` asc). Es `null` solo si el jugador no clasifica en ese ranking (con los criterios actuales, todo jugador sincronizado tiene rank). Evita hacer lookup al top-N para calcular la posición.
+- `rank`: posición global del GUID con el criterio por defecto (`kills` desc, empate `name` asc, sobre TODOS los players: incluye guids sin cuenta y — si existieran — bots). Es `null` solo si el jugador no clasifica en ese ranking (con los criterios actuales, todo jugador sincronizado tiene rank). Evita hacer lookup al top-N para calcular la posición. NOTA: el leaderboard ahora es POR CUENTA — para la posición de la cuenta usa el `rank` de su fila en `GET /api/leaderboard`.
 - `medal` (ver sección "Medallas ELO"): medalla ELO derivada del skill ACTUAL del jugador (nunca persistida). En LEYENDA (`tier: 8`, skill 2050+): `stars: null` + `globalRank` (posición global por skill entre humanos con actividad ELO) + `eliteTop12` (rank ≤ 12). En tiers 1–7: `stars` 1–5 y `globalRank: null`. Descensos automáticos: el ELO baja con muertes y la medalla se recalcula en cada lectura.
 - `recentEvents`: últimos 20 eventos del jugador, más reciente primero. `direction` es `kill` (el jugador fue el origen) o `death` (fue el objetivo). `isKill: false` = evento no letal registrado por IW4MAdmin.
 - `weapon`: con fuente IW4MAdmin es el **id crudo** (número como string); con fuente log (games_mp.log) es el **nombre base del arma** (`ak47`, `m1014`, ...). El mapping a nombre legible no está implementado aún.
@@ -835,12 +869,27 @@ Notas para el frontend:
 - `linked`: si el GUID tiene cuenta web vinculada.
 - `save` (cloud save parseado): `{ level, prestige, xp, parsedAt }` con la progresión del `iw4x.stat` de la cuenta vinculada; `null` si el guid nunca tuvo un save parseado con éxito (sin cuenta vinculada, o el último blob no era parseable). `parsedAt` = cuándo se parseó por última vez con éxito (ISO). Detalle de confianza/sanity: ver "Parse del iw4x.stat" en la sección Cloud save.
 - `classes` / `classesUpdatedAt`: las 15 clases de loadout (customClasses) que el dueño subió desde el juego con `/dumpPlayerData` (ver sección "Clases de loadout"); `null` si nunca subió un dump.
-- `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres: si el leaderboard muestra dos filas con el mismo displayName (son 2 entidades/GUIDs distintas, es verdad), el perfil con `aliases` desambigua quién es quién.
+- `aliases` (anti-confusión): nombres HISTÓRICOS vistos para este GUID en el games_mp.log (líneas J y K). Excluye el nombre actual (`player.name`), ordenado por `lastSeenAt` desc, máximo 10. `occurrences` = apariciones acumuladas (J + K). Array vacío si el guid siempre usó el mismo nombre. Útil para detectar PCs compartidas o renombres.
 
 ```json
 "aliases": [
   { "name": "AlphaOld", "firstSeenAt": "2026-11-06T21:00:00.000Z", "lastSeenAt": "2026-11-07T01:30:00.000Z", "occurrences": 4 }
 ]
+```
+
+- `account` (multi-PC, NUEVO): la CUENTA dueña del guid con sus stats **SUMADAS** entre TODOS sus guids vinculados + la lista de guids (incluido el actual, orden de vinculación) con la última PC/conexión de cada uno. `null` si el guid no está vinculado a ninguna cuenta. Es la pieza que resuelve la duplicación visual del multi-PC: el leaderboard muestra UNA fila por cuenta (con stats sumadas y skill = MAX), y el perfil per-guid muestra el detalle de ESA identidad + "este jugador también juega en estas otras PCs". NUNCA borres links ni players para "arreglar" duplicados: el agrupamiento ya lo resuelve.
+
+```json
+"account": {
+  "displayName": "CarePackage_Sniper",
+  "totalKills": 319,
+  "totalDeaths": 205,
+  "totalHeadshots": 68,
+  "guids": [
+    { "guid": "341831007923465200", "lastServer": "192.168.3.99:28961", "lastConnection": "2026-11-02T21:59:06.318Z" },
+    { "guid": "615534551553455100", "lastServer": "192.168.3.100:28962", "lastConnection": "2026-10-30T03:12:00.000Z" }
+  ]
+}
 ```
 
 Errores: `400 VALIDATION_ERROR` (GUID no numérico), `404 PLAYER_NOT_FOUND`.
@@ -1037,12 +1086,12 @@ El perfil `GET /api/players/:guid` incluye en `player`:
 
 Fórmula resumida (constantes en `apps/api/src/services/skill/elo.ts`):
 
-- Cada kill mueve puntos del atacante a la víctima ponderado por fuerza relativa (expected-score clásico, escala 400): `delta = K_medio × mult × (1 − expected)`. Zero-sum por evento.
+- Cada kill mueve puntos ponderados por fuerza relativa (expected-score clásico, escala 400): `delta = K_medio × mult × (1 − expected)`. **Intercambio ASIMÉTRICO (balance 2026-11-10, decisión del dueño — inflación aceptada)**: el atacante gana `delta × SKILL_ATTACK_GAIN_SCALE` (**default 1.5**) y la víctima pierde `delta × SKILL_VICTIM_LOSS_SCALE` (**default 0.5**, bajar duele la mitad). Ambas escalas se aplican al delta FINAL —después del mult de evento y del decay de bots— y NO están dentro del cap ×1.6 del mult. Env: `SKILL_ATTACK_GAIN_SCALE=1.5`, `SKILL_VICTIM_LOSS_SCALE=0.5`. Ejemplo del dueño (atacante ~1375 mata a bot ~1000 con headshot y daño alto; delta post-decay ≈ 36): antes ≈ +36/−36 → ahora **≈ +54 / −18**. Contra HUMANOS el gain es el mismo ×1.5 y la víctima humana pierde su delta ×0.5.
 - `K` decrece con el skill (los novatos se mueven más): 40 (< 1150), 30 (1150–1600), 24 (> 1600).
 - `mult` (bonus del atacante): headshot ×1.25; hitloc difícil (`neck`) ×1.1; daño sobre 100: +1% cada 10 dmg, cap +25%. Combinación acotada por 1.6 (guard).
 - Teamkill: penalidad plana de 24 al atacante (la víctima no gana nada → sin farming de compañeros).
-- World/suicidio (defensivo; la ingesta por log no almacena estos eventos): pérdida plana de 4.
-- **Decay contra BOTS (anti-farmeo)**: si uno de los dos lados del kill es un bot (rango `0xb07…`), el delta del evento se multiplica por `botFactor(skill VIGENTE del humano)`: **1.0 con skill ≤ 1300**, **lineal hasta 0.15 con skill ≥ 2400**, clamp 0.15 arriba. Env: `BOT_ELO_DECAY_MIN=0.15`, `BOT_ELO_DECAY_SOFT=1300`, `BOT_ELO_DECAY_HARD=2400`. El bot gana/pierde ESE MISMO delta decayado (zero-sum); **contra HUMANOS el decay NO aplica** (ELO pleno solo jugando contra personas) y bot-vs-bot tampoco. Ejemplos con los defaults: skill 1200 vs bot → 100% (~+20/kill); 1800 → 61.4% (~+12); 2000 → 45.9% (~+9); 2400+ → 15% (~+3). El `recompute:skill` lo reproduce NATURALMENTE: el factor se calcula con el skill en memoria del momento del evento, y el reprocess secuencial reconstruye los mismos skills intermedios → mismos factores → mismo skill final (función pura `botDecayFactor` en `src/services/skill/elo.ts`, aplicada en `skill.service.ts`).
+- World/suicidio (sin atacante no hay ganancia ni escala de atacante): pérdida plana `4 × SKILL_VICTIM_LOSS_SCALE` = **2 efectivos** con defaults.
+- **Decay contra BOTS (anti-farmeo)**: si uno de los dos lados del kill es un bot (rango `0xb07…`), el delta del evento se multiplica por `botFactor(skill VIGENTE del humano)`: **1.0 con skill ≤ 1300**, **lineal hasta 0.15 con skill ≥ 2400**, clamp 0.15 arriba. Env: `BOT_ELO_DECAY_MIN=0.15`, `BOT_ELO_DECAY_SOFT=1300`, `BOT_ELO_DECAY_HARD=2400`. SOLO DESPUÉS del decay se aplican las escalas de balance: el atacante gana `deltaDecayado × 1.5` y la víctima pierde `deltaDecayado × 0.5`. **Contra HUMANOS el decay NO aplica** (ELO pleno solo jugando contra personas) y bot-vs-bot tampoco. Ejemplos con los defaults: skill 1200 vs bot → 100% (~+30/kill tras ×1.5); 1800 → 61.4% (~+18); 2000 → 45.9% (~+13); 2400+ → 15% (~+5). El `recompute:skill` lo reproduce NATURALMENTE: el factor se calcula con el skill en memoria del momento del evento, y el reprocess secuencial reconstruye los mismos skills intermedios → mismos factores → mismo skill final (función pura `botDecayFactor` en `src/services/skill/elo.ts`, aplicada en `skill.service.ts`).
 - ELO base con **floor 150** y **cap 2500**; start 1000. Determinista: mismo set de eventos en el mismo orden (`timeEpoch ASC, id ASC`) → mismo skill.
 - Valor expuesto: `skill = skillElo + bonus de racha` (+2 por kill de la mejor racha, cap racha 20 → máximo +40). **Rango típico expuesto: ~150–2540**, con la mayoría de la población entre ~850 y ~1600 (útil para el tooltip del frontend).
 
@@ -1070,7 +1119,7 @@ BOTS (`+spawnBot`): el guid literal `botN` que escribe el engine en games_mp.log
 
 ## Medallas ELO (tiers + estrellas + LEYENDA)
 
-**Derivadas, sin persistencia**: la medalla se calcula SIEMPRE desde el skill actual (`medalFor(skill, globalRank)` en `apps/api/src/lib/medals.ts`); nunca se guarda como estado. Como el ELO ya baja con las muertes (delta simétrico), los **descensos son automáticos**: al cruzar un umbral hacia abajo, la medalla baja de tier/estrella sin migración alguna. Implementación: `apps/api/src/lib/medals.ts` (puro, testeado); assets PNG en `apps/launcher/assets/medals/` (la UI los copia; el backend SOLO manda `assetId`).
+**Derivadas, sin persistencia**: la medalla se calcula SIEMPRE desde el skill actual (`medalFor(skill, globalRank)` en `apps/api/src/lib/medals.ts`); nunca se guarda como estado. Como el ELO ya baja con las muertes (la víctima pierde su delta escalado ×0.5), los **descensos son automáticos**: al cruzar un umbral hacia abajo, la medalla baja de tier/estrella sin migración alguna. Implementación: `apps/api/src/lib/medals.ts` (puro, testeado); assets PNG en `apps/launcher/assets/medals/` (la UI los copia; el backend SOLO manda `assetId`).
 
 Los 8 tiers (constante exportada `MEDAL_TIERS` — la UI consume nombres/assets de ahí). **Escala dura: 200 puntos por tier, LEYENDA en 2400+** (el cap del ELO base 2500 NO cambia):
 
@@ -1088,7 +1137,7 @@ Los 8 tiers (constante exportada `MEDAL_TIERS` — la UI consume nombres/assets 
 - **Estrellas (tiers 1–7)**: progreso continuo dentro del tier: `stars = min(5, floor((skill − tierMin) / 200 × 5) + 1)` → 1★ al entrar al tier, 5★ cerca del techo (≥ tierMin + 160). Skill por debajo de 1000 (floor 150): tier 1 con 1★ (clamp, sin tier 0).
 - **Llegar arriba vs BOTS es MUY lento por diseño** (ver "Decay contra BOTS" en la sección skill): contra bots el kill se decae desde skill 1300 (61% a 1800, 46% a 2000, 15% a 2400+) → en los últimos tiers un kill vs bot vale ~4-8 puntos. Contra HUMANOS el ELO es pleno: la escalera se sube jugando contra personas.
 - **LEYENDA (tier 8)**: SIN estrellas (`stars: null`); en su lugar expone `globalRank` (posición global por skill) y `eliteTop12` (`true` si `globalRank ≤ 12`).
-- **Población del `globalRank`** (por skill): solo humanos (`isBot=false`) que realmente jugaron: `kills ≥ 1` O `skillElo ≠ 1000` (su ELO se movió). Excluye a quienes solo se conectaron (skill base exacto, 0 kills) y a los bots. Orden: `skill DESC` (el mismo número expuesto que la medalla → siempre coherentes), empate `name ASC`. Implementación: `getSkillGlobalRanksByGuid` / `computeSkillGlobalRank` en `src/services/ranking.service.ts`.
+- **Población del `globalRank`** (por skill): solo humanos (`isBot=false`) que realmente jugaron: `kills ≥ 1` O `skillElo ≠ 1000` (su ELO se movió). Excluye a quienes solo se conectaron (skill base exacto, 0 kills) y a los bots. Orden: `skill DESC` (el mismo número expuesto que la medalla → siempre coherentes), empate `name ASC`. **Dos contextos**: en el PERFIL es la posición del GUID (per-guid: `getSkillGlobalRanksByGuid` / `computeSkillGlobalRank` en `src/services/ranking.service.ts`); en el LEADERBOARD es la posición de la CUENTA (población: cuentas con algún guid ELO-calificado, orden por el skill de la cuenta = MAX de sus guids — implementado en `leaderboard.service.ts`).
 
 Shape del objeto `medal` (perfil y cada entrada del leaderboard):
 
@@ -1385,8 +1434,8 @@ Jugadores conectados AHORA: `status()` + `getinfo()` combinados por rcon.
 | DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
 | POST   | `/api/identity/guid-from-file` | ✅ | Deriva el GUID de un guid.dat (base64) y dice si es de la cuenta (`ownedByMe`) o de quién es (`ownerNick`) |
 | POST   | `/api/identity/claim-fresh` | ✅ | Cuarentena de identidad: la cuenta espera un guid NUEVO (auto-link one-shot + limpia session.guid colgante) |
-| GET    | `/api/leaderboard`        | —    | Ranking paginado/filtrable (SOLO-humanos por defecto; `includeBots=true` para ver bots; `sort=level` ordena por save parseado) |
-| GET    | `/api/players/:guid`      | —    | Perfil ampliado + `rank` global + eventos recientes + por servidor + `aliases` históricos + `save` (nivel/prestigio/xp del cloud save) |
+| GET    | `/api/leaderboard`        | —    | Ranking POR CUENTA (una fila por User con guids vinculados; stats sumadas, skill = MAX de sus guids; SOLO-humanos por defecto; `includeBots=true` añade bots per-guid; `sort=level` ordena por save parseado) |
+| GET    | `/api/players/:guid`      | —    | Perfil per-guid + `rank` global + eventos recientes + por servidor + `aliases` históricos + `save` (nivel/prestigio/xp del cloud save) + `account` (cuenta dueña: displayName, stats sumadas y sus otras PCs) |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |
 | GET    | `/api/players/:guid/maps`    | — | Desglose por mapa del jugador + favorito |

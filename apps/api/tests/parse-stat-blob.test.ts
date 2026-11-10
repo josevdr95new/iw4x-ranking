@@ -297,6 +297,11 @@ describe('integración: upload → parse → perfil/leaderboard', () => {
     await prisma.player.create({ data: { guid: GUID_NO_SAVE, name: 'NoSave IG' } });
     const link = await req().post('/api/link/complete').set('Authorization', `Bearer ${user.token}`).send({ guid: GUID });
     expect(link.status).toBe(200);
+    // El leaderboard es POR CUENTA: la segunda cuenta (con guid sin save) debe
+    // estar vinculada para aparecer y ejercitar el orden nulls-al-final.
+    const nosave = await registerUser('statparse-nosave@test.local', 'supersecret123', 'NoSaveOwner');
+    const link2 = await req().post('/api/link/complete').set('Authorization', `Bearer ${nosave.token}`).send({ guid: GUID_NO_SAVE });
+    expect(link2.status).toBe(200);
   });
 
   it('PUT de un iw4x.stat válido parsea y el perfil expone save{level,prestige,xp,parsedAt}', async () => {

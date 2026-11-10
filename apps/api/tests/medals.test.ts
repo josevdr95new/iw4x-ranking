@@ -121,8 +121,16 @@ async function seedSkillFixture(): Promise<void> {
     await prisma.player.create({
       data: { guid: row.guid, name: row.name, kills: row.kills, deaths: row.kills, skill: row.skill, skillElo: row.skill, connections: 1 },
     });
+    // El leaderboard es POR CUENTA: cada guid humano con su propia cuenta
+    // (displayName = nick) para que ranquee. Single-guid → la fila de cuenta
+    // expone el mismo guid/skill que la del guid.
+    const user = await prisma.user.create({
+      data: { email: `${row.name.toLowerCase()}@medals.test.local`, passwordHash: 'test-hash', displayName: row.name },
+    });
+    await prisma.accountLink.create({ data: { userId: user.id, guid: row.guid } });
   }
-  // Bot (rango 0xb07…): skill alto, NUNCA en la población del rank por skill.
+  // Bot (rango 0xb07…): skill alto, NUNCA en la población del rank por skill
+  // y NUNCA es cuenta (solo aparece con includeBots=true, per-guid).
   const botGuid = BigInt('0xb07000000000042').toString(10);
   await prisma.player.create({
     data: { guid: botGuid, name: 'BotFortyTwo', isBot: true, kills: 500, skill: 2500, skillElo: 2500, connections: 1 },

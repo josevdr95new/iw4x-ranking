@@ -363,17 +363,20 @@ describe('Player.isBot (set por ingesta + bootstrap) y leaderboard solo-humanos'
   });
 
   it('leaderboard EXCLUYE bots por defecto; includeBots=true los trae; sort=skill sigue filtrando', async () => {
+    // El leaderboard es POR CUENTA: el humano solo rankea con su cuenta vinculada.
+    const owner = await registerUser('lb-botowner@test.local', 'supersecret123', 'Human Pro');
     await prisma.player.create({ data: { guid: DEC_HUMAN, name: 'Human Pro', kills: 10, skill: 1200, connections: 2 } });
     await prisma.player.create({ data: { guid: BOT_GUID, name: 'Bot Killer', kills: 500, skill: 2500, connections: 50, isBot: true } });
+    await prisma.accountLink.create({ data: { userId: owner.id, guid: DEC_HUMAN } });
 
-    // Default: solo humanos (aunque el bot lidere por kills y skill).
+    // Default: solo humanos (la fila del humano es su CUENTA; aunque el bot lidere por kills y skill).
     const def = await req().get('/api/leaderboard');
     expect(def.status).toBe(200);
     let body = def.body as { total: number; players: Array<{ guid: string }> };
     expect(body.total).toBe(1);
     expect(body.players.map((p) => p.guid)).toEqual([DEC_HUMAN]);
 
-    // includeBots=true: aparecen ambos, ordenados por kills (bot primero).
+    // includeBots=true: la cuenta + el bot per-guid (los bots no son cuentas), ordenados por kills (bot primero).
     const withBots = await req().get('/api/leaderboard?includeBots=true');
     body = withBots.body as typeof body;
     expect(body.total).toBe(2);
@@ -383,7 +386,7 @@ describe('Player.isBot (set por ingesta + bootstrap) y leaderboard solo-humanos'
     const explicit = await req().get('/api/leaderboard?includeBots=false');
     expect((explicit.body as { total: number }).total).toBe(1);
 
-    // sort=skill con el filtro: sin bots, el humano es el #1; con bots, el bot (skill 2500).
+    // sort=skill con el filtro: sin bots, la cuenta del humano es la #1; con bots, el bot (skill 2500).
     const skillNoBots = await req().get('/api/leaderboard?sort=skill');
     expect((skillNoBots.body as { players: Array<{ guid: string; skill: number }> }).players[0]).toMatchObject({ guid: DEC_HUMAN, skill: 1200 });
     const skillWithBots = await req().get('/api/leaderboard?sort=skill&includeBots=true');

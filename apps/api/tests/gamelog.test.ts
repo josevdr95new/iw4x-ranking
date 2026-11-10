@@ -5,6 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { guidHexToDecimal, ingestGameLog, parseGameLogLine } from '../src/services/sync/gamelog.reader.js';
 import { processSkillUpdates } from '../src/services/skill/skill.service.js';
 import { SKILL } from '../src/services/skill/elo.js';
+import { env } from '../src/config/env.js';
 import { getWeaponsRanking } from '../src/services/weapons.service.js';
 import { prisma } from '../src/lib/prisma.js';
 import { req, resetDb } from './helpers.js';
@@ -277,7 +278,7 @@ describe('ingestGameLog (integración con Prisma)', () => {
     });
     expect(events[1]).toMatchObject({
       originGuid: DEC_C, // Charlie world (0:12): origin = VÍCTIMA (sin atacante)
-      targetGuid: '', // marcador world → skill aplica WORLD_LOSS plano
+      targetGuid: '', // marcador world → skill aplica WORLD_LOSS × escala de víctima (plano×0.5)
       weapon: 'none',
       mod: 'MOD_FALLING',
       damage: 100,
@@ -941,11 +942,12 @@ describe('knifeKills/knifeDeaths (MOD_MELEE) y feed enriquecido del perfil', () 
 // el skill NUNCA se enteraba (el reporte «40 kills → 1375.39; 1 muerte → sigue
 // 1375.39» venía de exactamente eso). Ahora el reader crea el evento con
 // originGuid = víctima y targetGuid = '' (marcador de "sin atacante"): el motor
-// skill existente aplica la pérdida plana SKILL.WORLD_LOSS = 4 sin tocar skill/.
+// skill aplica la pérdida plana SKILL.WORLD_LOSS=4 × SKILL_VICTIM_LOSS_SCALE
+// (balance 2026-11-10: 4 × 0.5 = −2 efectivos) sin tocar skill/.
 // Los consumidores de stats (feed/armas/mapas/streak) filtran targetGuid == ''
 // → el evento world SOLO mueve skill, nada más.
-describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
-  it('muerte por WORLD (humano): crea KillEvent originGuid=víctima targetGuid="" y aplica −4 al skill', async () => {
+describe('world/suicidio → KillEvent (targetGuid="") + skill −2', () => {
+  it('muerte por WORLD (humano): crea KillEvent originGuid=víctima targetGuid="" y aplica −2 al skill (4×0.5)', async () => {
     // Fixture = caso REAL del dueño (0:39, MOD_FALLING, killer world sin guid).
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -980,11 +982,11 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
       skillProcessed: false, // pendiente para processSkillUpdates
     });
 
-    // El motor skill EXISTENTE aplica WORLD_LOSS=4 (sin tocar skill/).
+    // El motor skill aplica WORLD_LOSS × SKILL_VICTIM_LOSS_SCALE (sin tocar skill/).
     await processSkillUpdates();
     const after = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_A } });
-    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS); // 1000 − 4 = 996
-    expect(after.skill).toBe(SKILL.START - SKILL.WORLD_LOSS); // bestStreak 0 → sin bonus
+    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS * env.skillVictimLossScale); // 1000 − 4×0.5 = 998
+    expect(after.skill).toBe(SKILL.START - SKILL.WORLD_LOSS * env.skillVictimLossScale); // bestStreak 0 → sin bonus
     const processed = await prisma.killEvent.findFirstOrThrow();
     expect(processed.skillProcessed).toBe(true); // la línea quedó skillProcessed=1
 
@@ -1000,7 +1002,7 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
     expect(weapons.total).toBe(0); // "none" del world NO entra al ranking global
   });
 
-  it('SUICIDIO (humano): mismo tratamiento — evento con targetGuid="" y skill −4', async () => {
+  it('SUICIDIO (humano): mismo tratamiento — evento con targetGuid="" y skill −2 (4×0.5)', async () => {
     // Fixture = suicidio REAL del dueño (19:30, semtex, mismo guid en ambos bloques).
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -1022,12 +1024,12 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
 
     await processSkillUpdates();
     const after = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_B } });
-    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS);
+    expect(after.skillElo).toBe(SKILL.START - SKILL.WORLD_LOSS * env.skillVictimLossScale); // 1000 − 2 = 998
     const processed = await prisma.killEvent.findFirstOrThrow();
     expect(processed.skillProcessed).toBe(true);
   });
 
-  it('BOT que muere por world/suicidio: SOLO counters (deaths++/daño), NINGÚN evento ni skill −4', async () => {
+  it('BOT que muere por world/suicidio: SOLO counters (deaths++/daño), NINGÚN evento ni skill −2', async () => {
     const BOT6 = BigInt('0xb07000000000006').toString(10);
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -1046,14 +1048,15 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
     expect(bot.damageTaken).toBe(400); // 100 + 300
     expect(bot.kills).toBe(0);
 
-    // El skill del bot NO recibe el −4 (queda en el START inicial).
+    // El skill del bot NO recibe la pérdida world (queda en el START inicial).
     await processSkillUpdates();
     const after = await prisma.player.findUniqueOrThrow({ where: { guid: BOT6 } });
     expect(after.skillElo).toBe(SKILL.START);
   });
 
   it('RECOMPUTE determinista con eventos world: replay desde cero → mismo skill final', async () => {
-    // Dos muertes world del mismo humano: −4 cada una. El recompute:skill solo
+    // Dos muertes world del mismo humano: −2 efectivas cada una (4×0.5). El
+    // recompute:skill solo
     // recorre KillEvent YA almacenados (los eventos viejos del log NO se
     // re-leen: el cursor los consumió) → fix-forward sin reset, como se acordó.
     writeLog([
@@ -1065,7 +1068,7 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −4', () => {
     await ingestGameLog(LOG_PATH, SERVER_LABEL);
     await processSkillUpdates();
     const before = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_C } });
-    expect(before.skillElo).toBe(SKILL.START - 2 * SKILL.WORLD_LOSS); // 992
+    expect(before.skillElo).toBe(SKILL.START - 2 * SKILL.WORLD_LOSS * env.skillVictimLossScale); // 996
 
     // Flujo EXACTO de npm run recompute:skill.
     await prisma.killEvent.updateMany({ where: {}, data: { skillProcessed: false } });
