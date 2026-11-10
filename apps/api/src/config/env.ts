@@ -46,8 +46,10 @@ const envSchema = z.object({
     .optional()
     .transform((value) => (value !== undefined && value.trim().length > 0 ? value : undefined)),
   /**
-   * Snapshot en vivo que escribe el script GSC del server (apps/api/gsc/
-   * iw4x-ranking.gsc → userraw/scriptdata/iw4x-ranking.json). Vacío = ingesta
+   * Snapshot(s) en vivo que escribe el script GSC del server (apps/api/gsc/
+   * iw4x-ranking.gsc → userraw/scriptdata/iw4x-ranking.json). Acepta VARIAS
+   * rutas separadas por COMA (una por sala: cada sala escribe SU archivo
+   * relativo a su propio userraw) → merge de players por guid. Vacío = ingesta
    * live DESACTIVADA (todo null silencioso).
    */
   LIVE_STATS_FILE: z
@@ -96,6 +98,21 @@ const envSchema = z.object({
   BOT_ELO_DECAY_SOFT: z.coerce.number().int().min(1).default(1300),
   /** Skill donde el decay llega al mínimo (≥ hard → factor min). Default 2400. */
   BOT_ELO_DECAY_HARD: z.coerce.number().int().min(1).default(2400),
+  // ── Balance ELO asimétrico (2026-11-10, decisión del dueño: leve inflación aceptada) ──
+  /**
+   * Escala aplicada al delta que PIERDE la víctima en TODAS las muertes
+   * (vs bots, vs humanos y world/suicidio: WORLD_LOSS×escala; en teamkill la
+   * víctima no pierde nada). Default 0.5: bajar duele LA MITAD. El atacante
+   * NO usa esta escala (usa SKILL_ATTACK_GAIN_SCALE).
+   */
+  SKILL_VICTIM_LOSS_SCALE: z.coerce.number().min(0).max(1).default(0.5),
+  /**
+   * Escala aplicada a la GANANCIA del atacante en kills válidos (vs bots y vs
+   * humanos por igual; NO aplica a teamkill ni a world). Se aplica al delta
+   * FINAL del atacante, DESPUÉS del multiplicador de evento (el cap ×1.6 de
+   * eventMult queda como está) y después del decay de bots. Default 1.5: +50%.
+   */
+  SKILL_ATTACK_GAIN_SCALE: z.coerce.number().min(0).default(1.5),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -164,6 +181,8 @@ export const env = {
   botEloDecayMin: raw.BOT_ELO_DECAY_MIN,
   botEloDecaySoft: raw.BOT_ELO_DECAY_SOFT,
   botEloDecayHard: raw.BOT_ELO_DECAY_HARD,
+  skillVictimLossScale: raw.SKILL_VICTIM_LOSS_SCALE,
+  skillAttackGainScale: raw.SKILL_ATTACK_GAIN_SCALE,
 } as const;
 
 export type Env = typeof env;

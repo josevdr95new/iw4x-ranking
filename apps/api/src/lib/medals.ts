@@ -3,7 +3,8 @@
  *
  * La medalla NUNCA se almacena como estado: se calcula SIEMPRE desde el skill
  * actual del jugador (medalFor). Así los descensos son automáticos: el ELO ya
- * baja con las muertes (delta simétrico), y al cruzar un umbral hacia abajo la
+ * baja con las muertes (la víctima pierde su delta × SKILL_VICTIM_LOSS_SCALE),
+ * y al cruzar un umbral hacia abajo la
  * medalla baja de tier/estrella sin ninguna migración de datos.
  *
  * Escala DURA (200 puntos por tier, LEYENDA en 2400+; cap del ELO base 2500

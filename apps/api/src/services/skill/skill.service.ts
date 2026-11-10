@@ -5,7 +5,10 @@ import { SKILL, botDecayFactor, clampAndBonus, clampElo, killEloDelta, round2, s
 
 /**
  * Procesamiento INCREMENTAL del skill (ELO) sobre DOS streams de eventos:
- *  - KillEvent (kills por evento: delta simétrico atacante↔víctima).
+ *  - KillEvent (kills por evento: intercambio ASIMÉTRICO — el atacante gana
+ *    `delta × SKILL_ATTACK_GAIN_SCALE` (1.5) y la víctima pierde
+ *    `delta × SKILL_VICTIM_LOSS_SCALE` (0.5); balance 2026-11-10 del dueño,
+ *    inflación de ELO aceptada).
  *  - MatchBonusEvent (bonus de fin de partida: top-3 de kills entre humanos,
  *    delta directo al premiado; los crea la ingesta del log en ShutdownGame).
  *
@@ -177,9 +180,11 @@ async function processBatch(batch: SkillEvent[]): Promise<void> {
 
     // World/suicidio (la ingesta del gamelog SÍ crea estos eventos desde
     // 2026-11-08: originGuid = víctima, targetGuid = ''): sin atacante no hay
-    // pool de quien robar → pérdida plana pequeña (WORLD_LOSS).
+    // pool ni ganancia → pérdida plana pequeña (WORLD_LOSS) escalada por la
+    // escala de VÍCTIMA (4 × 0.5 = 2 efectivos con defaults). La escala de
+    // atacante NO aplica aquí (no hay atacante).
     if (victimGuid === null || victimGuid === event.originGuid) {
-      elo.set(event.originGuid, clampRound(originElo - SKILL.WORLD_LOSS));
+      elo.set(event.originGuid, clampRound(originElo - SKILL.WORLD_LOSS * env.skillVictimLossScale));
       continue;
     }
 
@@ -201,9 +206,8 @@ async function processBatch(batch: SkillEvent[]): Promise<void> {
     // DECAY CONTRA BOTS (anti-farmeo): si UNO de los dos lados del kill es un
     // bot, el delta del evento se escala por botFactor(skill VIGENTE del
     // HUMANO) — con factor 1 por debajo de 1300, lineal hasta 0.15 en 2400+
-    // (env BOT_ELO_DECAY_*). El bot gana/pierde el MISMO delta decayado
-    // (zero-sum). Contra HUMANOS el decay NO aplica: ELO pleno solo jugando
-    // contra personas. Bot-vs-bot tampoco (no hay humano que farmee).
+    // (env BOT_ELO_DECAY_*). Contra HUMANOS el decay NO aplica: ELO pleno solo
+    // jugando contra personas. Bot-vs-bot tampoco (no hay humano que farmee).
     // El factor usa el skill EN MEMORIA del momento del evento → el recompute
     // secuencial (recompute:skill) reproduce el decay naturalmente.
     const originIsBot = isBotGuid(event.originGuid);
@@ -217,8 +221,14 @@ async function processBatch(batch: SkillEvent[]): Promise<void> {
       });
     }
 
-    elo.set(event.originGuid, clampRound(originElo + delta));
-    elo.set(victimGuid, clampRound(victimElo - delta));
+    // INTERCAMBIO ASIMÉTRICO (balance 2026-11-10, decisión del dueño): las
+    // escalas se aplican al delta FINAL (tras mult de evento y decay de bots;
+    // NO están dentro del cap ×1.6 de eventMult). El atacante gana
+    // `delta × SKILL_ATTACK_GAIN_SCALE` (1.5: +50% al eliminar, igual vs bots
+    // y vs humanos) y la víctima pierde `delta × SKILL_VICTIM_LOSS_SCALE`
+    // (0.5: bajar duele la mitad). Ya no es zero-sum: inflación aceptada.
+    elo.set(event.originGuid, clampRound(originElo + delta * env.skillAttackGainScale));
+    elo.set(victimGuid, clampRound(victimElo - delta * env.skillVictimLossScale));
   }
 
   // Persistencia atómica del lote: skill + flags de eventos (por tipo).

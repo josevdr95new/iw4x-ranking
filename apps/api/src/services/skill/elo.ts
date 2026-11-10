@@ -1,22 +1,32 @@
 /**
  * Modelo ELO por-evento (estilo inginuity pragmática):
  * cada KillEvent NO teamkill mueve ELO entre atacante y víctima ponderado por la
- * fuerza relativa (expected-score clásico). Condiciones:
+ * fuerza relativa (expected-score clásico). CONTRATO ASIMÉTRICO desde el
+ * balance 2026-11-10 (decisión del dueño, leve inflación de ELO aceptada):
+ * el atacante GANA `delta × SKILL_ATTACK_GAIN_SCALE` (default 1.5) y la
+ * víctima PIERDE `delta × SKILL_VICTIM_LOSS_SCALE` (default 0.5) — subir
+ * premia +50% y bajar duele la mitad. Ambas escalas se aplican al delta FINAL
+ * (después del mult de evento y del decay de bots; NO están dentro del cap
+ * ×1.6 de eventMult). Condiciones:
  *  - headshot (hitloc head/helmet) → bonus atacante.
  *  - hitloc difícil no-cabeza (neck) → bonus menor.
  *  - daño alto → bonus creciente por encima del daño letal típico (100).
- *  - teamkill → penalidad plana al atacante; la víctima NO recibe nada (no hay
- *    farming por matar compañeros).
- *  - víctima "world"/suicidio → pierde poco (no hay pool del cual robar).
+ *  - teamkill → penalidad plana al atacante (SIN escalas); la víctima NO
+ *    recibe nada (no hay farming por matar compañeros).
+ *  - víctima "world"/suicidio → sin atacante no hay ganancia: pierde
+ *    `WORLD_LOSS × SKILL_VICTIM_LOSS_SCALE` (4×0.5 = 2 con defaults).
  *    La ingesta del games_mp.log SÍ almacena estos casos desde 2026-11-08:
  *    KillEvent con originGuid = víctima y targetGuid = '' (marcador de "sin
- *    atacante", bots excluidos) → esta rama aplica WORLD_LOSS=4 al que muere.
+ *    atacante", bots excluidos).
  *  - Floor/cap del ELO base para evitar skill infinita o skill por debajo del floor.
  *  - Streak: multiplicador SUAVE aplicado en el compute final (no por evento)
  *    sobre Player.bestStreak (mantenido por la ingesta).
  *
  * Determinismo: mismo set de eventos en el mismo orden (timeEpoch ASC, id ASC)
- * produce SIEMPRE el mismo skill (sin factor de tiempo/inactividad).
+ * produce SIEMPRE el mismo skill (sin factor de tiempo/inactividad). Las dos
+ * escalas viven en env (SKILL_VICTIM_LOSS_SCALE / SKILL_ATTACK_GAIN_SCALE) y
+ * las consume skill.service.ts; el recompute:skill las reproduce igual que el
+ * decay (mismo valor de env para todo el replay → mismo resultado).
  */
 
 export const SKILL = {
@@ -51,7 +61,7 @@ export const SKILL = {
   EVENT_MULT_CAP: 1.6,
   /** Penalidad plana al atacante en teamkill. */
   TEAMKILL_PENALTY: 24,
-  /** Pérdida plana del que muere por world/suicidio (sin atacante no hay pool). */
+  /** Pérdida plana del que muere por world/suicidio: se aplica ×SKILL_VICTIM_LOSS_SCALE (4×0.5 = 2 efectivos con defaults). */
   WORLD_LOSS: 4,
   /** Streak: +N puntos por racha (suave, sobre el compute final). */
   STREAK_BONUS_PER: 2,
@@ -109,10 +119,12 @@ export interface EloEvent {
 }
 
 /**
- * Puntos en juego de UN kill válido (elo de atacante y víctima al momento del
- * evento). Delta positivo = va hacia el atacante (ganancia) y la víctima pierde
- * el MISMO monto (zero-sum por evento; floor/cap lo pueden romper a favor de
- * la estabilidad, intencional).
+ * Puntos EN JUEGO de UN kill válido (elo de atacante y víctima al momento del
+ * evento). Delta positivo = base del intercambio ASIMÉTRICO (skill.service):
+ * el atacante gana `delta × SKILL_ATTACK_GAIN_SCALE` (1.5) y la víctima
+ * pierde `delta × SKILL_VICTIM_LOSS_SCALE` (0.5) — ya no es zero-sum por
+ * decisión del dueño (leve inflación aceptada). floor/cap lo pueden romper
+ * aún más a favor de la estabilidad, intencional.
  */
 export function killEloDelta(attackerElo: number, victimElo: number, event: EloEvent): number {
   if (!event.isKill || event.isTeamkill) return 0; // el teamkill va por la penalidad plana
@@ -143,8 +155,10 @@ export function streakBonus(bestStreak: number): number {
  * 2000 → 0.459 (~+9) · 2400 → 0.15 (~+3).
  *
  * Aplicación (skill.service): cuando el oponente del kill es un BOT, el delta
- * del evento se multiplica por botFactor(skill VIGENTE del humano) y el bot
- * gana/pierde ESE MISMO delta decayado (zero-sum). Contra HUMANOS el decay NO
+ * del evento se multiplica por botFactor(skill VIGENTE del humano) y SOLO
+ * DESPUÉS se aplican las escalas de balance: el atacante gana
+ * `deltaDecayado × SKILL_ATTACK_GAIN_SCALE` y la víctima pierde
+ * `deltaDecayado × SKILL_VICTIM_LOSS_SCALE`. Contra HUMANOS el decay NO
  * aplica (factor 1, ELO pleno solo jugando contra personas). El recompute:skill
  * lo reproduce NATURALMENTE: el factor se calcula con el skill en memoria del
  * momento del evento, y el reprocess secuencial reconstruye los mismos skills
