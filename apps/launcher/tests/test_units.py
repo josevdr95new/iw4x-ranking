@@ -48,9 +48,31 @@ from app_config import (  # noqa: E402
     sanitize_servers,
 )
 import game_flow as gf  # noqa: E402
-from game_flow import build_game_args  # noqa: E402
+from game_flow import GameFlow, build_game_args  # noqa: E402
+from server_status import (  # noqa: E402
+    SOURCE_API,
+    SOURCE_TCP,
+    STATE_CHECKING,
+    STATE_OFFLINE,
+    STATE_ONLINE,
+    STATE_UNKNOWN,
+    ServerStatus,
+    format_status_text,
+    match_sala,
+    parse_salas_response,
+    parse_status_response,
+    pretty_map,
+    probe_server,
+    sala_dropdown_label,
+    sala_to_status,
+    split_address,
+    status_color_key,
+)
 import save_sync as ss  # noqa: E402
 from save_sync import (  # noqa: E402
+    MIN_SIZE_CONFIG,
+    MIN_SIZE_GUID,
+    MIN_SIZE_STAT,
     build_upload_files,
     decide_guid_action,
     decide_guid_validation,
@@ -63,6 +85,7 @@ from save_sync import (  # noqa: E402
     sha256_of,
     stat_quarantine_root,
     stat_rels,
+    verify_restore_complete,
 )
 from ui.stats_panel import medal_detail_parts  # noqa: E402
 
@@ -413,6 +436,15 @@ def phase_app_config() -> None:
     check("DEFAULT_CONFIG: sin claves del polling de candidatos (eliminado)",
           not ({"link_poll_interval", "link_poll_max_seconds"} & set(DEFAULT_CONFIG)),
           str(sorted(DEFAULT_CONFIG)))
+    check("DEFAULT_CONFIG: servers por defecto = Sala 1/Sala 2/Local "
+          "(salas del LXC de producción + local), default Sala 1",
+          DEFAULT_CONFIG["servers"] == [
+              {"name": "Sala 1",  "address": "192.168.2.251:28960"},
+              {"name": "Sala 2",  "address": "192.168.2.251:28961"},
+              {"name": "Local",   "address": "127.0.0.1:28961"},
+          ]
+          and DEFAULT_CONFIG["default_server"] == 0,
+          str(DEFAULT_CONFIG["servers"]))
 
     # diccionario vacío → todas las propiedades caen al default.
     cfg = AppConfig({})
@@ -609,6 +641,257 @@ def phase_normalize_api_url() -> None:
     cfg = AppConfig({"api_url": None})
     check("AppConfig: api_url None → default",
           cfg.api_url == default, cfg.api_url)
+
+
+# ---------------------------------------------------------------------------
+# 5d. server_status: parser getstatus Q3 + formato/color del estado (puras).
+# Estado REAL de los servers (pedido del dueño): ● ONLINE · N jugadores /
+# OFFLINE / verificando… — la heurística es TCP connect + UN datagrama UDP
+# getstatus (protocolo Q3).
+GETSTATUS_IW4X = (
+    b"\xff\xff\xff\xffstatusResponse\n"
+    b"\\sv_maxclients\\18\\gamename\\iw4x\\shortversion\\0.7.5"
+    b"\\pswrd\\0\\protocol\\1830\\mapname\\mp_rust\\players\\6"
+    b"\\sv_hostname\\Sala 1 IW4x\\clients\\6\\g_gametype\\war\n"
+    b'16 25 "Mandango"\n'
+    b'21 43 "Krlos_77"\n'
+)
+# Variante clásica Q3/MW2: SIN clave players, SOLO clients (fallback).
+GETSTATUS_MW2 = (
+    b"\xff\xff\xff\xffstatusResponse\n"
+    b"\\sv_maxclients\\18\\gamename\\IW4x\\clients\\3\\mapname\\mp_terminal\n"
+    b'8 41 "Test"\n'
+)
+
+
+def phase_server_status_parser() -> None:
+    print("\n=== Units: server_status (parser getstatus + texto/color) ===")
+
+    # --- parse_status_response: fixture real → jugadores --------------------
+    check("parser: getstatus IW4x real → players=6 (gana sobre clients)",
+          parse_status_response(GETSTATUS_IW4X) == 6,
+          str(parse_status_response(GETSTATUS_IW4X)))
+    check("parser: variante MW2 sin 'players' → fallback clients=3",
+          parse_status_response(GETSTATUS_MW2) == 3,
+          str(parse_status_response(GETSTATUS_MW2)))
+    check("parser: 'players' al final del infostring (sin \\ de cierre) → 2",
+          parse_status_response(b"\xff\xff\xff\xffstatusResponse\n"
+                                b"\\gamename\\iw4x\\players\\2") == 2)
+    check("parser: statusResponse SIN contador → None (ONLINE sin cifra)",
+          parse_status_response(b"\xff\xff\xff\xffstatusResponse\n"
+                                b"\\gamename\\iw4x\\mapname\\mp_rust") is None)
+    # Basura: la QUERY no es una RESPONSE; texto suelto; vacío.
+    check("parser: la query getstatus NO es una respuesta → None",
+          parse_status_response(b"\xff\xff\xff\xffgetstatus") is None)
+    check("parser: texto suelto → None",
+          parse_status_response(b"HTTP/1.1 200 OK") is None)
+    check("parser: vacío → None", parse_status_response(b"") is None)
+
+    # --- split_address: misma validación del config --------------------------
+    check("split: '192.168.2.251:28960' → (host, 28960)",
+          split_address("192.168.2.251:28960") == ("192.168.2.251", 28960),
+          str(split_address("192.168.2.251:28960")))
+    check("split: '127.0.0.1:28961' → (127.0.0.1, 28961)",
+          split_address("127.0.0.1:28961") == ("127.0.0.1", 28961),
+          str(split_address("127.0.0.1:28961")))
+    check("split: 'hola' (sin puerto) → None", split_address("hola") is None)
+    check("split: 'host:abc' (puerto no numérico) → None",
+          split_address("host:abc") is None)
+    check("split: 'host:80' (puerto privilegiado) → None (igual que config)",
+          split_address("host:80") is None)
+    check("split: vacío → None", split_address("") is None)
+    check("probe: dirección inválida → None SIN tocar sockets (pura)",
+          probe_server("no-es-una-direccion") is None)
+
+    # --- format_status_text: el copy exacto del HUD --------------------------
+    check("texto: online con 6 → 'ONLINE · 6 jugadores'",
+          format_status_text(ServerStatus(STATE_ONLINE, 6))
+          == "ONLINE · 6 jugadores",
+          format_status_text(ServerStatus(STATE_ONLINE, 6)))
+    check("texto: online con 1 → 'ONLINE · 1 jugador' (singular)",
+          format_status_text(ServerStatus(STATE_ONLINE, 1))
+          == "ONLINE · 1 jugador",
+          format_status_text(ServerStatus(STATE_ONLINE, 1)))
+    check("texto: online con 0 → 'ONLINE · 0 jugadores'",
+          format_status_text(ServerStatus(STATE_ONLINE, 0))
+          == "ONLINE · 0 jugadores",
+          format_status_text(ServerStatus(STATE_ONLINE, 0)))
+    check("texto: online SIN cifra → 'ONLINE'",
+          format_status_text(ServerStatus(STATE_ONLINE)) == "ONLINE")
+    check("texto: offline → 'OFFLINE'",
+          format_status_text(ServerStatus(STATE_OFFLINE)) == "OFFLINE")
+    check("texto: checking → 'verificando…'",
+          format_status_text(ServerStatus(STATE_CHECKING)) == "verificando…")
+    check("texto: None (fila inválida/vacía) → ''",
+          format_status_text(None) == "")
+
+    # --- status_color_key: verde SOLO ok, dim offline, ámbar verificando -----
+    check("color: online → 'ok' (verde señal #8FD429 del tema)",
+          status_color_key(ServerStatus(STATE_ONLINE, 6)) == "ok")
+    check("color: offline → 'dim' (gris apagado, NUNCA rojo)",
+          status_color_key(ServerStatus(STATE_OFFLINE)) == "dim")
+    check("color: verificando → 'accent' (ámbar del tema)",
+          status_color_key(ServerStatus(STATE_CHECKING)) == "accent")
+    check("color: None → 'dim'", status_color_key(None) == "dim")
+
+
+# ---------------------------------------------------------------------------
+# 5e. server_status: FUENTE APROBADA GET /api/salas (parser + match + copy).
+# El backend (en el LXC junto a las salas) reporta por RCON el estado real;
+# fallback a TCP directo con API caída / configured:false / salas vacías.
+SALAS_FIXTURE = {
+    "configured": True,
+    "salas": [
+        {"id": "sala1", "name": "CTHolguin Sala 1",
+         "address": "192.168.2.251:28960", "online": True,
+         "hostname": "CTHolguin Sala 1", "map": "mp_terminal",
+         "players": 2, "bots": 14, "maxClients": 18},
+        {"id": "sala2", "name": "CTHolguin Sala 2",
+         "address": "192.168.2.251:28961", "online": False,
+         "hostname": "CTHolguin Sala 2", "map": "mp_rust",
+         "players": 0, "bots": 0, "maxClients": 18},
+    ],
+}
+
+
+def phase_salas_endpoint() -> None:
+    print("\n=== Units: /api/salas (parser + match por address + copy) ===")
+
+    # --- parse_salas_response: contrato del backend ---------------------------
+    salas = parse_salas_response(SALAS_FIXTURE)
+    check("salas: fixture del contrato → 2 salas parseadas",
+          len(salas) == 2, str(salas))
+    check("salas: sala1 online con players=2 bots=14 max=18 map=mp_terminal",
+          salas and salas[0]["online"] is True
+          and salas[0]["players"] == 2 and salas[0]["bots"] == 14
+          and salas[0]["max_clients"] == 18
+          and salas[0]["map"] == "mp_terminal",
+          str(salas[0] if salas else None))
+    check("salas: sala2 offline", bool(salas) and salas[1]["online"] is False)
+    check("salas: configured:false → [] (FALLBACK a TCP, sin inventar)",
+          parse_salas_response({"configured": False,
+                                "salas": SALAS_FIXTURE["salas"]}) == [])
+    check("salas: sin clave configured → []",
+          parse_salas_response({"salas": SALAS_FIXTURE["salas"]}) == [])
+    check("salas: salas vacías → []", parse_salas_response(
+        {"configured": True, "salas": []}) == [])
+    check("salas: salas no es lista → []",
+          parse_salas_response({"configured": True, "salas": "basura"}) == [])
+    check("salas: payload no-dict (None/texto) → []",
+          parse_salas_response(None) == []
+          and parse_salas_response("texto") == [])
+    check("salas: sala SIN address se descarta (inusable para match)",
+          parse_salas_response({"configured": True, "salas": [
+              {"id": "x", "online": True}]}) == [])
+    check("salas: players como texto '3' → 3; basura → None (sin inventar)",
+          (parse_salas_response({"configured": True, "salas": [
+              {"address": "1.2.3.4:28000", "online": True, "players": "3"}]})
+           [0]["players"] == 3)
+          and (parse_salas_response({"configured": True, "salas": [
+              {"address": "1.2.3.4:28000", "online": True,
+               "players": "muchos"}]})
+           [0]["players"] is None))
+
+    # --- match_sala: por address, tolerando formatos distintos ----------------
+    check("match: address exacta → sala1",
+          (match_sala(salas, "192.168.2.251:28960") or {}).get("name")
+          == "CTHolguin Sala 1",
+          str(match_sala(salas, "192.168.2.251:28960")))
+    check("match: formato distinto (espacios de más) → misma sala",
+          (match_sala(salas, " 192.168.2.251:28960 ") or {}).get("name")
+          == "CTHolguin Sala 1")
+    check("match: server NO presente en la respuesta → None (desconocido)",
+          match_sala(salas, "10.9.9.9:28000") is None)
+    check("match: address inválida → None",
+          match_sala(salas, "no-es-una-direccion") is None)
+    una_sin_puerto = parse_salas_response({"configured": True, "salas": [
+        {"id": "unica", "address": "192.168.2.251", "online": True}]})
+    check("match: sala del API SIN puerto (única de ese host) → matchea",
+          match_sala(una_sin_puerto, "192.168.2.251:28960")
+          is una_sin_puerto[0])
+    dos_sin_puerto = parse_salas_response({"configured": True, "salas": [
+        {"id": "a", "address": "192.168.2.251", "online": True},
+        {"id": "b", "address": "192.168.2.251", "online": False}]})
+    check("match: DOS salas mismo host sin puerto → None (ambiguo: no se "
+          "adivina)", match_sala(dos_sin_puerto, "192.168.2.251:28960") is None)
+
+    # --- sala_to_status + copy aprobado ---------------------------------------
+    st1 = sala_to_status(match_sala(salas, "192.168.2.251:28960"))
+    check("status: sala1 → online fuente API",
+          st1 is not None and st1.state == STATE_ONLINE
+          and st1.source == SOURCE_API and st1.players == 2, str(st1))
+    check("copy: 'EN LÍNEA · mapa: Terminal · 2/18 · 2 humanos · 14 bots'",
+          format_status_text(st1)
+          == "EN LÍNEA · mapa: Terminal · 2/18 · 2 humanos · 14 bots",
+          format_status_text(st1))
+    st1_sin_bots = sala_to_status({**salas[0], "bots": None})
+    check("copy: sin bots → 'EN LÍNEA · mapa: Terminal · 2/18'",
+          format_status_text(st1_sin_bots)
+          == "EN LÍNEA · mapa: Terminal · 2/18",
+          format_status_text(st1_sin_bots))
+    st1_sin_max = sala_to_status({**salas[0], "max_clients": None,
+                                  "bots": None})
+    check("copy: sin maxClients → 'EN LÍNEA · mapa: Terminal · 2 jugadores'",
+          format_status_text(st1_sin_max)
+          == "EN LÍNEA · mapa: Terminal · 2 jugadores",
+          format_status_text(st1_sin_max))
+    st1_solo = sala_to_status({**salas[0], "players": 1, "bots": 1,
+                               "map": "mp_rust"})
+    check("copy: singular → 'EN LÍNEA · mapa: Rust · 1/18 · 1 humano · 1 bot'",
+          format_status_text(st1_solo)
+          == "EN LÍNEA · mapa: Rust · 1/18 · 1 humano · 1 bot",
+          format_status_text(st1_solo))
+    st1_min = sala_to_status({"address": "1.2.3.4:28000", "online": True})
+    check("copy: online sin datos del API → 'EN LÍNEA' solo",
+          format_status_text(st1_min) == "EN LÍNEA",
+          format_status_text(st1_min))
+    st2 = sala_to_status(match_sala(salas, "192.168.2.251:28961"))
+    check("copy: sala2 offline → 'OFFLINE'",
+          st2 is not None and st2.state == STATE_OFFLINE
+          and format_status_text(st2) == "OFFLINE")
+    check("copy: server no listado → DESCONOCIDO 'SIN DATOS' (sin inventar)",
+          format_status_text(ServerStatus(state=STATE_UNKNOWN,
+                                          source=SOURCE_API)) == "SIN DATOS")
+    check("copy: TCP online sigue siendo 'ONLINE · N jugadores' (fallback)",
+          format_status_text(ServerStatus(state=STATE_ONLINE, players=3,
+                                          source=SOURCE_TCP))
+          == "ONLINE · 3 jugadores")
+
+    # --- pretty_map ------------------------------------------------------------
+    check("mapa: 'mp_terminal' → 'Terminal'", pretty_map("mp_terminal")
+          == "Terminal")
+    check("mapa: 'mp_rust' → 'Rust'", pretty_map("mp_rust") == "Rust")
+    check("mapa: 'Terminal' queda igual", pretty_map("Terminal") == "Terminal")
+    check("mapa: vacío/None → None", pretty_map("") is None
+          and pretty_map(None) is None)
+
+    # --- color: desconocido → dim (jamás rojo) ---------------------------------
+    check("color: desconocido → 'dim'",
+          status_color_key(ServerStatus(state=STATE_UNKNOWN,
+                                        source=SOURCE_API)) == "dim")
+    check("color: API online → 'ok'",
+          status_color_key(st1) == "ok")
+
+    # --- dropdown: warning SOLO con offline confirmado por el API --------------
+    check("dropdown: sala2 (offline API) → '● Sala 2 — OFFLINE'",
+          sala_dropdown_label("Sala 2", "192.168.2.251:28961", st2)
+          == "● Sala 2 — OFFLINE",
+          sala_dropdown_label("Sala 2", "192.168.2.251:28961", st2))
+    check("dropdown: offline SOLO por TCP NO decora (señal débil del probe)",
+          sala_dropdown_label(
+              "Sala 2", "192.168.2.251:28961",
+              ServerStatus(state=STATE_OFFLINE, source=SOURCE_TCP))
+          == "Sala 2  (192.168.2.251:28961)")
+    check("dropdown: online/None → label canónico 'Nombre  (host:puerto)'",
+          sala_dropdown_label("Sala 1", "192.168.2.251:28960", st1)
+          == "Sala 1  (192.168.2.251:28960)"
+          and sala_dropdown_label("Local", "127.0.0.1:28961", None)
+          == "Local  (127.0.0.1:28961)")
+    check("dropdown: desconocido NO decora (canónico)",
+          sala_dropdown_label(
+              "Local", "127.0.0.1:28961",
+              ServerStatus(state=STATE_UNKNOWN, source=SOURCE_API))
+          == "Local  (127.0.0.1:28961)")
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +1248,66 @@ def _escribir(path: Path, texto: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# 7b. Verificación post-restore (PASO 1 del flujo) + orden del flujo JUGAR.
+def phase_verify_restore() -> None:
+    """Units de verify_restore_complete y del ORDEN del flujo JUGAR.
+
+    El flujo (decisión del dueño): PASO 1/2 cargar save → verificar que se
+    cargó todo (reintento + WARNING sin bloquear) → PASO 2/2 abrir juego.
+    SIN check previo de server: si está caído, el juego abre y falla dentro
+    del juego. El orden se prueba con simulate=True (sin red ni GUI).
+    """
+    print("\n=== Units: verify_restore_complete + orden del flujo JUGAR ===")
+    tmp = Path(tempfile.mkdtemp(prefix="iw4x-verify-"))
+
+    # verify_restore_complete: OK / corto / ausente, con las constantes.
+    stat = tmp / "iw4x.stat"
+    stat.write_bytes(b"X" * 150)
+    cfg = tmp / "iw4x_config.cfg"
+    cfg.write_bytes(b"cfg")  # 3 bytes < MIN_SIZE_CONFIG
+    guid_fantasma = tmp / "guid.dat"  # no existe
+    missing = verify_restore_complete({
+        str(stat): MIN_SIZE_STAT,
+        str(cfg): MIN_SIZE_CONFIG,
+        str(guid_fantasma): MIN_SIZE_GUID,
+    })
+    check("verify_restore: solo faltan el corto y el ausente (orden estable)",
+          missing == sorted([str(cfg), str(guid_fantasma)]), str(missing))
+    check("verify_restore: todo cargado → lista vacía",
+          verify_restore_complete({str(stat): MIN_SIZE_STAT}) == [],
+          str(verify_restore_complete({str(stat): MIN_SIZE_STAT})))
+    check("verify_restore: constantes de tamaño mínimo (stat 100 · guid 64 · "
+          "config 10)",
+          (MIN_SIZE_STAT, MIN_SIZE_GUID, MIN_SIZE_CONFIG) == (100, 64, 10),
+          f"{MIN_SIZE_STAT}/{MIN_SIZE_GUID}/{MIN_SIZE_CONFIG}")
+
+    # ORDEN del flujo (simulate=True: sin red ni GUI, api no se toca).
+    evs: list = []
+    flow = GameFlow(None, "tok", r"C:\no\existe\iw4x.exe", "127.0.0.1:28961",
+                    evs.append, simulate=True, display_name="Tester")
+    flow.run()
+    logs = [str(e.get("msg", "")) for e in evs if e.get("t") == "log"]
+    want = ["Paso 1/2: Cargando tu progreso…",
+            "Verificando que se cargó todo…",
+            "Todo cargado ✓",
+            "Paso 2/2: Abriendo juego…"]
+    idx = [logs.index(w) if w in logs else -1 for w in want]
+    check("flujo: logs PASO 1/2 → verificar → Todo cargado ✓ → PASO 2/2 "
+          "en orden exacto",
+          all(i >= 0 for i in idx) and idx == sorted(idx), str(logs))
+    check("flujo: éxito y SIN rastro del check de server eliminado",
+          any(e.get("t") == "success" for e in evs)
+          and not any("server no responde" in x for x in logs)
+          and not any("Verificando server" in x for x in logs)
+          and not any("check_game_server" in x for x in logs),
+          str([e.get("t") for e in evs]))
+    check("flujo: sin cancelación por server caído (failed solo si hay fallo "
+          "real)",
+          not any(e.get("t") == "failed" for e in evs),
+          str([e.get("t") for e in evs]))
+
+
+# ---------------------------------------------------------------------------
 # 8. autosave: decisión de subida, caché, server más nuevo, lectura rota.
 def phase_autosave() -> None:
     print("\n=== Units: autosave (decide_sync upload-only, caché, server nuevo) ===")
@@ -1211,8 +1554,11 @@ def main() -> int:
     phase_app_config()
     phase_servers_validation()
     phase_normalize_api_url()
+    phase_server_status_parser()
+    phase_salas_endpoint()
     phase_kill_tree()
     phase_wait_process_exit()
+    phase_verify_restore()
     phase_autosave()
     phase_medal_parts()
 

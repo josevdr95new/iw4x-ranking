@@ -47,11 +47,13 @@ from typing import Any, Callable, Dict, List, Optional
 from api_client import ApiClient, ApiError, NetworkError
 from classes_export import default_store_path, export_player_classes
 from logging_setup import app_data_dir
-from save_sync import (UPLOAD_LOCK, decide_guid_action,
+from save_sync import (GUID_REL, MIN_SIZE_CONFIG, MIN_SIZE_GUID,
+                       MIN_SIZE_STAT, UPLOAD_LOCK, decide_guid_action,
                        decide_guid_validation, decide_stat_action,
                        default_guid_path, guid_file_b64,
                        quarantine_local_guid, quarantine_stat_file,
-                       stat_rels, sync_after_session, sync_before_launch)
+                       stat_rels, sync_after_session, sync_before_launch,
+                       verify_restore_complete)
 
 log = logging.getLogger("game_flow")
 
@@ -214,6 +216,11 @@ class GameFlow:
         self.stat_quarantine_root_path = stat_quarantine_root_path
         self._process: Optional[Any] = None  # handle de Popen del juego
         self._launched_at: Optional[float] = None  # monotonic del lanzamiento
+
+        # Verificación post-restore: lo que la nube de la cuenta tiene DEBE
+        # quedar en disco ({ruta_absoluta: tamaño_mínimo}); vacío → nada que
+        # verificar (cuenta nueva, cloud_save off o simulación).
+        self._expected_restore: Dict[str, int] = {}
 
         # Cuarentena de identidad/progreso EN CURSO (para la restauración de
         # seguridad): [{"kind": "guid"|"stat", "file": cuarentenado,
@@ -710,22 +717,99 @@ class GameFlow:
         # capa de propiedad (el guid vigente debe ser de esta cuenta).
         self._apply_guid_identity(manifest)
         self._validate_guid_ownership()
+        # Verificación post-restore: lo que la nube de la cuenta tiene DEBE
+        # quedar en disco tras el sync. Mapeo rel → ruta local real (mismas
+        # reglas que local_save_files) + tamaño mínimo por tipo (stat 100B ·
+        # guid 64B · config 10B, constantes de save_sync).
+        self._manifest = manifest
+        expected: Dict[str, int] = {}
+        cloud_paths = sorted({str(f.get("path") or "")
+                              for f in (manifest or {}).get("files") or []
+                              if isinstance(f, dict)})
+        base = Path(self.game_dir) / "players"
+        for rel in cloud_paths:
+            if not rel:
+                continue
+            if rel == GUID_REL:
+                expected[self.guid_path] = MIN_SIZE_GUID
+            elif rel == "iw4x.stat" or (rel.startswith("mods/")
+                                        and rel.endswith("/iw4x.stat")):
+                expected[str(base / rel)] = MIN_SIZE_STAT
+            else:
+                expected[str(base / rel)] = MIN_SIZE_CONFIG
+        self._expected_restore = expected
+
+    def _verify_restore_step(self) -> None:
+        """Verifica que el restore dejó TODO el progreso en disco.
+
+        Regla del dueño: jugar JAMÁS se bloquea por sync. Si falta algo
+        crítico (archivo ausente o menor que su tamaño mínimo), se reintenta
+        el restore UNA vez; si sigue fallando, WARNING y se continúa igual.
+        En simulación (o sin nada esperado: cuenta nueva, cloud_save off)
+        el paso es un no-op que igualmente emite sus logs.
+        """
+        self._log("Verificando que se cargó todo…")
+        if self.simulate or not self._expected_restore:
+            self._log("Todo cargado ✓")
+            return
+        missing = verify_restore_complete(self._expected_restore)
+        if missing:
+            self._log(f"⚠ No se cargó todo ({len(missing)} archivo(s)) — "
+                      "reintentando el restore una vez…")
+            try:
+                backup_root = (app_data_dir() / "save-backups"
+                               / time.strftime("%Y%m%d-%H%M%S"))
+                sync_before_launch(self.api, self.token, self.game_dir,
+                                   log=self._log, backup_root=backup_root,
+                                   guid_path=self.guid_path,
+                                   manifest=self._manifest)
+            except (NetworkError, ApiError, OSError) as exc:
+                self._log(f"⚠ Reintento del restore falló: "
+                          f"{self._transport_error_text(exc)}")
+            missing = verify_restore_complete(self._expected_restore)
+        if missing:
+            self._log("⚠ No se pudo verificar todo tu progreso — se "
+                      "continúa igual (no perder la partida)")
+        else:
+            self._log("Todo cargado ✓")
 
     def _run(self) -> None:
+        """ORDEN del arranque (decisión del dueño):
+
+        PASO 1 — CARGAR SAVE (sync/restore + aislamiento de identidad) y
+                 VERIFICAR que se cargó todo (1 reintento del restore; si
+                 sigue fallando, WARNING y se continúa: jugar jamás se
+                 bloquea por sync).
+        PASO 2 — EJECUTAR el exe (+dumpPlayerData si export_classes).
+
+        Sin check previo del server (decisión del dueño): si está caído, el
+        juego simplemente abre y falla al conectar dentro del juego.
+        """
         # Validación dura del nick: el juego SIEMPRE abre con el displayName.
         if not (self.display_name or "").strip():
             self._failed(self.NO_NICK_MSG, retry=False)
             return
 
-        self._log(f"Preparando conexión al server {self.server_address}…")
+        # PASO 1/2 — CARGAR SAVE (los logs existentes del sync quedan).
+        self._log("Paso 1/2: Cargando tu progreso…")
         self._prepare_session()
+        if self._cancelled.is_set():
+            return
+
+        # Verificación del restore (nunca bloquea jugar).
+        self._verify_restore_step()
+        if self._cancelled.is_set():
+            return
 
         # Cuenta ya verificada: mensaje directo; sin identidad, el server la
         # auto-vincula por sesión de juego (sin pantalla de verificación).
         if self.already_linked:
             self._log("Tu identidad ya está verificada: solo abrimos el juego.")
 
-        # Lanzar el juego.
+        # PASO 2/2 — EJECUTAR el juego (log de apertura existente dentro).
+        self._log("Paso 2/2: Abriendo juego…")
+        if self._cancelled.is_set():
+            return
         if not self._launch_game():
             return
         self._log(self.LAUNCH_MSG)

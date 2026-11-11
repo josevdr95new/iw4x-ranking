@@ -320,17 +320,61 @@ class App(ctk.CTk):
         log.info("Sesión iniciada: %s", user.get("email"))
 
     def logout(self) -> None:
-        """Cierra sesión: borra token y vuelve al login."""
+        """Cierra sesión: guarda el progreso (si no hay partida) y vuelve al
+        login.
+
+        Pedido del dueño: al dar CERRAR SESIÓN el launcher SINCRONIZA los
+        saves antes de borrar el token (el mismo tick final del cierre,
+        presupuesto ~10s). Con una PARTIDA EN CURSO el logout NO procede:
+        el post-sesión conserva el token para subir el save al cerrar el
+        juego (aviso 5s en el héroe, nada se interrumpe). Si la API está
+        caída, avisa y cierra sesión igualmente (resiliente).
+        """
         log.info("Cierre de sesión solicitado")
+        # Partida EN CURSO: NO cerrar sesión — el upload post-sesión del
+        # propio flujo necesita que nada se interrumpa. El juego sigue.
+        live = self._live_flow
+        if live is not None and live.game_running():
+            msg = ("Tienes una partida en curso: termina y cierra el juego "
+                   "antes de cerrar sesión.")
+            log.info("Logout bloqueado: partida en curso")
+            self.home_frame.log_line(f"⚠ {msg}")
+            self.home_frame.set_status(msg, "warn")
+            self._schedule_hero_notice()
+            return
         if self.flow is not None:
             self.flow.cancel()
             self.flow = None
-        # Sesión viva: se suelta (el juego sigue abierto, como hasta ahora);
-        # el upload post-sesión lo hace el hilo del propio flujo al morir.
         live = self._live_flow
         self._live_flow = None
         if live is not None:
             live.cancel()
+        # SIN partida: guardado final del save ANTES de borrar el token
+        # (mismo tick forzado del cierre, presupuesto ~10s). Solo promete
+        # guardar cuando el cloud-sync está activo y hay dir de juego.
+        game_dir = (os.path.dirname(self.cfg.game_path)
+                    if self.cfg.game_path else "")
+        if self.cfg.cloud_save and game_dir:
+            self._log_line_safe("Guardando tu progreso antes de cerrar sesión…")
+            try:
+                result = self.autosave.tick(force=True, budget=10.0)
+                if result == "upload":
+                    self._log_line_safe("Progreso guardado ✓")
+                elif result in ("skip-identical", "noop", "download"):
+                    # Nada que subir: lo de tu nube ya es lo más nuevo.
+                    self._log_line_safe("Tu progreso ya está en la nube ✓")
+                elif result == "busy-read":
+                    self._log_line_safe("⚠ El juego estaba escribiendo el "
+                                        "save; se subirá en el próximo "
+                                        "arranque.")
+                # "disabled" u otro resultado: sin promesa, sin log.
+            except (NetworkError, ApiError, OSError):
+                self._log_line_safe("No se pudo guardar (sin conexión) — "
+                                    "cerrando sesión igualmente")
+            except Exception:
+                log.exception("Guardado antes de cerrar sesión falló")
+                self._log_line_safe("⚠ No se pudo guardar tu progreso — "
+                                    "cerrando sesión igualmente")
         self._hero_busy = False
         self.store.clear()
         self.token = None
@@ -344,6 +388,19 @@ class App(ctk.CTk):
         self.home_frame.reset_hud()
         self.home_frame.set_status("Todo listo.", "dim")
         self.show_login()
+
+    def _schedule_hero_notice(self, seconds: float = 5.0) -> None:
+        """Aviso temporal en el héroe (logout con partida viva): la barra de
+        estado muestra el aviso en ámbar ``seconds`` y vuelve sola al estado
+        de partida. El juego y la sesión siguen EXACTAMENTE igual."""
+        def restore() -> None:
+            if self._live_flow is not None and self._live_flow.game_running():
+                self.home_frame.set_status("Partida en curso.", "dim")
+
+        try:
+            self.after(int(seconds * 1000), restore)
+        except Exception:  # ventana cerrada mientras tanto: nada que hacer
+            pass
 
     # ================== Usuario / vinculación ==================
     def _apply_user_to_home(self) -> None:

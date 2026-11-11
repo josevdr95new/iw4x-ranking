@@ -392,7 +392,7 @@ class StatsPanel(ctk.CTkFrame):
         knife = _fmt_knife(player.get("knifeKills"), player.get("knifeDeaths"))
         self.sub_label.configure(
             text=f"TIEMPO {_fmt_time(player.get('timePlayed'))}"
-                 f"   //   SERVER {server}"
+                 f"   //   ULT. SERVER {server}"
                  f"   //   JUGADOR {name}"
                  f"   //   HS {hs_ratio} de bajas"
                  f"   //   ELO {elo}"

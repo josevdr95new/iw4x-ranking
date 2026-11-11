@@ -18,9 +18,14 @@ log = logging.getLogger("config")
 DEFAULT_CONFIG: Dict[str, Any] = {
     "api_url": "http://192.168.3.99:3000",
     "game_path": "D:\\Call of Duty 6\\iw4x.exe",
+    # Servers por defecto: las DOS salas del LXC de producción (Sala 1
+    # primero = default) + Local. Los defaults de api_url/web_url siguen
+    # siendo los de DESARROLLO: es el config de distribución
+    # (dist\launcher.config.json) el que apunta API/web al LXC.
     "servers": [
-        {"name": "LAN Server", "address": "192.168.2.251:28960"},
-        {"name": "Test Local", "address": "127.0.0.1:5174"},
+        {"name": "Sala 1",  "address": "192.168.2.251:28960"},
+        {"name": "Sala 2",  "address": "192.168.2.251:28961"},
+        {"name": "Local",   "address": "127.0.0.1:28961"},
     ],
     "default_server": 0,
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo

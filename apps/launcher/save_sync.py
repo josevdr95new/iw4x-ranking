@@ -50,6 +50,37 @@ UPLOAD_LOCK = threading.Lock()
 # Archivos de save reconocidos (whitelist del server).
 GUID_REL = "guid.dat"          # IDENTIDAD: %LOCALAPPDATA%\iw4x\guid.dat
 BASE_FILES = ("iw4x.stat", "iw4x_config.cfg")
+
+# --- PASO 3 del flujo JUGAR: tamaños mínimos de un restore correcto ---------
+# Un archivo "cargado" existe y pesa AL MENOS esto (bytes). Un restore que
+# deja el archivo ausente o casi vacío cuenta como fallido (ver
+# verify_restore_complete); el flujo reintenta UNA vez y, si sigue fallando,
+# continúa con WARNING — jugar jamás se bloquea por sync.
+MIN_SIZE_STAT = 100    # iw4x.stat (base y mods): save de progresión real
+MIN_SIZE_GUID = 64     # guid.dat: identidad derivable (contrato 64B..4KB)
+MIN_SIZE_CONFIG = 10   # iw4x_config.cfg (base y mods): config mínima
+
+
+def verify_restore_complete(expected_files: Dict[str, int]) -> List[str]:
+    """PASO 3 del flujo JUGAR (pura sobre disco): archivos que NO quedaron.
+
+    ``expected_files`` mapea RUTAS ABSOLUTAS → tamaño mínimo en bytes. Un
+    archivo cuenta como cargado si existe y pesa al menos el mínimo.
+    Devuelve la lista (orden estable por ruta) de las que faltan o quedan
+    cortas; vacía = todo cargado. Jamás lanza (OSError → falta).
+    """
+    missing: List[str] = []
+    for path_str in sorted(expected_files):
+        min_size = int(expected_files[path_str])
+        ok = False
+        try:
+            p = Path(path_str)
+            ok = p.is_file() and p.stat().st_size >= min_size
+        except OSError:
+            ok = False
+        if not ok:
+            missing.append(path_str)
+    return missing
 MAX_FILES = 24
 MAX_FILE_BYTES = 256 * 1024
 

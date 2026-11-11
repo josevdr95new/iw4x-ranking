@@ -416,7 +416,26 @@ def run_phase(name: str, steps: List[Step], build_app: Callable[[], App],
 
         step(app, done)
 
-    app.after(250, next_step)
+    # La app arranca MAPEADA: CTk en Windows RETIRA y redibuja la ventana al
+    # aplicar el color dark de la titlebar (ctk_tk.py: withdraw → redraw →
+    # deiconify), y bajo carga ese ciclo puede superar 1s. Los checks de
+    # visibilidad (winfo_ismapped de widgets del login/home/grid) solo son
+    # válidos cuando la VENTANA raíz ya está mapeada y en estado normal —
+    # sin esta espera corren dentro del hueco withdrawn y fallan en falso
+    # (widgets con mgr='pack' pero sin mapear). Si nunca mapea → fallo
+    # ruidoso con watchdog, nunca un verde mentiroso.
+    t_mapped = time.monotonic()
+
+    def start_when_mapped() -> None:
+        if app.winfo_ismapped() and app.state() == "normal":
+            app.after(250, next_step)
+        elif time.monotonic() - t_mapped > 30:
+            check(f"ventana de la fase '{name}' nunca se mapeó", False)
+            quiesce(app)
+        else:
+            app.after(50, start_when_mapped)
+
+    app.after(100, start_when_mapped)
     app.mainloop()
     if not timed_out:
         print(f"--- fin de fase: {name} ---")
@@ -894,8 +913,9 @@ def phase_stats() -> None:
             sub = str(panel.sub_label.cget("text"))
             check("panel de stats carga con valores reales (no '—')",
                   "—" not in (kills + kd), f"rank={rank} kills={kills} kd={kd}")
-            check("fila secundaria con tiempo jugado, server y jugador",
-                  "TIEMPO" in sub and "SERVER" in sub and "JUGADOR" in sub, sub)
+            check("fila secundaria con tiempo jugado, ULT. SERVER y jugador",
+                  "TIEMPO" in sub and "ULT. SERVER" in sub
+                  and "JUGADOR" in sub, sub)
             check("bloque HEADSHOTS con el valor real del perfil",
                   hs != "—" and hs.replace(".", "").isdigit(),
                   f"hs={hs} (esperado entero formateado)")
@@ -1281,9 +1301,24 @@ def phase_play_unlinked() -> None:
                         app.home_frame.console.get("1.0", "end"),
                         hint_ok, timeout=15)
 
-        # 30s de margen: el flujo simplificado termina en segundos.
-        wait_in_app(app, lambda: app.flow is None,
-                    lambda: app.after(250, terminal_asserts), timeout=30)
+        # 30s de margen: el flujo simplificado termina en segundos. Los
+        # eventos del flujo llegan cross-thread (emit → widgets) y el handler
+        # de success NO es atómico para Tk: entre set_playing(False) (hud
+        # "listo") y set_deployed() (hud "en_partida") el assert a +250ms
+        # podía ver un estado intermedio en falso. Se espera a que el strip
+        # se ASIENTE en el estado final (con techo de espera; si nunca llega,
+        # el assert corre igual y falla de forma visible).
+        settles = {"n": 0}
+
+        def when_settled() -> None:
+            hud_now = str(app.home_frame.hud_state.cget("text"))
+            settles["n"] += 1
+            if "EN PARTIDA" in hud_now or settles["n"] >= 40:
+                terminal_asserts()
+            else:
+                app.after(100, when_settled)
+
+        wait_in_app(app, lambda: app.flow is None, when_settled, timeout=30)
 
     def step_play_session(app: App, done: Callable[[], None]) -> None:
         """Sesión de juego: la llamada de JUGAR + su renovación en ciclo."""
@@ -2085,7 +2120,11 @@ def phase_guid_ownership() -> None:
           any(e["t"] == "success" for e in evs_a)
           and stub_a.link_start_calls == 0, str([e["t"] for e in evs_a]))
     check("propiedad A: el upload post-sesión incluye la identidad FRESCA",
-          stub_a.save_upload_calls == seed_calls_a + 1
+          # El reintento del PASO de verificación puede añadir UN PUT
+          # intermedio (sync decide "local más nuevo" y el PUT responde
+          # "Sin cambios"): la garantía es >= seed+1 y que la identidad que
+          # queda en la nube sea la FRESCA que creó el juego.
+          stub_a.save_upload_calls >= seed_calls_a + 1
           and stub_a._save_store.get("guid.dat") == FRESH_GUID,
           f"calls={stub_a.save_upload_calls} (seed={seed_calls_a}) "
           f"guid={stub_a._save_store.get('guid.dat')!r:.50}")
@@ -2365,8 +2404,10 @@ def phase_classes_export_flow() -> None:
     # --- A: con la exportación activa → dump subido tras la sesión -----------
     esc_a = make_escenario("sube")
     flow_a, stub_a, evs_a, logs_a = correr(esc_a, export_classes=True)
+    # Log REAL de apertura (startswith: el "Paso 2/2: Abriendo juego…" nuevo
+    # también contiene la frase pero no es el del comando).
     cmd_line = next((str(e.get("msg", "")) for e in evs_a
-                     if "Abriendo juego" in str(e.get("msg", ""))), "")
+                     if str(e.get("msg", "")).startswith("Abriendo juego")), "")
     check("clases A: el comando lanzado termina en +dumpPlayerData",
           cmd_line.rstrip().endswith("+dumpPlayerData"), cmd_line)
     check("clases A: al cerrar el juego el dump llegó a la API (stub)",
@@ -2388,7 +2429,7 @@ def phase_classes_export_flow() -> None:
     esc_b = make_escenario("apagada")
     _flow_b, stub_b, evs_b, logs_b = correr(esc_b, export_classes=False)
     cmd_b = next((str(e.get("msg", "")) for e in evs_b
-                  if "Abriendo juego" in str(e.get("msg", ""))), "")
+                  if str(e.get("msg", "")).startswith("Abriendo juego")), "")
     check("clases B: sin export → el comando NO lleva +dumpPlayerData",
           "+dumpPlayerData" not in cmd_b, cmd_b)
     check("clases B: sin export → CERO subidas aunque el juego dejara un dump",
@@ -3353,6 +3394,337 @@ def phase_settings_servers() -> None:
         ac_module.config_path = orig_config_path  # siempre, incluso en abort
 
 
+def phase_server_status_live() -> None:
+    """Estado REAL de servers: FUENTE /api/salas (stub del contrato) + FALLBACK TCP.
+
+    - Fuente aprobada: ``fetch_salas`` se STUBEA con el fixture del contrato
+      (el backend local aún no despliega el endpoint; en producción el LXC
+      lo sirve con datos RCON reales). Match por address → filas de AJUSTES
+      'EN LÍNEA · mapa: Terminal · 2/18 · 2 humanos · 14 bots' / 'OFFLINE' /
+      'SIN DATOS' (server no listado, dim sin inventar) y dropdown con el
+      warning '● Sala 2 — OFFLINE' (solo informativo, JUGAR intacto).
+    - Fallback: con ``fetch_salas → []`` (API caída/vacía) las filas caen al
+      chequeo directo contra servers falsos locales (listener TCP efímero +
+      respondedor UDP getstatus → 'ONLINE · 3 jugadores'; puerto cerrado →
+      'OFFLINE'). Presupuestos acotados por diseño; la UI nunca se bloquea.
+    """
+    print("\n=== Fase GUI/headless: estado REAL de servers (API + fallback) ===")
+    import socket
+    import threading
+
+    import server_status as ss_module
+    from server_status import (  # noqa: F401
+        DEFAULT_TCP_TIMEOUT,
+        parse_salas_response,
+        probe_server,
+    )
+
+    # --- Servers falsos locales (fallback): nada sale de la máquina ---------
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(8)
+    port_live = tcp.getsockname()[1]
+
+    STATUS_FIXTURE = (
+        b"\xff\xff\xff\xffstatusResponse\n"
+        b"\\gamename\\iw4x\\players\\3\\clients\\3\\mapname\\mp_rust\n"
+    )
+    udp_sockets: List[socket.socket] = []
+    udp_stop = threading.Event()   # apaga el respondedor UDP VIGENTE
+    stop = threading.Event()       # apaga el acceptor TCP (fin de fase)
+
+    def arm_udp() -> None:
+        """(Re)arma el respondedor getstatus del puerto fake.
+
+        Se puede apagar y re-armar: el probe 'sin cifra' NECESITA el UDP
+        muerto (socket cerrado → nadie puede responder) y la parte GUI lo
+        necesita VIVO otra vez para 'ONLINE · 3 jugadores'.
+        """
+        udp_stop.clear()
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.bind(("127.0.0.1", port_live))
+        udp_sockets.append(udp)
+
+        def responder() -> None:
+            udp.settimeout(0.2)
+            while not udp_stop.is_set():
+                try:
+                    data, addr = udp.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                if data.startswith(b"\xff\xff\xff\xffgetstatus"):
+                    try:
+                        udp.sendto(STATUS_FIXTURE, addr)
+                    except OSError:
+                        return
+
+        threading.Thread(target=responder, daemon=True,
+                         name="fake-getstatus").start()
+
+    def disarm_udp() -> None:
+        """UDP fuera de servicio DE VERDAD: socket cerrado (nadie responde)."""
+        udp_stop.set()
+        for s in udp_sockets:
+            try:
+                s.close()
+            except OSError:
+                pass
+        udp_sockets.clear()
+
+    arm_udp()
+
+    def tcp_acceptor() -> None:
+        # Acepta y cierra al instante: el connect del probe es OK y el
+        # backlog jamás se llena (determinismo).
+        tcp.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conn, _addr = tcp.accept()
+                conn.close()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+    threading.Thread(target=tcp_acceptor, daemon=True,
+                     name="fake-acceptor").start()
+    addr_online = f"127.0.0.1:{port_live}"
+    # Puerto CERRADO determinista (bind+close). El refusado del SO puede
+    # tardar (puerto filtrado → agota el timeout): el presupuesto se acota
+    # POR DISEÑO con los constantes del módulo, jamás un hang.
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    port_closed = closed.getsockname()[1]
+    closed.close()
+    addr_closed = f"127.0.0.1:{port_closed}"
+
+    # --- Parte 1 headless: FALLBACK TCP real (sockets loopback) -------------
+    t0 = time.monotonic()
+    res = probe_server(addr_online)
+    online_ms = (time.monotonic() - t0) * 1000
+    check("probe: TCP+UDP falsos → ONLINE · 3 jugadores",
+          res is not None and res.state == "online" and res.players == 3,
+          str(res))
+    check("probe: ONLINE no bloquea (responde <3000 ms)",
+          online_ms < 3000, f"{online_ms:.0f} ms")
+    # UDP FUERA de servicio DE VERDAD: socket cerrado (nadie puede responder)
+    # + hilo detenido. El sendto cae en ICMP unreachable → sin cifra.
+    disarm_udp()
+    res2 = probe_server(addr_online)
+    check("probe: TCP OK sin respuesta UDP → ONLINE sin cifra",
+          res2 is not None and res2.state == "online"
+          and res2.players is None, str(res2))
+    t0 = time.monotonic()
+    res3 = probe_server(addr_closed)
+    offline_ms = (time.monotonic() - t0) * 1000
+    check("probe: puerto cerrado → OFFLINE",
+          res3 is not None and res3.state == "offline", str(res3))
+    check("probe: OFFLINE acotado por diseño (≤ TCP timeout + 500 ms — "
+          "jamás un hang)",
+          offline_ms < (DEFAULT_TCP_TIMEOUT + 0.5) * 1000,
+          f"{offline_ms:.0f} ms (tcp_timeout={DEFAULT_TCP_TIMEOUT}s)")
+
+    # La parte GUI necesita el respondedor UDP VIVO otra vez ('ONLINE · 3').
+    arm_udp()
+
+    # --- Parte 2 GUI: FUENTE /api/salas (stub del contrato) + fallback -------
+    api = ApiClient(API_URL)
+    token_ok = True
+    try:
+        token = ensure_login_retry(api)
+        UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    except Exception as exc:
+        token_ok = False
+        check("preparación estado servers (login)", False, str(exc))
+
+    if token_ok:
+        # Fixture EXACTO del contrato (backend desplegándose en paralelo).
+        SALAS_STUB = {
+            "configured": True,
+            "salas": [
+                {"id": "sala1", "name": "CTHolguin Sala 1",
+                 "address": "192.168.2.251:28960", "online": True,
+                 "hostname": "CTHolguin Sala 1", "map": "mp_terminal",
+                 "players": 2, "bots": 14, "maxClients": 18},
+                {"id": "sala2", "name": "CTHolguin Sala 2",
+                 "address": "192.168.2.251:28961", "online": False,
+                 "hostname": "CTHolguin Sala 2", "map": "mp_rust",
+                 "players": 0, "bots": 0, "maxClients": 18},
+            ],
+        }
+        orig_fetch = ss_module.fetch_salas
+        data = dict(DEFAULT_CONFIG)
+        data.update({
+            "api_url": API_URL,
+            "game_path": r"C:\no\existe\iw4x.exe",
+            "servers": [
+                {"name": "Sala 1", "address": "192.168.2.251:28960"},
+                {"name": "Sala 2", "address": "192.168.2.251:28961"},
+                {"name": "Sala Fake", "address": addr_online},
+                {"name": "Sala Muerta", "address": addr_closed},
+            ],
+            # default = Sala 2 (OFFLINE según el API): warning en el dropdown,
+            # JUGAR NUNCA se bloquea (solo informativo).
+            "default_server": 1,
+            "simulate_game": True,
+            "remember_session": True,
+        })
+
+        def build() -> App:
+            return App(AppConfig(data), ApiClient(API_URL),
+                       UserStore(STORE_PATH))
+
+        def step_open_settings(app: App, done: Callable[[], None]) -> None:
+            def ok() -> None:
+                st = app.settings_frame
+                app.show_settings()
+                app.update_idletasks()
+                inicial = [str(r["state"].cget("text"))
+                           for r in st._server_rows]
+                check("ajustes: al entrar las 4 filas arrancan "
+                      "'verificando…' (ámbar) mientras vuela el chequeo",
+                      len(inicial) == 4
+                      and all(t == "verificando…" for t in inicial),
+                      str(inicial))
+
+                def listo() -> bool:
+                    try:
+                        textos = [str(r["state"].cget("text"))
+                                  for r in st._server_rows]
+                        return (len(textos) == 4
+                                and textos[0].startswith("EN LÍNEA")
+                                and textos[1] == "OFFLINE"
+                                and textos[2] == "SIN DATOS"
+                                and textos[3] == "SIN DATOS")
+                    except Exception:
+                        return False
+
+                wait_in_app(app, listo, done, timeout=12)
+
+            wait_in_app(app, lambda: app.current_frame is app.home_frame
+                        and app.token is not None, ok, timeout=15)
+
+        def step_verify_api_source(app: App, done: Callable[[], None]) -> None:
+            st = app.settings_frame
+            textos = [str(r["state"].cget("text")) for r in st._server_rows]
+            colores = [str(r["dot"].cget("text_color")).lower()
+                       for r in st._server_rows]
+            check("ajustes: sala1 (API online) → 'EN LÍNEA · mapa: Terminal · "
+                  "2/18 · 2 humanos · 14 bots' con dot verde ok",
+                  textos[0] == "EN LÍNEA · mapa: Terminal · 2/18 · 2 humanos "
+                  "· 14 bots" and COLORS["ok"].lower() in colores[0],
+                  f"{textos} {colores}")
+            check("ajustes: sala2 (API offline) → 'OFFLINE' dot dim (NUNCA "
+                  "rojo)",
+                  textos[1] == "OFFLINE"
+                  and COLORS["text_faint"].lower() in colores[1]
+                  and COLORS["danger"].lower() not in colores[1],
+                  f"{textos} {colores}")
+            check("ajustes: servers NO listados por el API → 'SIN DATOS' "
+                  "(desconocido, dim, sin inventar)",
+                  textos[2] == "SIN DATOS" and textos[3] == "SIN DATOS"
+                  and COLORS["text_faint"].lower() in colores[2]
+                  and COLORS["text_faint"].lower() in colores[3],
+                  f"{textos} {colores}")
+            # HOME: warning en el dropdown del default offline (informativo)
+            # + identidad intacta para JUGAR.
+            app.show_home()
+            app.update_idletasks()
+            app.home_frame.refresh_selected_server_status()
+
+            def home_listo() -> bool:
+                try:
+                    return str(app.home_frame.server_menu.get()) \
+                        == "● Sala 2 — OFFLINE"
+                except Exception:
+                    return False
+
+            def home_ok() -> None:
+                menu = str(app.home_frame.server_menu.get())
+                estado = str(app.home_frame.server_state.cget("text"))
+                sel = app.home_frame.selected_server()
+                valores = list(app.home_frame._server_labels.keys())
+                check("home: default offline → dropdown '● Sala 2 — OFFLINE' "
+                      "(warning informativo del API)",
+                      menu == "● Sala 2 — OFFLINE", f"{menu!r} {valores}")
+                check("home: estado junto al dropdown → 'OFFLINE' (dot dim)",
+                      estado == "OFFLINE", repr(estado))
+                check("home: JUGAR NO se bloquea — selected_server() resuelve "
+                      "el server decorado",
+                      sel is not None
+                      and sel.get("address") == "192.168.2.251:28961",
+                      str(sel))
+                done()
+
+            wait_in_app(app, home_listo, home_ok, timeout=12)
+
+        def step_fallback_tcp(app: App, done: Callable[[], None]) -> None:
+            # API caída/vacía → fetch_salas [] → FALLBACK TCP por server.
+            ss_module.fetch_salas = lambda *a, **k: []
+            st = app.settings_frame
+            app.show_settings()
+            app.update_idletasks()
+            st.status_refresh_btn.invoke()  # ACTUALIZAR ESTADO (fallback)
+
+            def listo() -> bool:
+                try:
+                    textos = [str(r["state"].cget("text"))
+                              for r in st._server_rows]
+                    return (len(textos) == 4
+                            and textos[2] == "ONLINE · 3 jugadores"
+                            and textos[3] == "OFFLINE")
+                except Exception:
+                    return False
+
+            def ok() -> None:
+                textos = [str(r["state"].cget("text"))
+                          for r in st._server_rows]
+                colores = [str(r["dot"].cget("text_color")).lower()
+                           for r in st._server_rows]
+                check("fallback: sala fake (TCP+UDP falsos) → 'ONLINE · 3 "
+                      "jugadores'",
+                      textos[2] == "ONLINE · 3 jugadores"
+                      and COLORS["ok"].lower() in colores[2],
+                      f"{textos} {colores}")
+                check("fallback: puerto cerrado → 'OFFLINE' dot dim",
+                      textos[3] == "OFFLINE"
+                      and COLORS["text_faint"].lower() in colores[3],
+                      f"{textos} {colores}")
+                check("fallback: la UI siguió viva (GUARDAR mapeado; chequeo "
+                      "solo en hilos de fondo)",
+                      bool(st.save_btn.winfo_ismapped()))
+                done()
+
+            wait_in_app(app, listo, ok, timeout=12)
+
+        ss_module.fetch_salas = lambda *a, **k: parse_salas_response(
+            SALAS_STUB)  # mismo camino que el fetch real: crudo → parser
+        try:
+            run_phase(
+                "estado REAL de servers (API /api/salas + fallback TCP)",
+                [step_open_settings, step_verify_api_source,
+                 step_fallback_tcp],
+                build,
+            )
+        finally:
+            ss_module.fetch_salas = orig_fetch  # sin fugas a otras fases
+
+    # Limpieza SIEMPRE (al final de TODO): la sala fake muere.
+    stop.set()
+    udp_stop.set()
+    for s in udp_sockets:
+        try:
+            s.close()
+        except OSError:
+            pass
+    try:
+        tcp.close()
+    except OSError:
+        pass
+
+
 def phase_session_logout() -> None:
     """Fase GUI: recordar sesión (cyber-café, pedido del dueño).
 
@@ -3501,6 +3873,172 @@ def phase_session_logout() -> None:
     STORE_PATH.unlink(missing_ok=True)  # limpieza de la fase
 
 
+def phase_logout_save() -> None:
+    """Fase GUI: CERRAR SESIÓN ahora SINCRONIZA el save antes de cerrar.
+
+    Pedido del dueño: al dar CERRAR SESIÓN, el launcher sube el progreso
+    (el mismo tick forzado del cierre, presupuesto ~10s) ANTES de borrar el
+    token. Con una PARTIDA EN CURSO el logout NO procede (warning exacto +
+    aviso 5s; el post-sesión conserva el token para subir al cerrar el
+    juego). Con la API caída, warning y cierra sesión igualmente.
+    """
+    print("\n=== Fase logout: guardar progreso antes de cerrar sesión ===")
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login_retry(api)
+    except Exception as exc:
+        check("preparación logout-save (login headless)", False, str(exc))
+        return
+
+    def build():
+        return App(make_test_cfg(), ApiClient(API_URL), UserStore(STORE_PATH))
+
+    def step_wait_home(app: App, done: Callable[[], None]) -> None:
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, done, timeout=15)
+
+    # --- (1) sin partida: guarda ANTES de borrar el token ------------------
+    UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    ticks: List[Dict[str, Any]] = []
+    console_1: List[str] = []
+
+    def step_logout_guarda(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            orig_log = app.home_frame.log_line
+
+            def spy(text):
+                console_1.append(str(text))
+                try:
+                    orig_log(text)
+                except Exception:
+                    pass
+
+            app.home_frame.log_line = spy  # type: ignore[method-assign]
+
+            def fake_tick(force=False, budget=None):
+                ticks.append({"force": force, "budget": budget,
+                              "token_en_store": app.store.load() is not None,
+                              "app_token": app.token})
+                return "upload"
+
+            app.autosave.tick = fake_tick  # type: ignore[method-assign]
+            app.logout()
+            check("(1) logout sin partida: tick forzado UNA vez (force=True) "
+                  "ANTES de borrar el token",
+                  len(ticks) == 1 and ticks[0]["force"] is True
+                  and ticks[0]["token_en_store"] is True
+                  and ticks[0]["app_token"] is not None,
+                  str(ticks))
+            check("(1) logout sin partida: token borrado y vuelta a LOGIN",
+                  app.current_frame is app.login_frame and app.token is None
+                  and app.store.load() is None,
+                  f"frame={'login' if app.current_frame is app.login_frame else 'otro'} "
+                  f"token={'no' if app.token is None else 'sí'}")
+            check("(1) logout sin partida: logs exactos 'Guardando tu "
+                  "progreso antes de cerrar sesión…' → 'Progreso guardado ✓'",
+                  any("Guardando tu progreso antes de cerrar sesión…" in x
+                      for x in console_1)
+                  and any("Progreso guardado ✓" in x for x in console_1),
+                  str(console_1[-4:]))
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    run_phase("(1) logout sin partida guarda el save antes del logout",
+              [step_wait_home, step_logout_guarda], build)
+
+    # --- (2) partida EN CURSO: NO cierra sesión, warning exacto ------------
+    UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    console_2: List[str] = []
+
+    def step_logout_vivo(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            class FakeProc:
+                pid = 424777
+
+                def poll(self):
+                    return None  # juego VIVO (stub)
+
+            flow = GameFlow(app.api, app.token or "",
+                            r"C:\no\existe\iw4x.exe", "127.0.0.1:28961",
+                            lambda e: None, simulate=True, display_name="X")
+            flow._process = FakeProc()
+            app._live_flow = flow
+            orig_log = app.home_frame.log_line
+
+            def spy(text):
+                console_2.append(str(text))
+                try:
+                    orig_log(text)
+                except Exception:
+                    pass
+
+            app.home_frame.log_line = spy  # type: ignore[method-assign]
+            msg = ("Tienes una partida en curso: termina y cierra el juego "
+                   "antes de cerrar sesión.")
+            app.logout()
+            check("(2) logout con partida viva: NO cierra sesión (token "
+                  "conservado, sigue en la home)",
+                  app.current_frame is app.home_frame
+                  and app.token is not None
+                  and app.store.load() is not None,
+                  f"frame={'home' if app.current_frame is app.home_frame else 'otro'} "
+                  f"token={'sí' if app.token else 'no'}")
+            check("(2) logout con partida viva: warning exacto visible",
+                  any(msg in x for x in console_2), str(console_2[-3:]))
+            check("(2) la sesión viva queda INTACTA para el post-sesión",
+                  app._live_flow is not None and app._live_flow.game_running(),
+                  f"live={app._live_flow is not None}")
+            app._live_flow = None  # limpieza del escenario
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    run_phase("(2) logout con partida viva NO cierra sesión",
+              [step_wait_home, step_logout_vivo], build)
+
+    # --- (3) API caída al guardar: warning y cierra igualmente -------------
+    UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    console_3: List[str] = []
+
+    def step_logout_api_caida(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            orig_log = app.home_frame.log_line
+
+            def spy(text):
+                console_3.append(str(text))
+                try:
+                    orig_log(text)
+                except Exception:
+                    pass
+
+            app.home_frame.log_line = spy  # type: ignore[method-assign]
+
+            def tick_roto(force=False, budget=None):
+                raise NetworkError("No se pudo conectar con la API.")
+
+            app.autosave.tick = tick_roto  # type: ignore[method-assign]
+            app.logout()
+            check("(3) API caída: warning exacto y cierra sesión igualmente",
+                  any("No se pudo guardar (sin conexión) — cerrando sesión "
+                      "igualmente" in x for x in console_3)
+                  and app.current_frame is app.login_frame
+                  and app.token is None
+                  and app.store.load() is None,
+                  f"console={console_3[-3:]} "
+                  f"frame={'login' if app.current_frame is app.login_frame else 'otro'}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    run_phase("(3) logout con API caída avisa y prosigue",
+              [step_wait_home, step_logout_api_caida], build)
+    STORE_PATH.unlink(missing_ok=True)  # limpieza de la fase
+
+
 def main() -> int:
     # Consola Windows (cp1252): nunca romper por caracteres Unicode.
     try:
@@ -3560,10 +4098,15 @@ def main() -> int:
     # el launcher.config.json con ruta INYECTADA (jamás el real del dueño).
     phase_settings_servers()
 
+    # Estado REAL de servers (pedido del dueño): probe TCP+getstatus contra
+    # servers falsos locales (listener efímero) + pintado en AJUSTES/HOME.
+    phase_server_status_live()
+
     # Recordar sesión (cyber-café): cierre borra token, abrir pide login.
     # AL FINAL DEL TODO: usa login real por UI (stub de api.login) y borra
     # el store de prueba al terminar.
     phase_session_logout()
+    phase_logout_save()
 
     # Limpieza: no dejar sesión de prueba activa en la máquina.
     STORE_PATH.unlink(missing_ok=True)

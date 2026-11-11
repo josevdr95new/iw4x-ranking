@@ -40,14 +40,20 @@ ratón).
 
 ### Ejemplo (valores por defecto si no existe)
 
+Los defaults del código (`DEFAULT_CONFIG` en `app_config.py`) son de
+**DESARROLLO** en API/web (contrato dev: la API del dueño y la web en el
+puerto 5173 de Vite); los **servers** por defecto son las DOS salas del LXC
+de producción (Sala 1 primero) + Local:
+
 ```json
 {
   "api_url": "http://192.168.3.99:3000",
   "web_url": "http://192.168.3.99:5173",
   "game_path": "D:\\Call of Duty 6\\iw4x.exe",
   "servers": [
-    { "name": "LAN Server", "address": "192.168.2.251:28960" },
-    { "name": "Test Local", "address": "127.0.0.1:28961" }
+    { "name": "Sala 1",  "address": "192.168.2.251:28960" },
+    { "name": "Sala 2",  "address": "192.168.2.251:28961" },
+    { "name": "Local",   "address": "127.0.0.1:28961" }
   ],
   "default_server": 0,
   "simulate_game": false,
@@ -55,6 +61,38 @@ ratón).
   "autosave_minutes": 10
 }
 ```
+
+### Producción (LXC Debian 12 en Proxmox — 192.168.2.251)
+
+El **config de distribución** (`dist\launcher.config.json`, el que se entrega
+JUNTO al `IW4xLauncher.exe`) apunta al LXC de producción, donde corren la API
+ranking (:3000), la web (:4173) y DOS salas de juego (:28960 y :28961):
+
+```json
+{
+  "api_url": "http://192.168.2.251:3000",
+  "web_url": "http://192.168.2.251:4173",
+  "game_path": "D:\\Call of Duty 6\\iw4x.exe",
+  "servers": [
+    { "name": "Sala 1", "address": "192.168.2.251:28960" },
+    { "name": "Sala 2", "address": "192.168.2.251:28961" },
+    { "name": "Local",  "address": "127.0.0.1:28961" }
+  ],
+  "default_server": 0,
+  "simulate_game": false,
+  "cloud_save": true,
+  "export_classes": true,
+  "autosave_minutes": 10,
+  "remember_session": false
+}
+```
+
+> La web de PRODUCCIÓN corre en el puerto **4173** (preview de Vite), no en
+> el 5173 del dev: por eso el config de distribución fija `web_url`
+> explícito en vez de derivarlo del `api_url`. El launcher lee este archivo
+> EN CADA ARRANQUE (runtime): cambiar el config NO requiere rebuild — pero
+> sí **cerrar y volver a abrir** el launcher (uno abierto conserva la config
+> que cargó al arrancar).
 
 > **OJO con `api_url`:** apunta a la **API** (puerto **3000**), no a la web
 > (puerto 5173). Un valor como `"127.0.0.1:5173"` deja el launcher sin poder
@@ -66,7 +104,7 @@ ratón).
 | Clave                   | Significado                                                  |
 | ----------------------- | ------------------------------------------------------------ |
 | `api_url`               | Base de la API (el launcher añade el prefijo `/api/...`). Editable **desde el login** (franja CONEXIÓN) y en Ajustes. |
-| `web_url`               | Web del ranking que se abre en el navegador con los enlaces **RANKING WEB ↗** (login) y **WEB ↗** (cabecera de la home). Default **derivado del `api_url`**: mismo host, puerto **5173** (la web Vite) — p. ej. `http://192.168.3.99:3000` → `http://192.168.3.99:5173`. Si la web vive en otro host/puerto, escríbelo aquí (se normaliza: añade `http://` y recorta la barra final, nunca inventa puertos). Un valor **vacío (`""`) oculta los dos enlaces**. |
+| `web_url`               | Web del ranking que se abre en el navegador con los enlaces **RANKING WEB ↗** (login) y **WEB ↗** (cabecera de la home). Default **derivado del `api_url`**: mismo host, puerto **5173** (la web Vite dev) — p. ej. `http://192.168.3.99:3000` → `http://192.168.3.99:5173`. Si la web vive en otro host/puerto, escríbelo aquí (se normaliza: añade `http://` y recorta la barra final, nunca inventa puertos). Un valor **vacío (`""`) oculta los dos enlaces**. En PRODUCCIÓN la web va en el **4173** (preview de Vite) y el config de distribución lo fija explícito (`http://192.168.2.251:4173`). |
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
@@ -94,11 +132,46 @@ la decide la API desde el ELO y viaja en la raíz de la respuesta). La línea
 de detalle añade el tiempo jugado, el último server, el jugador, el ratio de
 headshots (`HS 15% de bajas`), el **ELO** del perfil (`ELO 1375` — el mismo
 número que decide la medalla) y el balance de cuchillo (`CUCHILLO 11/0`,
-bajas/muertes por cuchillo, como en la web). Cualquier dato que aún no llegue
-se pinta como `—` sin romper el panel; en tiers 1-7 el detalle muestra las
-estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
+bajas/muertes por cuchillo, como en la web). `ULT. SERVER` es el último
+server donde se registraron tus stats (viene del perfil, guardado en los
+eventos) — NO el server seleccionado en el dropdown. Cualquier dato que aún
+no llegue se pinta como `—` sin romper el panel; en tiers 1-7 el detalle
+muestra las estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en
+ámbar.
+
+## Estado REAL de los servers (● ONLINE / OFFLINE, pedido del dueño)
+
+La lista de **SERVERS DE JUEGO** en Ajustes muestra la disponibilidad REAL de
+cada sala en vivo: `Sala 1 (192.168.2.251:28960) · ● ONLINE · 6 jugadores`.
+Junto al dropdown de la HOME pasa lo mismo con el server SELECCIONADO.
+
+- **● ONLINE** (verde señal `ok` #8FD429) + jugadores conectados si se puede
+  saber; **● OFFLINE** (gris/dim — nunca rojo: no es un error del launcher);
+  **● verificando…** (ámbar) mientras corre el chequeo.
+- Heurística simple y determinista (`server_status.py`):
+  1. **TCP connect** al host:puerto (timeout 2 s): el dedicado IW4x escucha
+     TCP (verificado con netstat: `TCP 0.0.0.0:28961 LISTENING`). Conecta =
+     ONLINE.
+  2. **BONUS jugadores**: UN datagrama UDP `ÿÿÿÿgetstatus` al mismo
+     host:puerto (protocolo Q3, timeout 1.5 s). Si responde
+     `statusResponse` se parsea `\players\<N>\` del infostring (fallback
+     `\clients\<N>\`, el nombre clásico Q3/MW2) → "ONLINE · N jugadores".
+     Sin respuesta UDP pero TCP OK → ONLINE sin cifra. NADA → OFFLINE.
+- Todo corre en **hilos de fondo** (jamás bloquea la UI), los N servers se
+  verifican EN PARALELO y el refresco es: al abrir Ajustes + botón
+  **ACTUALIZAR ESTADO** + cada 30 s mientras Ajustes (o la HOME) esté
+  visible. Dirección inválida/fila vacía → sin estado (nada que verificar).
+- Guard: `simulate_game` NO afecta — esto es estado del server real,
+  independiente del flag de simulación del juego.
 
 ## Flujo JUGAR (simplificado: sin pantalla de verificación)
+
+Orden del arranque (decisión del dueño) — **sin check previo del server**:
+si el server está caído, el juego simplemente abre y falla al conectar
+dentro del juego.
+
+`Paso 1/2: Cargando tu progreso…` → verificación → `Todo cargado ✓` →
+`Paso 2/2: Abriendo juego…`
 
 1. Al dar JUGAR el launcher abre/renueva la **sesión de juego**
    (`POST /api/play/session`, best-effort: un fallo se ignora con log dim y
@@ -110,17 +183,29 @@ estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
    identidad se vincula automáticamente al entrar al server."). Si a los ~60s
    de juego la cuenta sigue sin identidad, aparece UN log dim único
    ("Aún sin vincular: se vinculará automáticamente…").
-2. Aislamiento de identidad por cuenta (fix cyber-café): en el pre-launch
-   (SIEMPRE con el juego cerrado), si el manifiesto de la cuenta NO tiene
-   `guid.dat` pero la PC SÍ tiene uno local (de otro jugador), el local se
-   **cuarentena** en `%APPDATA%\iw4x-ranking-launcher\guid-quarantine\<userId>-<ts>\guid.dat`
+2. **PASO 1/2 — Cargar el save**: aislamiento de identidad por cuenta (fix
+   cyber-café): en el pre-launch (SIEMPRE con el juego cerrado), si el
+   manifiesto de la cuenta NO tiene `guid.dat` pero la PC SÍ tiene uno local
+   (de otro jugador), el local se **cuarentena** en
+   `%APPDATA%\iw4x-ranking-launcher\guid-quarantine\<userId>-<ts>\guid.dat`
    y el juego crea una identidad NUEVA y propia que el upload post-sesión
    sube a ESTA cuenta (log: `Identidad nueva creada para tu cuenta (primera
    vez en esta PC)`). Si la sesión muere antes de crear identidad (<10s sin
    guid nuevo), el cuarentenado se repone. Si el manifiesto ya trae
    `guid.dat`, el sync lo restaura como siempre; ante un fallo de red se
-   conserva la identidad local sin tocar nada.
-3. Lanza `iw4x.exe +set name <displayName> +connect <server> +dumpPlayerData`
+   conserva la identidad local sin tocar nada. Cloud-sync del progreso
+   (`cloud_save`, activado por defecto): baja (o sube, si tu PC tiene lo
+   más nuevo) `players\iw4x.stat`, `iw4x_config.cfg`, `mods\<mod>\iw4x.stat`
+   y el `guid.dat` de identidad con backup automático. Los errores de sync
+   NUNCA impiden jugar.
+3. **Verificación del restore** (`Verificando que se cargó todo…`): cada
+   archivo que la nube de la cuenta tiene debe quedar en disco con contenido
+   real (`iw4x.stat` ≥ 100 B · `guid.dat` ≥ 64 B · configs ≥ 10 B). Si falta
+   algo, se reintenta el restore UNA vez; si sigue fallando, WARNING
+   `No se pudo verificar todo tu progreso — se continúa igual (no perder la
+   partida)` y se continúa — jugar jamás se bloquea por sync.
+4. **PASO 2/2 — Ejecutar**: lanza
+   `iw4x.exe +set name <displayName> +connect <server> +dumpPlayerData`
    (subprocess con lista de args, cwd = carpeta del juego). El nick del
    ranking es **OBLIGATORIO y SIEMPRE viaja** en el comando (`+set name`): los
    engines Q3 lo procesan tras cargar configs, así el displayName de la cuenta
@@ -129,14 +214,24 @@ estrellas ★/☆ del progreso y en tier 8 `LEYENDA #N · TOP 12` en ámbar.
    actualizarlo en Mi Cuenta (web). Con `export_classes` activo (default), el
    `+dumpPlayerData` va AL FINAL para que el dump de clases corra con el
    playerdata ya inicializado (ver la sección de clases).
-4. El botón héroe pasa a **DETENER** mientras el juego (que este launcher
+5. El botón héroe pasa a **DETENER** mientras el juego (que este launcher
    abrió) siga vivo; al cerrarse el juego solo, vuelve a JUGAR. Los stats
-   siguen refrescando cada 30s como siempre.
-5. Cloud-sync del progreso (`cloud_save`, activado por defecto): antes de
-   abrir el juego baja (o sube, si tu PC tiene lo más nuevo) `players\iw4x.stat`,
-   `iw4x_config.cfg`, `mods\<mod>\iw4x.stat` y el `guid.dat` de identidad con
-   backup automático; al cerrar iw4x.exe sube el progreso de la sesión. Los
-   errores de sync NUNCA impiden jugar.
+   siguen refrescando cada 30s como siempre. Al cerrar iw4x.exe sube el
+   progreso de la sesión.
+
+## CERRAR SESIÓN guarda el progreso
+
+Al pulsar **CERRAR SESIÓN** (pedido del dueño) el launcher sincroniza los
+saves ANTES de borrar el token: log `Guardando tu progreso antes de cerrar
+sesión…` → `Progreso guardado ✓` (o `Tu progreso ya está en la nube ✓` si no
+hay nada que subir; presupuesto ~10s, el mismo tick final del cierre). Si la
+API está caída: `No se pudo guardar (sin conexión) — cerrando sesión
+igualmente` y prosigue (resiliente). Con una **partida en curso** el logout
+NO procede: warning `Tienes una partida en curso: termina y cierra el juego
+antes de cerrar sesión.` + aviso 5s en la barra de estado — el post-sesión
+conserva el token para subir el save cuando el juego se cierre. Tras guardar,
+el logout existente sigue igual (borrado del token si `remember_session`
+es false y vuelta a LOGIN).
 
 ## Clases de loadout al perfil web (sin pasos manuales)
 
@@ -253,8 +348,8 @@ py apps\launcher\tests\test_smoke.py   # solo E2E/GUI (requiere API :3000)
 | Archivo              | Qué cubre |
 | -------------------- | --------- |
 | `tests/run_all.py`   | Runner: ejecuta **units primero** y **smoke después**; resumen por archivo (checks OK/fallidos, tiempo, exit del proceso) y exit != 0 si algo falla. |
-| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), aislamiento de identidad (`decide_guid_action` restore/quarantine/none + manifest None, `quarantine_local_guid` con rutas inyectadas), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config`, `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`), `kill_tree` / `wait_process_exit` (taskkill `/PID /T /F` con stub de subprocess; fallos tragados) y el **autosave** (decisión de subida con stub, caché sin API, server más nuevo respetado, save ilegible → skip, config `autosave_minutes`). |
-| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR simplificado (sin polling: log de auto-link, sesión de juego `POST /api/play/session` con stub + aviso dim único), pipeline de cuarentena guid.dat → identidad nueva → upload (y restauración de seguridad <10s), stats en vivo, cloud-sync (pipeline stub + E2E contra la API), contrato `/api/play/session` contra la API real (404 → PENDIENTE mientras el backend despliega), **login compacto** (ENTRAR y CREAR CUENTA dentro del viewport en 980x640, franja CONEXIÓN colapsable, Canvas+Scrollbar con rueda en pantallas bajas), regresión visual del formulario, el **cierre del launcher** (kill tree del PID lanzado + upload único con stubs; sin juego vivo no toca nada) y el **autosave + guardado final al cerrar**. |
+| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), aislamiento de identidad (`decide_guid_action` restore/quarantine/none + manifest None, `quarantine_local_guid` con rutas inyectadas), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config`, `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`), **`server_status`** (parser `\players\<N>\` del `statusResponse` Q3 con fixture real + fallback `\clients\`, basura → sin cifra; `split_address` reusando la validación del config; texto `ONLINE · N jugadores`/`OFFLINE`/`verificando…`; clave de color ok/dim/accent), `kill_tree` / `wait_process_exit` (taskkill `/PID /T /F` con stub de subprocess; fallos tragados) y el **autosave** (decisión de subida con stub, caché sin API, server más nuevo respetado, save ilegible → skip, config `autosave_minutes`). |
+| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR simplificado (sin polling: log de auto-link, sesión de juego `POST /api/play/session` con stub + aviso dim único), pipeline de cuarentena guid.dat → identidad nueva → upload (y restauración de seguridad <10s), stats en vivo, cloud-sync (pipeline stub + E2E contra la API), contrato `/api/play/session` contra la API real (404 → PENDIENTE mientras el backend despliega), **login compacto** (ENTRAR y CREAR CUENTA dentro del viewport en 980x640, franja CONEXIÓN colapsable, Canvas+Scrollbar con rueda en pantallas bajas), regresión visual del formulario, el **cierre del launcher** (kill tree del PID lanzado + upload único con stubs; sin juego vivo no toca nada), el **autosave + guardado final al cerrar** y el **estado REAL de servers** (server TCP falso en puerto efímero + respondedor UDP getstatus → `● ONLINE · 3 jugadores` verde; TCP sin UDP → ONLINE sin cifra; puerto cerrado → `● OFFLINE` dim; pintado en Ajustes/HOME sin bloquear la UI con timeouts acotados). |
 
 Cuenta de prueba: `launcher-test@test.local` / `LauncherTest2026` (la crea el
 propio smoke si la DB está limpia). NO es pytest: scripts secuenciales que

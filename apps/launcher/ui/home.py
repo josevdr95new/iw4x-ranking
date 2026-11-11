@@ -20,6 +20,20 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import customtkinter as ctk
 
 from api_client import user_is_linked
+import server_status  # llamado vía módulo: el stub de tests parchea el attr
+from server_status import (
+    SOURCE_API,
+    STATE_CHECKING,
+    STATE_UNKNOWN,
+    ServerStatus,
+    format_status_text,
+    match_sala,
+    probe_server,
+    sala_dropdown_label,
+    sala_to_status,
+    split_address,
+    status_color_key,
+)
 from ui.hud import (
     DotState,
     bind_flat_focus,
@@ -118,6 +132,20 @@ class HomeFrame(ctk.CTkFrame):
             command=self._on_server_change,
         )
         self.server_menu.pack(side="left", padx=SP["m"])
+        # Estado REAL del server SELECCIONADO (pedido del dueño): dot de
+        # color + caption dim junto al dropdown — `● ONLINE · 6 jugadores`.
+        # El dropdown es una OptionMenu (otro modelo que las filas de
+        # Ajustes), así el estado en vivo vive AL LADO, no dentro.
+        self.server_dot = ctk.CTkLabel(
+            row, text="", font=font(11, "bold", mono=True),
+            text_color=COLORS["text_faint"],
+        )
+        self.server_dot.pack(side="left")
+        self.server_state = ctk.CTkLabel(
+            row, text="", font=font(10, "bold", mono=True),
+            text_color=COLORS["text_faint"], anchor="w",
+        )
+        self.server_state.pack(side="left", padx=(SP["xs"], 0))
         self.status = ctk.CTkLabel(
             row, text="Todo listo.", font=font(12, "bold"),
             text_color=COLORS["text_dim"], anchor="e",
@@ -208,6 +236,8 @@ class HomeFrame(ctk.CTkFrame):
         idx = min(max(default_index, 0), len(labels) - 1) if labels else 0
         if labels:
             self.server_menu.set(labels[idx])
+        self.refresh_selected_server_status()
+        self._ensure_status_tick()
 
     def selected_server(self) -> Optional[Dict[str, str]]:
         """Devuelve el server elegido (dict) o None si la config está vacía."""
@@ -219,6 +249,135 @@ class HomeFrame(ctk.CTkFrame):
 
     def _on_server_change(self, _label: str) -> None:
         self.log_line(f"Server seleccionado: {self.selected_server()}")
+        self.refresh_selected_server_status()
+
+    # --- Estado REAL del server seleccionado (disponibilidad en vivo) --------
+    def refresh_selected_server_status(self) -> None:
+        """Verifica en hilos de fondo la sala elegida (FUENTE: /api/salas).
+
+        El backend (en el LXC, junto a las salas) reporta por RCON el estado
+        real; el server se matchea por address. Con el API caído/vacío →
+        FALLBACK al chequeo directo TCP+getstatus del server seleccionado.
+        Cuando el API SÍ responde, además decora el dropdown con las salas
+        offline ('● Sala 1 — OFFLINE', solo informativo: JUGAR jamás se
+        bloquea). Nunca bloquea la UI: todo por ``App.run_bg`` + contador de
+        generación para descartar resultados rancios.
+        """
+        server = self.selected_server()
+        address = str((server or {}).get("address") or "")
+        if split_address(address) is None:
+            self._paint_selected_status(None)
+            return
+        self._paint_selected_status(ServerStatus(state=STATE_CHECKING))
+        self._live_gen = getattr(self, "_live_gen", 0) + 1
+        gen = self._live_gen
+        self.app.run_bg(
+            lambda: server_status.fetch_salas(self.app.cfg.api_url),
+            on_ok=lambda salas: self._apply_live_salas(salas, gen, address),
+        )
+
+    def _apply_live_salas(self, salas: List[Dict[str, str]], gen: int,
+                          address: str) -> None:
+        """Respuesta de /api/salas en la cola de UI (o fallback TCP)."""
+        if gen != getattr(self, "_live_gen", 0):
+            return
+        if salas:
+            sala = match_sala(salas, address)
+            status = sala_to_status(sala) \
+                if sala is not None \
+                else ServerStatus(state=STATE_UNKNOWN, source=SOURCE_API)
+            self._paint_selected_status(status)
+            # Dropdown: decorar las salas OFFLINE confirmadas por el API.
+            self._apply_dropdown_labels(salas)
+            return
+        # FALLBACK (API caída / configured:false / salas vacías): TCP directo
+        # del seleccionado; el dropdown NO se decora (TCP es señal débil).
+        self.app.run_bg(
+            lambda: probe_server(address),
+            on_ok=lambda result: self._apply_selected_probe(gen, result),
+        )
+
+    def _apply_selected_probe(self, gen: int,
+                              result: Optional[ServerStatus]) -> None:
+        """Resultado del probe TCP de fallback en la cola de UI."""
+        if gen != getattr(self, "_live_gen", 0):
+            return
+        self._paint_selected_status(result)
+
+    def _apply_dropdown_labels(self, salas: List[Dict[str, str]]) -> None:
+        """Re-etiqueta el dropdown con las salas offline (MISMO server fijado).
+
+        Solo decora offline CONFIRMADO por el API (RCON). El server
+        seleccionado se conserva (label equivalente a su índice): cambiar la
+        selección del jugador con cada refresh sería un bug.
+        """
+        if not self._servers:
+            return
+        current_idx = self._server_labels.get(self.server_menu.get())
+        labels: Dict[str, int] = {}
+        for i, s in enumerate(self._servers):
+            sala = match_sala(salas, str(s.get("address") or ""))
+            status = sala_to_status(sala) if sala is not None else None
+            label = sala_dropdown_label(str(s.get("name") or ""),
+                                        str(s.get("address") or ""), status)
+            labels[label] = i
+        self._server_labels = labels
+        self.server_menu.configure(values=list(labels.keys()))
+        if current_idx is not None and 0 <= current_idx < len(self._servers):
+            for label, idx in labels.items():
+                if idx == current_idx:
+                    self.server_menu.set(label)
+                    break
+
+    def _paint_selected_status(self, status: Optional[ServerStatus]) -> None:
+        try:
+            self.server_dot.configure(
+                text="" if status is None else "●",
+                # 'dim' no existe como clave de COLORS: es el gris apagado
+                # de los metadatos (text_faint). .get defensivo para que un
+                # OFFLINE/DESCONOCIDO no tumbe el callback de UI (KeyError).
+                text_color=COLORS.get(status_color_key(status),
+                                      COLORS["text_faint"]),
+            )
+            self.server_state.configure(
+                text=format_status_text(status),
+                text_color=COLORS["text_dim"] if status is not None
+                else COLORS["text_faint"],
+            )
+        except Exception:  # frame destruido (logout/cierre): no importa
+            pass
+
+    def _ensure_status_tick(self) -> None:
+        """Refresco periódico (30 s, SOLO con la HOME visible). Un solo after."""
+        if getattr(self, "_status_after", None) is None:
+            self._schedule_status_tick()
+
+    def _schedule_status_tick(self) -> None:
+        try:
+            self._status_after = self.after(30_000, self._status_tick)
+        except Exception:  # frame destruido: no rearmar
+            self._status_after = None
+
+    def _status_tick(self) -> None:
+        self._status_after = None
+        try:
+            alive = self.winfo_exists()
+        except Exception:
+            alive = False
+        if alive:
+            if self.app.current_frame is self:
+                self.refresh_selected_server_status()
+            self._schedule_status_tick()
+
+    def destroy(self) -> None:
+        """Cancela el tick del estado (mismo patrón que StatsPanel)."""
+        if getattr(self, "_status_after", None) is not None:
+            try:
+                self.after_cancel(self._status_after)
+            except Exception:
+                pass
+            self._status_after = None
+        super().destroy()
 
     def set_play_as(self, display_name: str) -> None:
         """Línea 'Jugando como: <nick>' — SIEMPRE visible (nick obligatorio)."""

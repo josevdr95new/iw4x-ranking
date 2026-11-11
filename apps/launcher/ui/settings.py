@@ -36,15 +36,28 @@ import logging
 import tkinter as tk
 import webbrowser
 from tkinter import filedialog
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import customtkinter as ctk
 
+import server_status  # llamado vía módulo: el stub de tests parchea el attr
 from api_client import NetworkError
 from app_config import (
     default_server_after_delete,
     normalize_api_url,
     sanitize_servers,
+)
+from server_status import (
+    SOURCE_API,
+    STATE_CHECKING,
+    STATE_UNKNOWN,
+    ServerStatus,
+    format_status_text,
+    match_sala,
+    probe_server,
+    sala_to_status,
+    split_address,
+    status_color_key,
 )
 from ui.hud import (
     bind_flat_focus,
@@ -174,13 +187,25 @@ class SettingsFrame(ctk.CTkFrame):
         self.servers_box.pack(fill="x", pady=(2, 0))
         self._server_rows: List[Dict[str, Any]] = []  # filas vivas de la UI
         self._default_row = 0                          # fila en uso (USAR)
+        # Estado REAL por sala (pedido del dueño): ● ONLINE/OFFLINE junto a
+        # cada fila, verificado en hilos de fondo (jamás bloquea la UI).
+        btns_row = ctk.CTkFrame(inner, fg_color="transparent")
+        btns_row.pack(fill="x", pady=(SP["xs"], 0))
         self.add_server_btn = ghost_button(
-            inner, "AÑADIR SERVER", self._add_server_row, width=130)
-        self.add_server_btn.pack(anchor="w", pady=(SP["xs"], 0))
+            btns_row, "AÑADIR SERVER", self._add_server_row, width=130)
+        self.add_server_btn.pack(side="left")
         bind_ghost_focus(self.add_server_btn)
+        self.status_refresh_btn = ghost_button(
+            btns_row, "ACTUALIZAR ESTADO", self.refresh_server_status,
+            width=150)
+        self.status_refresh_btn.pack(side="left", padx=(SP["s"], 0))
+        bind_ghost_focus(self.status_refresh_btn)
         self.servers_hint = _hint(
             inner, "host:puerto — ej. 192.168.1.50:28961 (puerto 1024-65535). "
-            "El server en uso es el que usa JUGAR.")
+            "El server en uso es el que usa JUGAR. El ● de cada fila es el "
+            "estado real de la sala (API del backend por RCON; si el API no "
+            "responde, chequeo directo TCP): se verifica al entrar, con "
+            "ACTUALIZAR ESTADO y cada 30 s.")
         self.servers_hint.pack(fill="x", pady=(0, SP["m"]))
 
         # --- Nick obligatorio (nota informativa, no editable) ------------------
@@ -294,6 +319,126 @@ class SettingsFrame(ctk.CTkFrame):
         # después sin robarle espacio al contenido (mismo orden que el LOGIN).
         self._canvas.pack(side="left", fill="both", expand=True)
 
+        # Refresco periódico del estado REAL de servers (30 s SOLO mientras
+        # AJUSTES esté en pantalla; el tick corre siempre pero es un guard
+        # barato). Mismo patrón after()/cancel que el ticker del StatsPanel.
+        self._status_after: Optional[str] = None
+        self._schedule_status_tick()
+
+    # --- Estado REAL de servers (disponibilidad por sala) --------------------
+    def _schedule_status_tick(self) -> None:
+        """Reagenda el tick de 30 s (no acumula: un solo after vivo)."""
+        if self._status_after is not None:
+            try:
+                self.after_cancel(self._status_after)
+            except Exception:
+                pass
+        try:
+            self._status_after = self.after(30_000, self._status_tick)
+        except Exception:  # pantalla destruida: no rearmar
+            self._status_after = None
+
+    def _status_tick(self) -> None:
+        """Cada 30 s SOLO con AJUSTES visible: re-verifica la lista."""
+        try:
+            alive = self.winfo_exists()
+        except Exception:
+            alive = False
+        if alive and self.app.current_frame is self:
+            self.refresh_server_status()
+        if alive:
+            self._schedule_status_tick()
+
+    def refresh_server_status(self) -> None:
+        """Verifica el estado REAL de todas las filas (hilos de fondo).
+
+        FUENTE APROBADA: ``GET {api_url}/api/salas`` (RCON real del backend,
+        que corre EN el LXC junto a las salas) → match por address. Con
+        ``configured:false``, salas vacías o API caída → FALLBACK al chequeo
+        directo TCP+getstatus por server. Server no listado por el API →
+        DESCONOCIDO (dim, sin inventar). Cada fila pasa a '● verificando…'
+        (ámbar) y su resultado llega por ``App.run_bg`` → cola de UI: jamás
+        toca el hilo de Tk. Los N servers se verifican EN PARALELO.
+        """
+        self._status_gen = getattr(self, "_status_gen", 0) + 1
+        gen = self._status_gen
+        for row in self._server_rows:
+            address = str(row["addr"].get() or "").strip()
+            if split_address(address) is None:
+                # Fila vacía o dirección inválida: sin estado que mostrar.
+                self._set_row_status(row, None)
+                continue
+            self._set_row_status(row, ServerStatus(state=STATE_CHECKING))
+        self.app.run_bg(
+            lambda: server_status.fetch_salas(self.app.cfg.api_url),
+            on_ok=lambda salas: self._apply_salas(salas, gen),
+        )
+
+    def _apply_salas(self, salas: List[Dict[str, Any]], gen: int) -> None:
+        """Resultado de /api/salas en la cola de UI (o fallback TCP)."""
+        if gen != getattr(self, "_status_gen", 0):
+            return  # resultado rancio: llegó un refresh más nuevo
+        if salas:
+            # Fuente aprobada: estado real por RCON, matcheado por address.
+            for row in self._server_rows:
+                address = str(row["addr"].get() or "").strip()
+                if split_address(address) is None:
+                    continue
+                sala = match_sala(salas, address)
+                status = sala_to_status(sala) \
+                    if sala is not None \
+                    else ServerStatus(state=STATE_UNKNOWN, source=SOURCE_API)
+                self._set_row_status(row, status)
+            return
+        # FALLBACK (API caída / configured:false / salas vacías): TCP directo.
+        for row in self._server_rows:
+            address = str(row["addr"].get() or "").strip()
+            if split_address(address) is None:
+                continue
+            self.app.run_bg(
+                lambda addr=address: probe_server(addr),
+                on_ok=lambda result, row=row: self._apply_row_status(row, result),
+            )
+
+    def _set_row_status(self, row: Dict[str, Any],
+                        status: Optional[ServerStatus]) -> None:
+        """Pinta dot + texto de una fila (en el hilo de UI)."""
+        self._paint_status(row.get("dot"), row.get("state"), status)
+
+    def _apply_row_status(self, row: Dict[str, Any],
+                          result: Optional[ServerStatus]) -> None:
+        """Resultado del probe en la cola de UI (tolera filas destruidas)."""
+        try:
+            if not row["frame"].winfo_exists():
+                return
+        except Exception:
+            return
+        self._set_row_status(row, result)
+
+    @staticmethod
+    def _paint_status(dot, label, status: Optional[ServerStatus]) -> None:
+        """Dot de color + texto dim (● ONLINE · N jugadores / OFFLINE / …)."""
+        if dot is None or label is None:
+            return
+        try:
+            if not dot.winfo_exists() or not label.winfo_exists():
+                return
+            key = status_color_key(status)
+            dot.configure(
+                text="" if status is None else "●",
+                # 'dim' no existe como clave de COLORS (el gris apagado es
+                # text_faint): .get defensivo — un KeyError aquí mata el
+                # callback de UI y la fila queda clavada en 'verificando…'.
+                text_color=COLORS.get(key, COLORS["text_faint"]),
+            )
+            label.configure(
+                text=format_status_text(status),
+                text_color=COLORS["text_dim"] if status is not None
+                else COLORS["text_faint"],
+            )
+        except tk.TclError:
+            pass  # widget destruido entre post y pintado: no importa
+
     # --- Ciclo de la pantalla ----------------------------------------------
     def load_from_config(self) -> None:
         """Rellena los campos desde la configuración actual."""
@@ -307,6 +452,9 @@ class SettingsFrame(ctk.CTkFrame):
         self.game_path.delete(0, "end")
         self.game_path.insert(0, cfg.game_path)
         self._rebuild_server_rows(cfg.servers, cfg.default_server)
+        # Disponibilidad REAL por sala (hilos de fondo, UI libre): al abrir
+        # AJUSTES la lista ya viene con su ● ONLINE/OFFLINE/verificando….
+        self.refresh_server_status()
         if cfg.cloud_save:
             self.cloud_save_check.select()
         else:
@@ -408,9 +556,22 @@ class SettingsFrame(ctk.CTkFrame):
         bind_ghost_focus(del_btn)
         bind_focus_hairline(name_entry, COLORS["border"], COLORS["accent_border"])
         bind_focus_hairline(addr_entry, COLORS["border"], COLORS["accent_border"])
+        # Estado REAL en vivo (misma fila, al final): dot de color + caption
+        # dim — ej. `● ONLINE · 6 jugadores`. Mismo lenguaje HUD que la home.
+        dot = ctk.CTkLabel(
+            row_frame, text="", font=font(11, "bold", mono=True),
+            text_color=COLORS["text_faint"],
+        )
+        dot.pack(side="left", padx=(SP["m"], 0))
+        state_lbl = ctk.CTkLabel(
+            row_frame, text="", font=font(10, "bold", mono=True),
+            text_color=COLORS["text_faint"], anchor="w",
+        )
+        state_lbl.pack(side="left", padx=(SP["xs"], 0))
         row: Dict[str, Any] = {
             "frame": row_frame, "name": name_entry, "addr": addr_entry,
             "use_btn": use_btn, "del_btn": del_btn,
+            "dot": dot, "state": state_lbl,
         }
         self._server_rows.append(row)
 
@@ -607,3 +768,13 @@ class SettingsFrame(ctk.CTkFrame):
         finally:
             self._busy = False
             set_button_idle(self.save_btn, "GUARDAR")
+
+    def destroy(self) -> None:
+        """Cancela el tick del estado de servers (mismo patrón que StatsPanel)."""
+        if getattr(self, "_status_after", None) is not None:
+            try:
+                self.after_cancel(self._status_after)
+            except Exception:
+                pass
+            self._status_after = None
+        super().destroy()
