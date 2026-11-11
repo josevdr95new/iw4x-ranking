@@ -206,7 +206,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               label="Nick"
               name="identifier"
               autoComplete="username"
-              placeholder="pollacaballo"
+              placeholder="Tu nick de jugador"
               value={nick}
               onChange={(event) => setNick(event.target.value)}
               error={errors.nick}
@@ -218,7 +218,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               label="Nombre de jugador"
               name="displayName"
               autoComplete="nickname"
-              placeholder="TuTagDelJuego"
+              placeholder="Tu nick de jugador"
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
               error={errors.displayName}
