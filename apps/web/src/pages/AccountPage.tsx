@@ -10,6 +10,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Input } from "../components/ui/Input";
 import { Spinner } from "../components/ui/Spinner";
 import { formatGuid, formatRelative } from "../lib/format";
+import { useDocumentTitle } from "../lib/meta";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -59,6 +60,7 @@ function Panel({
 
 export function AccountPage() {
   const { user, initializing, refresh } = useAuth();
+  useDocumentTitle("Mi cuenta");
 
   // Perfil
   const [displayName, setDisplayName] = useState("");

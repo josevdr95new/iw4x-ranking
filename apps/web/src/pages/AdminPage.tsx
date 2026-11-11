@@ -3,6 +3,7 @@ import { ServerConfigPanel } from "./admin/ServerConfigPanel";
 import { ServerControlPanel } from "./admin/ServerControlPanel";
 import { ModerationPanel } from "./admin/ModerationPanel";
 import { IdentityPanel } from "./admin/IdentityPanel";
+import { useDocumentTitle } from "../lib/meta";
 
 export type AdminTab = "config" | "identidad" | "moderacion";
 
@@ -19,6 +20,7 @@ function parseTab(raw: string | null): AdminTab {
 /** Shell de /admin: subnav de pestañas compartibles por URL (?tab=moderacion). */
 export function AdminPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  useDocumentTitle("Administración");
   const tab = parseTab(searchParams.get("tab"));
 
   const setTab = (next: AdminTab) => {

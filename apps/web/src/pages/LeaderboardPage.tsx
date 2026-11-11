@@ -1,4 +1,4 @@
-import { Inbox, Link2, Search, SearchX, User, WifiOff } from "lucide-react";
+import { Inbox, Link2, Search, SearchX, WifiOff } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
@@ -17,10 +17,10 @@ import {
   formatInt,
   formatRelative,
   formatSkill,
-  isBotGuid,
   isOnline,
   kdTextClass,
 } from "../lib/format";
+import { useDocumentTitle } from "../lib/meta";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -36,23 +36,6 @@ const PRESETS: Preset[] = [
   { id: "kd", label: "K/D", sort: "kd" },
   { id: "tiempo", label: "Tiempo jugado", sort: "timePlayed" },
 ];
-
-/** Bot del server: la API lo marca con `isBot`; fallback a la heurística oficial del rango 0xB07 (API.md). */
-function isBotPlayer(player: LeaderboardPlayer): boolean {
-  return player.isBot ?? isBotGuid(player.guid);
-}
-
-/** Badge discreto de bot: hairline + mono, no altera el estilo de las filas humanas. */
-function BotTag() {
-  return (
-    <span
-      title="Bot del servidor"
-      className="type-mono inline-flex h-[18px] items-center rounded-none border border-border px-1.5 text-[10px] leading-none text-text-2"
-    >
-      BOT
-    </span>
-  );
-}
 
 function PlayerNameCell({ player }: { player: LeaderboardPlayer }) {
   return (
@@ -72,7 +55,6 @@ function PlayerNameCell({ player }: { player: LeaderboardPlayer }) {
           <span className="sr-only">Cuenta vinculada</span>
         </span>
       )}
-      {isBotPlayer(player) && <BotTag />}
     </span>
   );
 }
@@ -121,14 +103,13 @@ function LeaderboardSkeleton() {
 export function LeaderboardPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  useDocumentTitle("Leaderboard");
 
   const search = searchParams.get("q") ?? "";
   const sort = (searchParams.get("sort") ?? "kills") as LeaderboardSort;
   const order = (searchParams.get("order") ?? "desc") as LeaderboardOrder;
   const pageParam = Number(searchParams.get("page") ?? "1");
   const page = Number.isFinite(pageParam) && pageParam >= 1 ? Math.floor(pageParam) : 1;
-  /** "Solo humanos" por defecto; ?bots=1 muestra también los bots del server. */
-  const showBots = searchParams.get("bots") === "1";
 
   const [queryInput, setQueryInput] = useState(search);
   const [data, setData] = useState<LeaderboardResponse | null>(null);
@@ -186,7 +167,6 @@ export function LeaderboardPage() {
         search: search || undefined,
         page,
         pageSize: PAGE_SIZE,
-        includeBots: showBots,
       })
       .then((response) => {
         if (cancelled) return;
@@ -200,7 +180,7 @@ export function LeaderboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [sort, order, search, page, showBots, reloadKey]);
+  }, [sort, order, search, page, reloadKey]);
 
   const updateParams = (changes: { sort?: LeaderboardSort; order?: LeaderboardOrder; page?: number }) => {
     setSearchParams((previous) => {
@@ -211,19 +191,6 @@ export function LeaderboardPage() {
       else next.delete("page");
       return next;
     });
-  };
-
-  const handleToggleBots = (humansOnly: boolean) => {
-    setSearchParams(
-      (previous) => {
-        const next = new URLSearchParams(previous);
-        if (humansOnly) next.delete("bots");
-        else next.set("bots", "1");
-        next.set("page", "1");
-        return next;
-      },
-      { replace: true },
-    );
   };
 
   const handleSort = (field: LeaderboardSort) => {
@@ -283,42 +250,26 @@ export function LeaderboardPage() {
             autoComplete="off"
           />
         </div>
-        <div className="flex items-center gap-3">
-          <div role="group" aria-label="Orden preset del ranking" className="flex overflow-x-auto">
-            {PRESETS.map((preset) => {
-              const active = !searchActive && activePreset?.id === preset.id;
-              return (
-                <button
-                  key={preset.id}
-                  type="button"
-                  onClick={() => handlePreset(preset)}
-                  disabled={searchActive}
-                  aria-pressed={active}
-                  className={`type-button flex h-10 items-center whitespace-nowrap rounded-sm px-4 transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
-                    active
-                      ? "border border-accent-border bg-accent-subtle text-accent"
-                      : "text-text-2 hover:text-text"
-                  }`}
-                >
-                  {preset.label}
-                </button>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={() => handleToggleBots(showBots)}
-            aria-pressed={!showBots}
-            title={showBots ? "Mostrando también bots del server" : "Ocultando bots del server"}
-            className={`type-button flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-sm px-3 transition-colors duration-150 ease-out ${
-              !showBots
-                ? "border border-accent-border bg-accent-subtle text-accent"
-                : "text-text-2 hover:text-text"
-            }`}
-          >
-            <User size={14} strokeWidth={1.75} aria-hidden="true" />
-            Solo humanos
-          </button>
+        <div role="group" aria-label="Orden preset del ranking" className="flex overflow-x-auto">
+          {PRESETS.map((preset) => {
+            const active = !searchActive && activePreset?.id === preset.id;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => handlePreset(preset)}
+                disabled={searchActive}
+                aria-pressed={active}
+                className={`type-button flex h-10 items-center whitespace-nowrap rounded-sm px-4 transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                  active
+                    ? "border border-accent-border bg-accent-subtle text-accent"
+                    : "text-text-2 hover:text-text"
+                }`}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -480,7 +431,6 @@ export function LeaderboardPage() {
                             <span className="sr-only">Cuenta vinculada</span>
                           </span>
                         )}
-                        {isBotPlayer(player) && <BotTag />}
                       </p>
                       <p className="type-caption mt-0.5 tabular text-text-2">
                         {formatInt(player.kills)} K · {formatInt(player.deaths)} M ·{" "}

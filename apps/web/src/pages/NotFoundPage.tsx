@@ -2,8 +2,10 @@ import { SearchX } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { useDocumentTitle } from "../lib/meta";
 
 export function NotFoundPage() {
+  useDocumentTitle("Página no encontrada");
   return (
     <div className="rounded-md border border-border bg-surface">
       <EmptyState

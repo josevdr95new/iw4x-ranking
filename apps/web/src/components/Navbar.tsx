@@ -3,15 +3,16 @@ import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { initialsOf } from "../lib/format";
+import { BRAND_DISPLAY, PRO_NAME } from "../lib/meta";
 
 function Logo() {
   return (
-    <Link to="/" className="flex items-center gap-2.5" aria-label="Ranking IW4x, inicio">
+    <Link to="/" className="flex items-center gap-2.5" aria-label={`${PRO_NAME}, inicio`}>
       <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
         <rect x="2" y="2" width="16" height="16" fill="none" stroke="#8FD429" strokeWidth="3" />
       </svg>
       <span className="font-display text-[16px] font-bold uppercase leading-none tracking-[0.08em] text-text">
-        Ranking IW4x
+        {BRAND_DISPLAY}
       </span>
     </Link>
   );

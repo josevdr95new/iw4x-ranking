@@ -6,6 +6,7 @@ import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { BRAND_DISPLAY, useDocumentTitle } from "../lib/meta";
 
 export type AuthMode = "login" | "register";
 
@@ -28,7 +29,7 @@ function AuthLogo() {
         <rect x="2" y="2" width="16" height="16" fill="none" stroke="#8FD429" strokeWidth="3" />
       </svg>
       <span className="font-display text-[16px] font-bold uppercase leading-none tracking-[0.08em] text-text">
-        Ranking IW4x
+        {BRAND_DISPLAY}
       </span>
     </div>
   );
@@ -55,6 +56,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const { user, login, register } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  useDocumentTitle(mode === "login" ? "Iniciar sesión" : "Crear cuenta");
 
   const [nick, setNick] = useState("");
   const [email, setEmail] = useState("");

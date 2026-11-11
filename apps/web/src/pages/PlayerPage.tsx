@@ -9,6 +9,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Skeleton, Spinner } from "../components/ui/Spinner";
 import { MedalBadge } from "../components/MedalBadge";
 import { useAuth } from "../lib/auth";
+import { useDocumentTitle } from "../lib/meta";
 import {
   formatDecimal,
   formatDuration,
@@ -253,6 +254,9 @@ export function PlayerPage() {
   const [reloadKey, setReloadKey] = useState(0);
   // Diccionario code→display para el feed (fallback si el evento no trae weaponName).
   const [weaponNames, setWeaponNames] = useState<Map<string, string>>(new Map());
+  useDocumentTitle(
+    status === "ready" && detail ? `Perfil · ${detail.player.name}` : "Perfil",
+  );
 
   useEffect(() => {
     let cancelled = false;
