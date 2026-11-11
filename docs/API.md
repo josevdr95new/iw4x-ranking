@@ -698,8 +698,8 @@ Errores: `401`.
 >   guid viven en el perfil per-guid); `lastConnection` = la más reciente entre sus guids.
 > - `guid` = el "guid primario" de la cuenta (el de MAYOR skill; empate: kills desc, guid menor) —
 >   mantiene el shape y permite navegar al perfil per-guid desde la fila.
-> - `linked` SIEMPRE `true` en filas de cuenta. Los bots NO son cuentas: con `includeBots=true`
->   aparecen per-guid (como siempre) con `linked: false`.
+> - `linked` SIEMPRE `true` en TODAS las filas (todas nacen de un AccountLink). Los bots ya NO existen
+>   como jugadores en la base (ver abajo) y por tanto jamás generan filas.
 
 Query params (todos opcionales):
 
@@ -711,9 +711,15 @@ Query params (todos opcionales):
 | `page`      | ≥ 1 (default 1)                            |
 | `pageSize`  | 1–100 (default 20)                         |
 | `minMatches`| filtra `connections >= N` sobre las conexiones SUMADAS de la cuenta (default 0 = sin filtro) |
-| `includeBots` | `true` \| `false` (default **false**: el ranking público es SOLO-humanos; los bots están marcados con `Player.isBot` y excluidos) |
+| `includeBots` | DEPRECATED/COMPAT (2026-11-11): se acepta `true`\|`false` pero se **IGNORA** — los bots ya no existen como jugadores en la DB y **NUNCA aparecen** en el leaderboard |
 
-> Los bots (guids del rango `0xb07…`) quedan fuera del leaderboard por defecto en TODOS los sorts (incluido `sort=skill`). Con `includeBots=true` se añaden como filas **per-guid** (los bots no son cuentas) y desplazan los ranks de las cuentas en esa vista. Si el frontend necesita una vista "con bots", pásale el param y rotúlalo.
+> **BOTS FUERA DEL RANKING (decisión del dueño, 2026-11-11)**: los bots (guids del rango `0xb07…`, mapeo de
+> `botN`) DEJARON DE EXISTIR como jugadores en la DB — la ingesta ya no les crea `Player`, alias, sesiones ni
+> skill, y el cleanup (`npm run cleanup:bots`) borró los históricos (backup previo). Por tanto la respuesta es
+> SIEMPRE solo-humanos, con o sin `includeBots`. LO QUE SIGUE CONTANDO: las kills/muertes de HUMANOS contra
+> bots (kill counter, ELO decayado por `botFactor`, feed, medallas) — cada `KillEvent` con un bot involucrado
+> se almacena con los nombres DENORMALIZADOS `originName`/`targetName` del log, así el feed muestra
+> "mataste a Lunarion" sin necesitar Player row del bot. Las kills bot-vs-bot no generan evento.
 
 Ejemplo: `GET /api/leaderboard?sort=kills&order=desc&page=1&pageSize=2`
 
@@ -1113,7 +1119,7 @@ Implementación: cada premio se persiste como una fila en `MatchBonusEvent` (una
 
 Recompute FROM SCRATCH (tras un reset de DB o recalibración del modelo): `npm run recompute:skill` desde la raíz del monorepo — desmarca TODOS los KillEvent **y MatchBonusEvent**, resetea `skillElo` y reprocesa el histórico completo en orden. **Reproducibilidad**: mismo set de partidas → mismos MatchBonusEvent → mismos deltas → mismo skill (el bonus no se recalcula ni duplica: se re-procesan los eventos ya existentes). El bootstrap de datos previos al deploy fue automático: los eventos existentes quedaron con `skillProcessed=false` por default y el primer sync los procesó todos.
 
-BOTS (`+spawnBot`): el guid literal `botN` que escribe el engine en games_mp.log se mapea DETERMINISTA a un guid del rango dedicado `0xb07…` → cada bot tiene perfil estable que acumula stats y participa del ELO como cualquier player.
+BOTS (`+spawnBot`): el guid literal `botN` que escribe el engine en games_mp.log se mapea DETERMINISTA a un guid del rango dedicado `0xb07…`. DESDE 2026-11-11 los bots NO tienen perfil ni estadística en la DB (sin `Player`, sin alias, sin skill — el decay del ELO del humano usa el skill 1000 default del bot en memoria). Los eventos con bot involucrado SÍ se guardan cuando hay un humano (sus nombres van denormalizados en `KillEvent.originName`/`targetName`); las kills bot-vs-bot no se guardan.
 
 ---
 
@@ -1434,7 +1440,7 @@ Jugadores conectados AHORA: `status()` + `getinfo()` combinados por rcon.
 | DELETE | `/api/link/:guid`         | ✅   | Desvincular un GUID propio |
 | POST   | `/api/identity/guid-from-file` | ✅ | Deriva el GUID de un guid.dat (base64) y dice si es de la cuenta (`ownedByMe`) o de quién es (`ownerNick`) |
 | POST   | `/api/identity/claim-fresh` | ✅ | Cuarentena de identidad: la cuenta espera un guid NUEVO (auto-link one-shot + limpia session.guid colgante) |
-| GET    | `/api/leaderboard`        | —    | Ranking POR CUENTA (una fila por User con guids vinculados; stats sumadas, skill = MAX de sus guids; SOLO-humanos por defecto; `includeBots=true` añade bots per-guid; `sort=level` ordena por save parseado) |
+| GET    | `/api/leaderboard`        | —    | Ranking POR CUENTA (una fila por User con guids vinculados; stats sumadas, skill = MAX de sus guids; SOLO-humanos SIEMPRE — bots sin Player row desde 2026-11-11, `includeBots` aceptado pero ignorado; `sort=level` ordena por save parseado) |
 | GET    | `/api/players/:guid`      | —    | Perfil per-guid + `rank` global + eventos recientes + por servidor + `aliases` históricos + `save` (nivel/prestigio/xp del cloud save) + `account` (cuenta dueña: displayName, stats sumadas y sus otras PCs) |
 | GET    | `/api/players/:guid/history` | — | Serie temporal por día |
 | GET    | `/api/players/:guid/weapons` | — | Desglose por arma del jugador + favorita |

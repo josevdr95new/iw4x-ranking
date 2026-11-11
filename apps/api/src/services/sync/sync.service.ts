@@ -36,7 +36,7 @@ const MAX_CHUNK_LOOPS = 50_000;
 
 /** true si hay ALGUNA fuente de stats configurada (IW4MAdmin o games_mp.log). */
 export function hasSyncSource(): boolean {
-  return Boolean(env.iw4madminDbPath) || Boolean(env.gameLogPath);
+  return Boolean(env.iw4madminDbPath) || env.gameLogSources.length > 0;
 }
 
 /**
@@ -91,7 +91,8 @@ export async function runSync(): Promise<SyncResult> {
 
   // Fuentes combinables: se ingesta cada una si está configurada.
   const hasIw4madmin = Boolean(env.iw4madminDbPath);
-  const hasGameLog = Boolean(env.gameLogPath);
+  const logSources = env.gameLogSources;
+  const hasGameLog = logSources.length > 0;
   if (!hasIw4madmin && !hasGameLog) {
     await prisma.syncRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), ok: false, warnings: 'Sin fuente configurada' } }).catch(() => undefined);
     throw Errors.syncNotConfigured();
@@ -217,24 +218,27 @@ export async function runSync(): Promise<SyncResult> {
     // Ingesta incremental por offset de bytes (LogIngestState). Cada línea se
     // aplica exactamente una vez; tolera escrituras a medias y truncados.
     if (hasGameLog) {
-      try {
-        const logResult = await ingestGameLog(env.gameLogPath!, env.gameServerAddress ?? null);
-        playersSynced += logResult.playersSynced;
-        killEventsSynced += logResult.killEventsSynced;
-        aliasesSynced += logResult.aliasesUpserted;
-        identityAlertsSynced += logResult.identityAlertsUpserted;
-        autoLinksSynced += logResult.autoLinksSynced;
-        if (!logResult.ok) ok = false;
-        if (logResult.linesIgnored > 0) {
-          warnings.push(`[GameLog] ${logResult.linesIgnored} líneas no reconocidas (ignoradas).`);
+      for (const source of logSources) {
+        const label = source.address ?? source.path;
+        try {
+          const logResult = await ingestGameLog(source.path, source.address);
+          playersSynced += logResult.playersSynced;
+          killEventsSynced += logResult.killEventsSynced;
+          aliasesSynced += logResult.aliasesUpserted;
+          identityAlertsSynced += logResult.identityAlertsUpserted;
+          autoLinksSynced += logResult.autoLinksSynced;
+          if (!logResult.ok) ok = false;
+          if (logResult.linesIgnored > 0) {
+            warnings.push(`[GameLog ${label}] ${logResult.linesIgnored} líneas no reconocidas (ignoradas).`);
+          }
+          if (logResult.eventsSkipped > 0) {
+            warnings.push(`[GameLog ${label}] ${logResult.eventsSkipped} eventos descartados por GUIDs inválidos.`);
+          }
+          warnings.push(...logResult.warnings.map((warning) => `[GameLog ${label}] ${warning}`));
+        } catch (err) {
+          ok = false;
+          warnings.push(`[GameLog ${label}] error: ${errMessage(err)}`);
         }
-        if (logResult.eventsSkipped > 0) {
-          warnings.push(`[GameLog] ${logResult.eventsSkipped} eventos descartados por GUIDs inválidos.`);
-        }
-        warnings.push(...logResult.warnings);
-      } catch (err) {
-        ok = false;
-        warnings.push(`[GameLog] error: ${errMessage(err)}`);
       }
     }
 

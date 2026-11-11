@@ -1,6 +1,7 @@
 import { env } from './config/env.js';
 import { runSync } from './services/sync/sync.service.js';
 import { errMessage } from './lib/errors.js';
+import { prisma } from './lib/prisma.js';
 
 let running = false;
 
@@ -45,4 +46,24 @@ export function startSyncScheduler(): NodeJS.Timeout | null {
 
 export function stopSyncScheduler(timer: NodeJS.Timeout | null): void {
   if (timer) clearInterval(timer);
+}
+
+/**
+ * Cierra SyncRuns hu?rfanos (finishedAt NULL) de un reinicio/crash previo.
+ * Se llama UNA vez al arrancar, antes de programar.
+ */
+export async function closeStaleSyncRuns(): Promise<number> {
+  try {
+    const result = await prisma.syncRun.updateMany({
+      where: { finishedAt: null },
+      data: { ok: false, finishedAt: new Date() },
+    });
+    if (result.count > 0) {
+      console.warn(`[sync] cerrados ${result.count} run(s) hu?rfano(s) de un reinicio previo.`);
+    }
+    return result.count;
+  } catch (err) {
+    console.warn(`[sync] no se pudieron cerrar runs hu?rfanos: ${errMessage(err)}`);
+    return 0;
+  }
 }

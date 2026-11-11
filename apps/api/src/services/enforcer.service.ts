@@ -50,10 +50,17 @@ export async function runEnforcerTick(now: number = Date.now()): Promise<number>
   running = true;
   try {
     // Limpieza lazy: tempbans ya expirados dejan de estar activos.
-    await prisma.penalty.updateMany({
+    // READ primero (barato en WAL): evita escribir en cada tick y chocar con
+    // la transacción larga del sync.
+    const expired = await prisma.penalty.count({
       where: { type: 'tempban', active: true, expiresAt: { lte: new Date(now) } },
-      data: { active: false },
     });
+    if (expired > 0) {
+      await prisma.penalty.updateMany({
+        where: { type: 'tempban', active: true, expiresAt: { lte: new Date(now) } },
+        data: { active: false },
+      });
+    }
 
     const active = (await prisma.penalty.findMany({
       where: {

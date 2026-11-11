@@ -45,6 +45,8 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value !== undefined && value.trim().length > 0 ? value : undefined)),
+  /** Fuentes log ADICIONALES (multi-sala). Formato: "ruta|direccion;ruta2|direccion2". */
+  GAME_LOG_PATHS: z.string().optional(),
   /**
    * Snapshot(s) en vivo que escribe el script GSC del server (apps/api/gsc/
    * iw4x-ranking.gsc → userraw/scriptdata/iw4x-ranking.json). Acepta VARIAS
@@ -154,6 +156,24 @@ export const env = {
   rconEnforcerIntervalMs: raw.RCON_ENFORCER_INTERVAL_MS,
   rconBansFile: raw.RCON_BANS_FILE,
   gameLogPath: raw.GAME_LOG_PATH,
+  /** Lista efectiva de fuentes log: GAME_LOG_PATH + GAME_LOG_PATHS (deduplicada). */
+  gameLogSources: (() => {
+    const sources: Array<{ path: string; address: string | null }> = [];
+    if (raw.GAME_LOG_PATH) {
+      sources.push({ path: raw.GAME_LOG_PATH, address: raw.GAME_SERVER_ADDRESS ?? null });
+    }
+    for (const entry of (raw.GAME_LOG_PATHS ?? '').split(/[;\n]/)) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const sep = trimmed.lastIndexOf('|');
+      const path = (sep >= 0 ? trimmed.slice(0, sep) : trimmed).trim();
+      const address = sep >= 0 ? trimmed.slice(sep + 1).trim() : '';
+      if (path && !sources.some((source) => source.path === path)) {
+        sources.push({ path, address: address || null });
+      }
+    }
+    return sources;
+  })(),
   liveStatsFile: raw.LIVE_STATS_FILE,
   liveStatsIntervalMs: raw.LIVE_STATS_INTERVAL_MS,
   liveXpJumpLimit: raw.LIVE_XP_JUMP_LIMIT,
