@@ -3,6 +3,8 @@ import { existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { env } from '../src/config/env.js';
+import { prisma } from '../src/lib/prisma.js';
+import { buildStatBlob } from './fixtures/build-stat-blob.js';
 import { registerUser, req, resetDb, type TestUser } from './helpers.js';
 
 function sha256(buf: Buffer | string): string {
@@ -386,5 +388,119 @@ describe('Aislamiento entre cuentas', () => {
     const versionsB = await req().get('/api/profile/save/versions').set('Authorization', `Bearer ${userB.token}`);
     expect(versionsB.status).toBe(200);
     expect(versionsB.body).toEqual({ versions: [] });
+  });
+});
+
+/**
+ * DECISIÓN DEL DUEÑO (ver MOD_STAT_PATH en profile-save.service.ts): el
+ * saveXp/saveLevel/savePrestige que exponen web + launcher debe ser la
+ * progresión DEL MOD (mods/mp_bots/iw4x.stat — lo que el jugador ve in-game,
+ * todos los servers del cyber corren mp_bots), NO el iw4x.stat RAÍZ de la
+ * cuenta. Caso real (Jose): raíz = 5120 XP (L4) vs mod = 2163 XP (L3 Private II).
+ *
+ * Los blobs se construyen con el MISMO builder que usa el parser
+ * (tests/fixtures/build-stat-blob.ts): los valores propagados al Player son
+ * verificables punta a punta (xp → level vía LEVEL_XP_TABLE).
+ */
+describe('Propagación save* → Player: MOD mp_bots preferente sobre el raíz', () => {
+  const MOD_BOTS_PATH = 'mods/mp_bots/iw4x.stat';
+
+  /** Caso Jose: raíz L4 (5120 XP) vs mod L3 Private II (2163 XP). */
+  const XP_ROOT = 5120;
+  const XP_MOD = 2163;
+
+  const GUID_ROOT_MOD = '4444444444444444444';
+  const GUID_SOLO_ROOT = '5555555555555555555';
+  const GUID_SOLO_MOD = '6666666666666666666';
+  const GUID_SIN_STATS = '7777777777777777777';
+  const GUID_OTRO_MOD = '8888888888888888888';
+
+  /** Cuenta con un guid humano vinculado (mismo flujo real: player visto → link). */
+  async function setupLinkedPlayer(email: string, guid: string): Promise<TestUser> {
+    const user = await registerUser(email, 'supersecret123', `ModPref ${guid.slice(-4)}`);
+    await prisma.player.create({ data: { guid, name: `ModPref IG ${guid.slice(-4)}` } });
+    const link = await req().post('/api/link/complete').set('Authorization', `Bearer ${user.token}`).send({ guid });
+    expect(link.status).toBe(200);
+    return user;
+  }
+
+  it('snapshot con raíz + mod → el Player recibe los valores DEL MOD (no los del raíz)', async () => {
+    const user = await setupLinkedPlayer('cloudsave-modpref-rootmod@test.local', GUID_ROOT_MOD);
+    const rootBlob = buildStatBlob({ xp: XP_ROOT, prestige: 0 }); // raíz: 5120 XP → L4
+    const modBlob = buildStatBlob({ xp: XP_MOD, prestige: 0 }); // mod: 2163 XP → L3
+
+    const res = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, rootBlob), fileEntry(MOD_BOTS_PATH, modBlob)] });
+    expect(res.status).toBe(200);
+    expect((res.body as { saved: boolean }).saved).toBe(true);
+
+    const player = await prisma.player.findUnique({ where: { guid: GUID_ROOT_MOD } });
+    expect(player?.saveXp).toBe(XP_MOD); // 2163 del MOD, NO 5120 del raíz
+    expect(player?.saveLevel).toBe(3); // L3 Private II (rango real in-game de Jose)
+    expect(player?.savePrestige).toBe(0);
+    expect(player?.saveParsedAt).not.toBeNull();
+  });
+
+  it('snapshot solo raíz (sin mod) → valores del raíz (fallback, comportamiento legacy)', async () => {
+    const user = await setupLinkedPlayer('cloudsave-modpref-root@test.local', GUID_SOLO_ROOT);
+
+    const res = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, buildStatBlob({ xp: XP_ROOT, prestige: 2 }))] });
+    expect(res.status).toBe(200);
+
+    const player = await prisma.player.findUnique({ where: { guid: GUID_SOLO_ROOT } });
+    expect(player?.saveXp).toBe(XP_ROOT);
+    expect(player?.saveLevel).toBe(4); // 5120 XP → L4
+    expect(player?.savePrestige).toBe(2);
+  });
+
+  it('snapshot solo mod (sin raíz) → valores del mod', async () => {
+    const user = await setupLinkedPlayer('cloudsave-modpref-mod@test.local', GUID_SOLO_MOD);
+
+    const res = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(MOD_BOTS_PATH, buildStatBlob({ xp: XP_MOD, prestige: 1 }))] });
+    expect(res.status).toBe(200);
+
+    const player = await prisma.player.findUnique({ where: { guid: GUID_SOLO_MOD } });
+    expect(player?.saveXp).toBe(XP_MOD);
+    expect(player?.saveLevel).toBe(3); // 2163 XP → L3
+    expect(player?.savePrestige).toBe(1);
+  });
+
+  it('snapshot sin ningún stat (solo cfg) → save=null (como hoy: no se inventa progresión)', async () => {
+    const user = await setupLinkedPlayer('cloudsave-modpref-sinstats@test.local', GUID_SIN_STATS);
+
+    const res = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(CFG_PATH, Buffer.from('seta name "cfg only"\n', 'utf8'))] });
+    expect(res.status).toBe(200);
+
+    const player = await prisma.player.findUnique({ where: { guid: GUID_SIN_STATS } });
+    expect(player?.saveXp).toBeNull();
+    expect(player?.saveLevel).toBeNull();
+    expect(player?.savePrestige).toBeNull();
+    expect(player?.saveParsedAt).toBeNull();
+  });
+
+  it('save de OTRO mod (no mp_bots) + raíz → gana el raíz: la preferencia es SOLO para mp_bots', async () => {
+    const user = await setupLinkedPlayer('cloudsave-modpref-otromod@test.local', GUID_OTRO_MOD);
+    const otroModBlob = buildStatBlob({ xp: XP_MOD, prestige: 0 }); // parece el "mod" pero es otro mod
+
+    const res = await req()
+      .put('/api/profile/save')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ files: [fileEntry(STAT_PATH, buildStatBlob({ xp: XP_ROOT, prestige: 0 })), fileEntry('mods/mpu_iw4x/iw4x.stat', otroModBlob)] });
+    expect(res.status).toBe(200);
+
+    const player = await prisma.player.findUnique({ where: { guid: GUID_OTRO_MOD } });
+    expect(player?.saveXp).toBe(XP_ROOT); // fallback raíz: mods/mpu_iw4x no es la fuente
+    expect(player?.saveLevel).toBe(4);
   });
 });

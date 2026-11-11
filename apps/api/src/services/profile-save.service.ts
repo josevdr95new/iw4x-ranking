@@ -7,8 +7,32 @@ import { prisma } from '../lib/prisma.js';
 import { MAX_FILE_BASE64_CHARS, type PutSaveInput } from '../dto/profile-save.dto.js';
 import { parseStatBlob } from '../lib/save-parser/parse-stat-blob.js';
 
-/** Path raíz del save de progresión (único archivo cuyo contenido se parsea). */
+/** Path raíz del save de progresión de la cuenta (FALLBACK del parse; ver MOD_STAT_PATH). */
 const STAT_ROOT_PATH = 'iw4x.stat';
+
+/**
+ * Save de progresión DEL MOD mp_bots: fuente de VERDAD del saveXp/saveLevel/
+ * savePrestige que exponen la web y el launcher.
+ *
+ * DECISIÓN DEL DUEÑO (2026-11-11): lo que el jugador ve dentro del juego en los
+ * servers del cyber es la progresión del MOD (todos corren mp_bots y el save
+ * por-mod vive en mods/<mod>/iw4x.stat), NO el `iw4x.stat` RAÍZ de la cuenta.
+ * Caso real (Jose): raíz = 5120 XP (L4) vs mod = 2163 XP (L3 Private II, su
+ * rango real in-game) → la web mostraba L4 y estaba mal.
+ *
+ * Reglas de propagación (ver syncParsedSaveToPlayers):
+ * 1. El snapshot incluye mods/mp_bots/iw4x.stat → se parsea ESE buffer y se
+ *    propagan SUS valores (xp/level/prestige), aunque también venga el raíz.
+ * 2. Sin save del mod pero con raíz → raíz (comportamiento legacy).
+ * 3. Sin ninguno → no-op (el save del Player queda como estaba, "como hoy").
+ *
+ * El árbol del snapshot se guarda y restaura INTACTO (guid.dat + raíz + mods/):
+ * el restore de cloud-save NO cambia y el raíz queda intacto en storage para el
+ * restore de cuenta. Solo cambia qué archivo alimenta el parse expuesto. Con
+ * esto el cloud save queda CONSISTENTE con el pipeline en vivo (livestats),
+ * que ya escribe saveXp con el XP del mod (GetStat lee el archivo del mod).
+ */
+const MOD_STAT_PATH = 'mods/mp_bots/iw4x.stat';
 
 /**
  * Cloud save de progresión IW4x: snapshots versionados POR CUENTA en disco.
@@ -22,8 +46,10 @@ const STAT_ROOT_PATH = 'iw4x.stat';
  *     ├── iw4x_config.cfg
  *     └── mods/<mod>/iw4x.stat
  *
- * - EXCEPCIÓN de opacidad: `iw4x.stat` (raíz) se PARSEA tras cada upload nuevo
- *   (progresión: xp/nivel/prestigio → columnas save* del Player vinculado).
+ * - EXCEPCIÓN de opacidad: tras cada upload nuevo se PARSEA el save de
+ *   progresión DEL MOD (`mods/mp_bots/iw4x.stat`, preferente) o, si el snapshot
+ *   no lo trae, el `iw4x.stat` RAÍZ (fallback) → xp/nivel/prestigio a las
+ *   columnas save* del Player vinculado (ver MOD_STAT_PATH).
  *   El parse NUNCA puede fallar el upload (try/catch total + sanity por campo;
  *   ver src/lib/save-parser/parse-stat-blob.ts y docs/API.md).
  * - combinedSha256 = sha256 de la lista canónica "path:fileSha256" → dedupe de PUTs idénticos.
@@ -170,23 +196,35 @@ function decodeAndVerify(files: PutSaveInput['files']): DecodedFile[] {
 /** PUT /api/profile/save: guarda un snapshot nuevo salvo que sea idéntico al latest. */
 
 /**
- * Propaga el parse del `iw4x.stat` RAÍZ del snapshot recién guardado a los
+ * Propaga el parse del save de progresión del snapshot recién guardado a los
  * Players vinculados a la cuenta (el cloud save es por CUENTA: un perfil de
- * progresión compartido por todos sus guids, jugue desde la PC que juegue).
+ * progresión compartido por todos sus guids, juegue desde la PC que juegue).
+ *
+ * FUENTE (decisión del dueño, ver MOD_STAT_PATH): preferencia al save DEL MOD
+ * (`mods/mp_bots/iw4x.stat` — lo que el jugador ve in-game, todos los servers
+ * del cyber corren mp_bots); fallback al `iw4x.stat` raíz SOLO si el snapshot
+ * no trae save del mod.
  *
  * Garantías:
- * - Sin `iw4x.stat` raíz en el snapshot → no-op.
+ * - Sin save del mod ni raíz en el snapshot → no-op ("como hoy": no se inventa
+ *   ni se pisa progresión).
  * - Parse null (tamaño ≠ 8192 o versión no soportada) → campos a null ("latest
  *   wins": el estado del Player refleja SIEMPRE el último snapshot) + log debug.
  * - Sanity por campo dentro del parser: campo inválido → null individual.
  * - Cualquier error inesperado (DB, etc.) se traga con log: el upload NUNCA
  *   falla por el parse.
  */
-async function syncParsedSaveToPlayers(userId: number, statBuf: Buffer | undefined): Promise<void> {
+async function syncParsedSaveToPlayers(userId: number, decoded: DecodedFile[]): Promise<void> {
   try {
+    const modBuf = decoded.find((f) => f.path === MOD_STAT_PATH)?.buf;
+    const rootBuf = decoded.find((f) => f.path === STAT_ROOT_PATH)?.buf;
+    // Preferencia DEL MOD; el raíz solo como fallback (ver MOD_STAT_PATH).
+    const statBuf = modBuf ?? rootBuf;
     if (!statBuf) return;
     const parsed = parseStatBlob(statBuf);
-    if (!parsed) console.debug(`[profile-save] iw4x.stat no parseable (tamaño/versión) → save=null para cuenta ${userId}`);
+    if (!parsed) {
+      console.debug(`[profile-save] ${modBuf ? MOD_STAT_PATH : STAT_ROOT_PATH} no parseable (tamaño/versión) → save=null para cuenta ${userId}`);
+    }
     const result = await prisma.player.updateMany({
       where: { accountLinks: { some: { userId } } },
       data: parsed
@@ -197,7 +235,7 @@ async function syncParsedSaveToPlayers(userId: number, statBuf: Buffer | undefin
       console.debug(`[profile-save] cuenta ${userId} sin GUIDs vinculados → parse de save no expuesto`);
     }
   } catch (err) {
-    console.debug(`[profile-save] parse/persist del iw4x.stat falló (upload intacto): ${err instanceof Error ? err.message : String(err)}`);
+    console.debug(`[profile-save] parse/persist del save de progresión falló (upload intacto): ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -242,8 +280,8 @@ export function putSave(userId: number, input: PutSaveInput): Promise<PutSaveRes
 
     const pruned = pruneVersions(userId);
     // Parse de progresión (post-guardado, pre-respuesta): nunca rompe el upload.
-    const statBuf = decoded.find((f) => f.path === STAT_ROOT_PATH)?.buf;
-    await syncParsedSaveToPlayers(userId, statBuf);
+    // Fuente: save DEL MOD preferente; raíz solo como fallback (MOD_STAT_PATH).
+    await syncParsedSaveToPlayers(userId, decoded);
     return { saved: true, version, updatedAt, files: fileInfos, pruned };
   });
 }
