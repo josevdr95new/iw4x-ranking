@@ -16,7 +16,9 @@ import { ConfirmModal } from "../../components/ui/ConfirmModal";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Input } from "../../components/ui/Input";
 import { Panel } from "../../components/ui/Panel";
-import { Skeleton, Spinner } from "../../components/ui/Spinner";
+import { Skeleton } from "../../components/ui/Spinner";
+import { WaitingStrip } from "../../components/ui/WaitingStrip";
+import { rconErrorText, SERVER_DOWN_TEXT } from "../../lib/rcon-errors";
 import { formatExpiresIn, formatInt, formatRelative } from "../../lib/format";
 import type { ReactNode } from "react";
 
@@ -24,39 +26,6 @@ const MAPS_POLL_MS = 30_000;
 const BOTS_POLL_MS = 30_000;
 const SESSIONS_POLL_MS = 30_000;
 const MAX_BOTS = 64;
-
-/** El server no respondió por rcon (502 MODERATION_UNREACHABLE): mismo texto que la moderación. */
-const SERVER_DOWN_TEXT =
-  "El server no respondió por RCON — puede estar caído o reiniciando. Vuelve a intentarlo en unos segundos.";
-const RCON_NOT_CONFIGURED_TEXT =
-  "El control por RCON no está configurado en la API del ranking (falta RCON_PASSWORD).";
-
-/** Mensaje humano para errores rcon (502/503) o genéricos. */
-function rconErrorText(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 502) return SERVER_DOWN_TEXT;
-    if (error.status === 503) return RCON_NOT_CONFIGURED_TEXT;
-    return error.message;
-  }
-  return "No hay conexión con el servidor.";
-}
-
-/**
- * Franja de estado "en espera" (HUD del panel, no alert): comando enviado y
- * verificando con el server. La verificación RCON de map/rotate puede tardar ~45s.
- */
-function WaitingStrip({ text }: { text: string }) {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex items-center gap-2.5 rounded-md border border-border-strong bg-surface-2 px-4 py-3 text-sm"
-    >
-      <Spinner size={16} />
-      <p className="type-caption text-text-2">{text}</p>
-    </div>
-  );
-}
 
 function Banner({ tone, children }: { tone: "success" | "warning"; children: ReactNode }) {
   const toneClass =

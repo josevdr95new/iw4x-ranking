@@ -336,6 +336,10 @@ export interface ServerConfigSaveResponse {
 export interface RestartServerResponse {
   restarted: boolean;
   command: string;
+  /** Contrato nuevo: true si la API verificó que el server volvió tras el reinicio. */
+  verified?: boolean;
+  /** Nota humana de la API sobre el reinicio; el panel la muestra en el banner de éxito. */
+  note?: string;
 }
 
 /* Moderación bridge IW4MAdmin (docs/API.md §Moderación) */

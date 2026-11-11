@@ -10,7 +10,7 @@ import {
   Trash2,
   WifiOff,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, api } from "../../lib/api";
 import type {
@@ -23,6 +23,8 @@ import { Button } from "../../components/ui/Button";
 import { ConfirmModal } from "../../components/ui/ConfirmModal";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Skeleton } from "../../components/ui/Spinner";
+import { WaitingStrip } from "../../components/ui/WaitingStrip";
+import { rconErrorText } from "../../lib/rcon-errors";
 import { formatInt } from "../../lib/format";
 
 const GAMETYPE_PRESETS = ["war", "dom", "sab", "ctf", "koth"] as const;
@@ -151,7 +153,53 @@ export function ServerConfigPanel() {
   } | null>(null);
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  /** Franja HUD visible todo el tiempo que dure la request de reinicio (hasta ~2 min). */
+  const [restartWaiting, setRestartWaiting] = useState(false);
   const [restartNotice, setRestartNotice] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Refresco silencioso de la config tras un reinicio: el server tarda en volver a reportar.
+  const refreshTimers = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  /** Espejo de `dirty` para el refresco silencioso (no pisa ediciones sin guardar). */
+  const dirtyRef = useRef(false);
+
+  const refreshConfigSilently = useCallback(async () => {
+    try {
+      const response = await api.getServerConfig();
+      if (dirtyRef.current) return; // respeta las ediciones sin guardar del formulario
+      const cfg = response.config;
+      setConfig(cfg);
+      setHostname(cfg.hostname);
+      setMotd(cfg.motd);
+      setGametypeMode(
+        GAMETYPE_PRESETS.includes(cfg.gametype as (typeof GAMETYPE_PRESETS)[number])
+          ? "preset"
+          : "custom",
+      );
+      setGametypePreset(cfg.gametype);
+      setGametypeCustom(cfg.gametype);
+      setMaxclients(String(cfg.maxclients));
+      setBots(String(cfg.bots));
+      setLogfile(String(cfg.logfile));
+      setGLog(cfg.g_log);
+      setRotation(cfg.rotation.map((entry) => ({ ...entry })));
+    } catch {
+      // Sondeo en segundo plano: si falla, se mantiene lo que hay en pantalla.
+    }
+  }, []);
+
+  const refreshConfigSoon = useCallback(() => {
+    for (const timer of refreshTimers.current) clearTimeout(timer);
+    refreshTimers.current = [5_000, 20_000, 40_000].map((delay) =>
+      setTimeout(() => void refreshConfigSilently(), delay),
+    );
+  }, [refreshConfigSilently]);
+
+  useEffect(() => {
+    const timers = refreshTimers.current;
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,6 +253,11 @@ export function ServerConfigPanel() {
       JSON.stringify(rotation) !== JSON.stringify(config.rotation)
     );
   }, [config, hostname, motd, currentGametype, maxclients, bots, logfile, g_log, rconInput, passwordInput, rotation]);
+
+  // Espejo de `dirty` para el refresco silencioso tras el reinicio.
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
   const moveRotation = (index: number, delta: -1 | 1) => {
     setRotation((rows) => {
@@ -311,30 +364,32 @@ export function ServerConfigPanel() {
   };
 
   const handleRestart = async () => {
+    // Cierra el modal al confirmar: la espera se muestra en la franja HUD del panel.
+    setShowRestartModal(false);
     setRestarting(true);
     setRestartNotice(null);
+    setRestartWaiting(true);
     try {
       const response = await api.restartServer();
       setRestartNotice({
         ok: true,
-        text: "Server reiniciado. La nueva configuración ya está en uso.",
+        text: response.note || "SERVER REINICIADO ✓",
       });
-      setShowRestartModal(false);
-      void response;
+      // El server tarda en volver a reportar: refresco silencioso a los 5/20/40 s.
+      refreshConfigSoon();
+      window.scrollTo({ top: 0 });
     } catch (error) {
-      setShowRestartModal(false);
       if (error instanceof ApiError && error.status === 403) {
         setRestartNotice({
           ok: false,
           text: "El reinicio está deshabilitado en este server (flag ALLOW_SERVER_CONTROL no activado o sin comando configurado). Guardar la configuración sigue funcionando con normalidad.",
         });
       } else {
-        setRestartNotice({
-          ok: false,
-          text: "No se pudo reiniciar el server. Inténtalo de nuevo en unos segundos.",
-        });
+        setRestartNotice({ ok: false, text: rconErrorText(error) });
       }
+      window.scrollTo({ top: 0 });
     } finally {
+      setRestartWaiting(false);
       setRestarting(false);
     }
   };
@@ -415,6 +470,9 @@ export function ServerConfigPanel() {
               </div>
             )}
           </Banner>
+        )}
+        {restartWaiting && (
+          <WaitingStrip text="REINICIANDO SERVER… verificando reinicio real (puede tardar hasta ~2 min)." />
         )}
         {restartNotice && (
           <Banner tone={restartNotice.ok ? "success" : "warning"}>{restartNotice.text}</Banner>
@@ -735,7 +793,7 @@ export function ServerConfigPanel() {
         <Button
           variant="danger"
           onClick={() => setShowRestartModal(true)}
-          disabled={saving}
+          disabled={saving || restarting}
         >
           <Power size={16} strokeWidth={1.75} aria-hidden="true" />
           Reiniciar server
