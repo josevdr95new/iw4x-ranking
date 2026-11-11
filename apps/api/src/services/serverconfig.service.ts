@@ -9,6 +9,7 @@ import { AppError } from '../lib/errors.js';
 import { parseWith } from '../middleware/validate.js';
 import { serverConfigUpdateSchema } from '../dto/serverconfig.dto.js';
 import type { ServerConfigUpdate } from '../dto/serverconfig.dto.js';
+import { getSharedRcon, isRconConfigured } from '../lib/rcon/iw4x-rcon.js';
 
 /**
  * API admin sobre el server.cfg REAL del server dedicado IW4x (estilo AlterWare):
@@ -20,6 +21,12 @@ import type { ServerConfigUpdate } from '../dto/serverconfig.dto.js';
  *    para que no pueda inyectar comandos en el cfg).
  *  - Backup automático `server.cfg.bak-<timestamp>` + escritura atómica (tmp + rename).
  *  - Con ALLOW_SERVER_CONTROL=1 reinicia el server tras guardar vía SERVER_RESTART_COMMAND.
+ *  - POST /api/admin/server/restart: tras el exec del comando hace POLLING de
+ *    verificación con getSharedRcon().status() (mismo patrón que el fix de
+ *    changeMap en server-maps.service): fase 1 ver al server CAÍDO (status()
+ *    lanza, no es requisito duro: el down puede durar menos que el intervalo),
+ *    fase 2 verlo DE VUELTA (status() responde OK). Si el plazo vence sin
+ *    back-online → AppError 502 "El server no volvió tras el reinicio".
  */
 
 // ── Tipos ──────────────────────────────────────────────────────────────────
@@ -442,8 +449,90 @@ export async function updateServerConfig(updateRaw: unknown): Promise<ServerConf
 
 // ── POST /api/admin/server/restart ─────────────────────────────────────────
 
-/** Reinicia el server dedicado. Requiere ALLOW_SERVER_CONTROL=1 + SERVER_RESTART_COMMAND. */
-export async function restartServer(commandOverride?: string): Promise<{ restarted: boolean; command: string }> {
+export interface ServerRestartResult {
+  restarted: boolean;
+  command: string;
+  /** true cuando el polling de status confirmó que el server volvió a responder. */
+  verified: boolean;
+  note: string;
+}
+
+/** Lee un entero ms de la env (se lee EN CADA llamada, patrón del proyecto). */
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Ventana total de verificación tras el exec (default 150s: wine+iw4x tarda 30-60s). */
+function verifyTimeoutMs(): number {
+  return envMs('RCON_RESTART_VERIFY_TIMEOUT_MS', 150_000);
+}
+
+/** Intervalo entre polls de status (default 5s). */
+function verifyIntervalMs(): number {
+  return envMs('RCON_RESTART_VERIFY_INTERVAL_MS', 5_000);
+}
+
+/**
+ * Gracia para el caso "systemctl muy rápido": si el server volvió sin que
+ * llegáramos a verlo caído, se considera verificado una vez transcurrido este
+ * tiempo del exec (default 20s).
+ */
+function verifyGraceMs(): number {
+  return envMs('RCON_RESTART_VERIFY_GRACE_MS', 20_000);
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+interface RestartVerifyState {
+  /** Vimos al server CAÍDO (status() lanzó) al menos una vez. */
+  downSeen: boolean;
+  /** Vimos al server DE VUELTA (status() respondió OK) al menos una vez. */
+  upSeen: boolean;
+  /** Ms transcurridos desde el inicio del polling (≈ fin del exec). */
+  elapsedMs: number;
+}
+
+/**
+ * Polling de `status` tras el exec del comando de reinicio (mismo target que la
+ * sala reiniciada: getSharedRcon() apunta a RCON_HOST/RCON_PORT del server único
+ * que SERVER_RESTART_COMMAND reinicia):
+ *  - Fase 1: ver al server CAÍDO (status() lanza). El down puede durar pocos
+ *    segundos y escapar entre polls → NO es requisito duro (solo downSeen).
+ *  - Fase 2: ver al server DE VUELTA (status() responde OK).
+ * Los polls que fallan se IGNORAN (durante la caída/carga el RCON está mudo) —
+ * la única señal de éxito es un status respondiendo EN VIVO.
+ */
+async function pollRestartVerification(): Promise<RestartVerifyState> {
+  const startedAt = Date.now();
+  const deadline = startedAt + verifyTimeoutMs();
+  const graceMs = verifyGraceMs();
+  let downSeen = false;
+  let upSeen = false;
+  while (Date.now() < deadline) {
+    await sleep(Math.max(0, Math.min(verifyIntervalMs(), deadline - Date.now())));
+    try {
+      await getSharedRcon().status();
+      upSeen = true;
+      // Back-online confirmado: suficiente si vimos la caída, o si ya pasaron
+      // `graceMs` del exec (systemctl demasiado rápido para observar el down).
+      if (downSeen || Date.now() - startedAt >= graceMs) break;
+    } catch {
+      downSeen = true; // fase caído: el server no responde RCON (todavía)
+    }
+  }
+  return { downSeen, upSeen, elapsedMs: Date.now() - startedAt };
+}
+
+/**
+ * Reinicia el server dedicado (exec de SERVER_RESTART_COMMAND) y VERIFICA con
+ * polling de status que el server cayó y volvió a responder. Sin confirmación
+ * en el plazo → AppError 502 (el botón del panel NO debe reportar éxito si el
+ * server sigue caído).
+ */
+export async function restartServer(commandOverride?: string): Promise<ServerRestartResult> {
   if (!cfgEnv.allowControl) {
     throw Errors.forbidden('Control del server deshabilitado: define ALLOW_SERVER_CONTROL=1 para permitir reinicios.');
   }
@@ -461,5 +550,39 @@ export async function restartServer(commandOverride?: string): Promise<{ restart
       resolvePromise();
     });
   });
-  return { restarted: true, command };
+
+  // Sin RCON configurado no hay forma de verificar: el comando corrió, pero no
+  // podemos confirmar que el server volvió (y no bloqueamos 150s en vano).
+  if (!isRconConfigured()) {
+    return {
+      restarted: true,
+      command,
+      verified: false,
+      note: 'Server reiniciado (comando ejecutado), pero SIN verificación: falta RCON_PASSWORD para hacer polling del status.',
+    };
+  }
+
+  const verify = await pollRestartVerification();
+  if (!verify.upSeen) {
+    throw new AppError(
+      502,
+      'SERVER_RESTART_NOT_BACK',
+      'El server no volvió tras el reinicio — revisa systemd (SERVER_RESTART_COMMAND).',
+      { command, waitedMs: verify.elapsedMs },
+    );
+  }
+  if (verify.downSeen) {
+    return {
+      restarted: true,
+      command,
+      verified: true,
+      note: 'Server reiniciado y verificado: cayó y volvió a responder.',
+    };
+  }
+  return {
+    restarted: true,
+    command,
+    verified: true,
+    note: 'Server reiniciado y verificado: volvió a responder por RCON (el reinicio fue demasiado rápido para observarlo caído).',
+  };
 }

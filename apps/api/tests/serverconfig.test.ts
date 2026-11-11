@@ -1,7 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createSocket } from 'node:dgram';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { resetSharedRcon } from '../src/lib/rcon/iw4x-rcon.js';
 import { getServerConfig, restartServer, updateServerConfig } from '../src/services/serverconfig.service.js';
 import { registerUser } from './helpers.js';
 
@@ -13,6 +15,14 @@ const savedEnv: Record<string, string | undefined> = {
   SERVER_CFG_PATH: process.env.SERVER_CFG_PATH,
   ALLOW_SERVER_CONTROL: process.env.ALLOW_SERVER_CONTROL,
   SERVER_RESTART_COMMAND: process.env.SERVER_RESTART_COMMAND,
+  RCON_HOST: process.env.RCON_HOST,
+  RCON_PORT: process.env.RCON_PORT,
+  RCON_PASSWORD: process.env.RCON_PASSWORD,
+  RCON_SPACING_MS: process.env.RCON_SPACING_MS,
+  RCON_RESPONSE_TIMEOUT_MS: process.env.RCON_RESPONSE_TIMEOUT_MS,
+  RCON_RESTART_VERIFY_TIMEOUT_MS: process.env.RCON_RESTART_VERIFY_TIMEOUT_MS,
+  RCON_RESTART_VERIFY_INTERVAL_MS: process.env.RCON_RESTART_VERIFY_INTERVAL_MS,
+  RCON_RESTART_VERIFY_GRACE_MS: process.env.RCON_RESTART_VERIFY_GRACE_MS,
 };
 
 function useWorkCopy(): void {
@@ -29,9 +39,11 @@ beforeEach(() => {
   useWorkCopy();
   delete process.env.ALLOW_SERVER_CONTROL;
   delete process.env.SERVER_RESTART_COMMAND;
+  resetSharedRcon();
 });
 
 afterEach(() => {
+  resetSharedRcon();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -215,5 +227,122 @@ describe('POST /api/admin/server/restart (guard de seguridad)', () => {
     process.env.ALLOW_SERVER_CONTROL = '1';
     const result = await restartServer('node -e "process.stdout.write(\'restarted\')"');
     expect(result.restarted).toBe(true);
+    // Sin RCON_PASSWORD en este archivo no hay verificación posible (note lo explica).
+    expect(result.verified).toBe(false);
+    expect(result.note).toContain('RCON_PASSWORD');
+  });
+});
+
+// ── Verificación post-restart (polling de status: down → up) ────────────────
+
+const RCON_HEADER = '\u00ff\u00ff\u00ff\u00ff'; // FF FF FF FF (latin1)
+const RCON_PASSWORD = 'restart-test-pass';
+
+interface PhasedRcon {
+  port: number;
+  close(): Promise<void>;
+}
+
+/**
+ * Fake UDP mínimo con FASES: los primeros `silentStatuses` DATAGRAMAS de
+ * `status` quedan en silencio (server "caído": el cliente agota sus 3 intentos
+ * de lectura → status() lanza); después responde `statusText` (server de
+ * vuelta). El conteo es por datagrama, no por tiempo, para que el test sea
+ * determinista (cada poll fallido manda exactamente 3 datagramas: 1 + 2 retries).
+ */
+async function startPhasedRcon(statusText: string, silentStatuses: number): Promise<PhasedRcon> {
+  const socket = createSocket('udp4');
+  let statusDatagrams = 0;
+  socket.on('message', (msg, rinfo) => {
+    const body = msg.toString('latin1').slice(RCON_HEADER.length);
+    if (!body.startsWith('rcon ')) return;
+    const rest = body.slice('rcon '.length);
+    const sep = rest.indexOf(' ');
+    const password = sep >= 0 ? rest.slice(0, sep) : rest;
+    const command = sep >= 0 ? rest.slice(sep + 1) : '';
+    if (password !== RCON_PASSWORD) return; // drop silencioso, como el server real
+    if (command !== 'status') return;
+    statusDatagrams += 1;
+    if (statusDatagrams <= silentStatuses) return; // fase DOWN: sin respuesta
+    socket.send(Buffer.from(`${RCON_HEADER}print\n${statusText}`, 'latin1'), rinfo.port, rinfo.address);
+  });
+  await new Promise<void>((resolvePromise) => socket.bind(0, '127.0.0.1', () => resolvePromise()));
+  return {
+    port: socket.address().port,
+    close: () => new Promise((resolvePromise) => socket.close(() => resolvePromise())),
+  };
+}
+
+/** Envs RCON cortos para que el polling sea rápido en tests. */
+function useRconFake(port: number, overrides: Record<string, string> = {}): void {
+  process.env.RCON_HOST = '127.0.0.1';
+  process.env.RCON_PORT = String(port);
+  process.env.RCON_PASSWORD = RCON_PASSWORD;
+  process.env.RCON_SPACING_MS = '15';
+  process.env.RCON_RESPONSE_TIMEOUT_MS = '150';
+  process.env.RCON_RESTART_VERIFY_TIMEOUT_MS = '15000';
+  process.env.RCON_RESTART_VERIFY_INTERVAL_MS = '50';
+  process.env.RCON_RESTART_VERIFY_GRACE_MS = '400';
+  for (const [key, value] of Object.entries(overrides)) process.env[key] = value;
+  resetSharedRcon(); // el singleton lee RCON_HOST/PORT en su construcción
+}
+
+describe('POST /api/admin/server/restart (verificación de que el server cayó y volvió)', () => {
+  it('down→up: verified=true con note "cayó y volvió a responder"', async () => {
+    // 3 datagramas mudos = 1er poll completo caído (1 intento + 2 retries); el
+    // poll 2 ya encuentra al fake respondiendo → downSeen && upSeen.
+    process.env.ALLOW_SERVER_CONTROL = '1';
+    const fake = await startPhasedRcon('map: mp_rust\n', 3);
+    useRconFake(fake.port);
+    try {
+      const result = await restartServer('node -e "process.stdout.write(\'restarted\')"');
+      expect(result.restarted).toBe(true);
+      expect(result.verified).toBe(true);
+      expect(result.note).toContain('cayó y volvió a responder');
+      expect(result.command).toContain('node');
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('nunca vuelve (listener mudo) → AppError 502 SERVER_RESTART_NOT_BACK', async () => {
+    // OJO (Windows): NO basta un puerto "cerrado" — un listener UDP mudo es
+    // determinista (mismo patrón que server-maps.test.ts).
+    process.env.ALLOW_SERVER_CONTROL = '1';
+    const blackHole = createSocket('udp4');
+    await new Promise<void>((resolvePromise) => blackHole.bind(0, '127.0.0.1', () => resolvePromise()));
+    useRconFake(blackHole.address().port, { RCON_RESTART_VERIFY_TIMEOUT_MS: '2400' });
+    try {
+      await expect(restartServer('node -e "process.stdout.write(\'restarted\')"')).rejects.toMatchObject({
+        statusCode: 502,
+        code: 'SERVER_RESTART_NOT_BACK',
+      });
+    } finally {
+      blackHole.close();
+    }
+  });
+
+  it('up desde el primer poll (reinicio muy rápido para ver el down) → verificado tras la gracia', async () => {
+    process.env.ALLOW_SERVER_CONTROL = '1';
+    const fake = await startPhasedRcon('map: mp_rust\n', 0); // responde SIEMPRE
+    useRconFake(fake.port);
+    try {
+      const result = await restartServer('node -e "process.stdout.write(\'restarted\')"');
+      expect(result.restarted).toBe(true);
+      expect(result.verified).toBe(true);
+      expect(result.note).toContain('demasiado rápido');
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('sin RCON_PASSWORD → restarted sin verificación (no bloquea el polling 150s)', async () => {
+    delete process.env.RCON_PASSWORD;
+    process.env.ALLOW_SERVER_CONTROL = '1';
+    resetSharedRcon();
+    const result = await restartServer('node -e "process.stdout.write(\'restarted\')"');
+    expect(result.restarted).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.note).toContain('SIN verificación');
   });
 });
