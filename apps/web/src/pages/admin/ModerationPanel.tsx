@@ -16,10 +16,13 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { ApiError, api } from "../../lib/api";
 import type {
   IamBansResponse,
+  IamLivePlayer,
   IamLiveResponse,
+  IamLiveServer,
   IamPenalty,
   IamPenaltyRecordType,
   IamPenaltyResponse,
@@ -78,6 +81,42 @@ function SlotTag({ slot }: { slot: number | null }) {
   );
 }
 
+/**
+ * Chip del selector de sala: misma gramática visual que las pestañas del /admin
+ * (active = accent-subtle + accent-border), compacto para caber junto al caption del panel.
+ */
+function FilterChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`type-button inline-flex h-8 items-center whitespace-nowrap rounded-sm border px-2.5 text-[12px] transition-colors duration-150 ease-out ${
+        active
+          ? "border-accent-border bg-accent-subtle text-accent"
+          : "border-transparent text-text-2 hover:text-text"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Fila aplanada de jugadores en vivo con su sala de origen (para filtrar y mostrar el badge). */
+interface LivePlayerRow {
+  key: string;
+  server: IamLiveServer;
+  player: IamLivePlayer;
+}
+
 /* --- Panel principal --- */
 
 type StatusState =
@@ -99,6 +138,8 @@ export function ModerationPanel() {
   const [live, setLive] = useState<IamLiveResponse | null>(null);
   const [liveState, setLiveState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [liveError, setLiveError] = useState<string | null>(null);
+  /** Sala elegida en el selector de jugadores en vivo: "all" (default) o el id del server. */
+  const [serverFilterId, setServerFilterId] = useState<number | "all">("all");
 
   const [clientQueryInput, setClientQueryInput] = useState("");
   const [clientResults, setClientResults] = useState<Awaited<ReturnType<typeof api.iamClients>> | null>(null);
@@ -379,12 +420,46 @@ export function ModerationPanel() {
     [],
   );
 
+  const liveServers = useMemo(() => live?.servers ?? [], [live]);
+  /**
+   * Filtro efectivo: si la sala elegida desaparece del listado en vivo (server retirado
+   * tras un poll), cae con gracia a "Todas" sin estado zombie.
+   */
+  const activeFilter: number | "all" =
+    serverFilterId === "all" || liveServers.some((server) => server.id === serverFilterId)
+      ? serverFilterId
+      : "all";
+
+  /** Servers visibles según el selector (en "Todas": todos). */
+  const visibleServers = useMemo(
+    () =>
+      activeFilter === "all"
+        ? liveServers
+        : liveServers.filter((server) => server.id === activeFilter),
+    [liveServers, activeFilter],
+  );
+
+  /** Jugadores aplanados con su sala de origen, ya filtrados por el selector. */
+  const liveRows = useMemo<LivePlayerRow[]>(
+    () =>
+      visibleServers.flatMap((server) =>
+        server.players.map((player, index) => ({
+          key: player.guid ?? `${server.id}-${index}-${stripColorCodes(player.name)}`,
+          server,
+          player,
+        })),
+      ),
+    [visibleServers],
+  );
+
   const liveTotals = useMemo(() => {
-    if (!live) return null;
-    const online = live.servers.filter((server) => server.online).length;
-    const players = live.servers.reduce((count, server) => count + server.players.length, 0);
-    return { servers: live.servers.length, online, players };
-  }, [live]);
+    const online = visibleServers.filter((server) => server.online).length;
+    const players = visibleServers.reduce((count, server) => count + server.players.length, 0);
+    return { servers: visibleServers.length, online, players };
+  }, [visibleServers]);
+
+  /** Server activo cuando hay sala elegida (para el caption "N conectados en Sala 1"). */
+  const activeServer = activeFilter === "all" ? null : visibleServers[0] ?? null;
 
   const canUnban = (penalty: IamPenalty): boolean =>
     (penalty.type === "ban" || penalty.type === "tempban") &&
@@ -442,7 +517,6 @@ export function ModerationPanel() {
   }
 
   const status = statusState.status;
-  const livePlayers = live?.servers.flatMap((server) => server.players) ?? [];
   const kickReasonValid = kickReason.trim().length >= 3;
   const bansCount = bansData?.bans.length ?? 0;
 
@@ -504,8 +578,10 @@ export function ModerationPanel() {
         <Panel
           title="Jugadores en vivo"
           caption={
-            liveTotals
-              ? `${formatInt(liveTotals.players)} conectados en ${formatInt(liveTotals.online)} de ${formatInt(liveTotals.servers)} servers`
+            live
+              ? activeServer
+                ? `${formatInt(liveTotals.players)} conectados en ${stripColorCodes(activeServer.name)}${activeServer.online ? "" : " · server offline"}`
+                : `${formatInt(liveTotals.players)} conectados en ${formatInt(liveTotals.online)} de ${formatInt(liveTotals.servers)} servers`
               : "Consultando los servers…"
           }
           action={
@@ -521,6 +597,27 @@ export function ModerationPanel() {
             </Button>
           }
         >
+          {liveServers.length > 0 && (
+            <div
+              role="group"
+              aria-label="Filtrar jugadores por sala"
+              className="mb-4 flex flex-wrap items-center gap-1.5"
+            >
+              <span className="type-caption mr-1 text-text-2">Salas</span>
+              <FilterChip active={activeFilter === "all"} onClick={() => setServerFilterId("all")}>
+                Todas
+              </FilterChip>
+              {liveServers.map((server) => (
+                <FilterChip
+                  key={server.id}
+                  active={activeFilter === server.id}
+                  onClick={() => setServerFilterId(server.id)}
+                >
+                  {stripColorCodes(server.name)}
+                </FilterChip>
+              ))}
+            </div>
+          )}
           {liveState === "error" ? (
             <EmptyState
               icon={WifiOff}
@@ -537,10 +634,10 @@ export function ModerationPanel() {
                 </div>
               ))}
             </div>
-          ) : livePlayers.length === 0 ? (
+          ) : liveRows.length === 0 ? (
             <EmptyState
               icon={Users}
-              title="Nadie conectado ahora."
+              title={activeServer ? "Nadie conectado en esta sala." : "Nadie conectado ahora."}
               description="Cuando alguien entre al server aparecerá aquí, con sus datos en vivo."
             />
           ) : (
@@ -554,6 +651,11 @@ export function ModerationPanel() {
                     <th scope="col" className="px-3 py-2.5 text-left">
                       <span className="type-label text-text-2">Jugador</span>
                     </th>
+                    {activeFilter === "all" && (
+                      <th scope="col" className="px-3 py-2.5 text-left">
+                        <span className="type-label text-text-2">Sala</span>
+                      </th>
+                    )}
                     <th scope="col" className="px-3 py-2.5 text-left">
                       <span className="type-label text-text-2">Slot</span>
                     </th>
@@ -572,10 +674,8 @@ export function ModerationPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {live?.servers.map((server) =>
-                    server.players.map((player, index) => {
-                      const key = player.guid ?? `${server.id}-${index}-${stripColorCodes(player.name)}`;
-                      const cleanName = stripColorCodes(player.name);
+                  {liveRows.map(({ key, server, player }) => {
+                    const cleanName = stripColorCodes(player.name);
                       const kickTarget: KickConfirmState = {
                         key,
                         name: player.name,
@@ -605,6 +705,16 @@ export function ModerationPanel() {
                               </span>
                             )}
                           </td>
+                          {activeFilter === "all" && (
+                            <td className="px-3 py-2.5">
+                              <span
+                                className="type-mono text-[12px] text-text-2"
+                                title="Sala de origen"
+                              >
+                                {stripColorCodes(server.name)}
+                              </span>
+                            </td>
+                          )}
                           <td className="px-3 py-2.5">
                             <SlotTag slot={player.clientNumber ?? null} />
                           </td>
@@ -716,11 +826,10 @@ export function ModerationPanel() {
                           </td>
                         </tr>
                       );
-                    }),
-                  )}
+                    })}
                 </tbody>
               </table>
-              {live?.servers.map((server) =>
+              {visibleServers.map((server) =>
                 server.players.length === 0 ? null : (
                   <p key={server.id} className="type-caption mt-2 px-1 text-text-2">
                     Server: {stripColorCodes(server.name)}
