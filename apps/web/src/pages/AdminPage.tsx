@@ -3,18 +3,20 @@ import { ServerConfigPanel } from "./admin/ServerConfigPanel";
 import { ServerControlPanel } from "./admin/ServerControlPanel";
 import { ModerationPanel } from "./admin/ModerationPanel";
 import { IdentityPanel } from "./admin/IdentityPanel";
+import { AccountsPanel } from "./admin/AccountsPanel";
 import { useDocumentTitle } from "../lib/meta";
 
-export type AdminTab = "config" | "identidad" | "moderacion";
+export type AdminTab = "config" | "identidad" | "moderacion" | "cuentas";
 
 const TABS: Array<{ id: AdminTab; label: string }> = [
   { id: "config", label: "Server config" },
   { id: "identidad", label: "Identidad" },
   { id: "moderacion", label: "Moderación" },
+  { id: "cuentas", label: "Cuentas" },
 ] as const;
 
 function parseTab(raw: string | null): AdminTab {
-  return raw === "identidad" || raw === "moderacion" ? raw : "config";
+  return raw === "identidad" || raw === "moderacion" || raw === "cuentas" ? raw : "config";
 }
 
 /** Shell de /admin: subnav de pestañas compartibles por URL (?tab=moderacion). */
@@ -39,7 +41,7 @@ export function AdminPage() {
     <div>
       <h1 className="type-display-xl text-text">Administración</h1>
       <p className="type-caption mt-2 text-text-2">
-        Config del server dedicado, identidad de la comunidad y moderación vía IW4MAdmin.
+        Config del server dedicado, cuentas web, identidad de la comunidad y moderación vía IW4MAdmin.
       </p>
 
       <div className="mb-4 mt-4 border-b border-border" aria-hidden="true" />
@@ -82,6 +84,8 @@ export function AdminPage() {
           </>
         ) : tab === "identidad" ? (
           <IdentityPanel />
+        ) : tab === "cuentas" ? (
+          <AccountsPanel />
         ) : (
           <ModerationPanel />
         )}

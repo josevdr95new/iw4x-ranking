@@ -675,6 +675,63 @@ export interface LauncherOnlyResponse {
   enabled: boolean;
 }
 
+/* Cuentas web — administración por el dueño (ADMIN) */
+
+export type AccountRole = "USER" | "ADMIN";
+
+/** Fila del listado GET /api/admin/accounts. */
+export interface AdminAccount {
+  id: number;
+  displayName: string;
+  email: string;
+  role: AccountRole;
+  createdAt: string;
+  /** Nº de guids vinculados a la cuenta. */
+  guidCount: number;
+  /** Última vez que alguno de sus guids se vio en un server; null si no tiene guids. */
+  lastGuidSeen: string | null;
+}
+
+export interface AdminAccountsResponse {
+  accounts: AdminAccount[];
+}
+
+/** GUID vinculado (detalle de cuenta). */
+export interface AdminAccountGuid {
+  guid: string;
+  lastSeen: string | null;
+}
+
+/** Save en la nube parseado (detalle de cuenta); null si la cuenta nunca subió un save. */
+export interface AdminAccountSave {
+  level: number;
+  xp: number;
+  parsedAt: string;
+}
+
+/** GET /api/admin/accounts/:id — cuenta + guids + save + nº de sesiones. */
+export interface AdminAccountDetail extends AdminAccount {
+  guids: AdminAccountGuid[];
+  save: AdminAccountSave | null;
+  sessions: number;
+}
+
+export interface AdminAccountDetailResponse {
+  account: AdminAccountDetail;
+}
+
+/** PATCH /api/admin/accounts/:id — cualquier combinación de displayName/email/role. */
+export interface AdminAccountUpdateRequest {
+  displayName?: string;
+  email?: string;
+  role?: AccountRole;
+}
+
+export interface AdminAccountUpdateResponse {
+  updated: boolean;
+  account: AdminAccount;
+}
+
 /* Cloud-save propio (GET /api/profile/save, JWT del viewer) */
 
 export interface ProfileSaveFile {
@@ -877,6 +934,54 @@ export const api = {
   /** Conflictos de alias (read-only): colisiones de nombre + guids multi-alias. */
   aliasConflicts() {
     return request<AliasConflictsResponse>("/admin/alias-conflicts", { auth: true });
+  },
+
+  /* Cuentas web — administración por el dueño (ADMIN). */
+
+  /** GET /admin/accounts: listado completo de cuentas web. */
+  adminAccounts() {
+    return request<AdminAccountsResponse>("/admin/accounts", { auth: true });
+  },
+
+  /** GET /admin/accounts/:id: detalle con guids vinculados, save parseado y nº de sesiones. */
+  adminAccount(id: number | string) {
+    return request<AdminAccountDetailResponse>(`/admin/accounts/${encodeURIComponent(String(id))}`, {
+      auth: true,
+    });
+  },
+
+  /** POST /admin/accounts/:id/password: fija una contraseña nueva (mín. 8). */
+  adminSetAccountPassword(id: number | string, password: string) {
+    return request<{ updated: boolean }>(`/admin/accounts/${encodeURIComponent(String(id))}/password`, {
+      method: "POST",
+      body: { password },
+      auth: true,
+    });
+  },
+
+  /** PATCH /admin/accounts/:id: renombra, cambia email y/o rol. */
+  adminUpdateAccount(id: number | string, patch: AdminAccountUpdateRequest) {
+    return request<AdminAccountUpdateResponse>(`/admin/accounts/${encodeURIComponent(String(id))}`, {
+      method: "PATCH",
+      body: patch,
+      auth: true,
+    });
+  },
+
+  /** DELETE /admin/accounts/:id: borra la cuenta (links, sesiones y saves; los guids quedan libres). */
+  adminDeleteAccount(id: number | string) {
+    return request<{ deleted: boolean }>(`/admin/accounts/${encodeURIComponent(String(id))}`, {
+      method: "DELETE",
+      auth: true,
+    });
+  },
+
+  /** DELETE /admin/accounts/:id/guids/:guid: desvincula un GUID concreto (anti-suplantación). */
+  adminUnlinkAccountGuid(id: number | string, guid: string) {
+    return request<{ unlinked: boolean }>(
+      `/admin/accounts/${encodeURIComponent(String(id))}/guids/${encodeURIComponent(guid)}`,
+      { method: "DELETE", auth: true },
+    );
   },
 
   /* Diccionario de armas — público. */
