@@ -16,7 +16,11 @@ if errorlevel 1 (
 )
 
 echo Compilando...
-py -m PyInstaller --noconfirm --onefile --windowed --clean --name IW4xLauncher --icon "assets\logo-icon.ico" --add-data "assets\logo-icon.ico;assets" --add-data "assets\logo-icon.png;assets" --add-data "assets\logo-banner.png;assets" --add-data "assets\medals;assets\medals" main.py
+REM --uac-admin: el EXE lleva manifest requireAdministrator — UN solo UAC al
+REM abrir el launcher y TODO lo que lance (iw4x.exe) hereda administrador.
+REM Sin elevation el juego NO conecta (queda en el menú): la prueba controlada
+REM del dueño lo confirmó — su acceso directo elevado funciona SIEMPRE.
+py -m PyInstaller --noconfirm --onefile --windowed --uac-admin --clean --name IW4xLauncher --icon "assets\logo-icon.ico" --add-data "assets\logo-icon.ico;assets" --add-data "assets\logo-icon.png;assets" --add-data "assets\logo-banner.png;assets" --add-data "assets\medals;assets\medals" main.py
 if errorlevel 1 goto :error
 
 echo.

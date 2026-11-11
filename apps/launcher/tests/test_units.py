@@ -61,14 +61,8 @@ from app_config import (  # noqa: E402
 )
 import game_flow as gf  # noqa: E402
 from game_flow import (  # noqa: E402
-    DEFAULT_GAME_PORT,
     GameFlow,
-    build_console_commands,
     build_game_args,
-    is_connected,
-    resolve_host_ip,
-    send_console_sequence,
-    split_server_address,
 )
 from server_status import (  # noqa: E402
     SOURCE_API,
@@ -490,26 +484,13 @@ def phase_app_config() -> None:
           ]
           and DEFAULT_CONFIG["default_server"] == 0,
           str(DEFAULT_CONFIG["servers"]))
-    check("DEFAULT_CONFIG: autoconnect activado y ventana de gracia 20s "
-          "(red de seguridad del +connect intermitente)",
-          DEFAULT_CONFIG["autoconnect"] is True
-          and DEFAULT_CONFIG["autoconnect_wait_seconds"] == 20,
-          str(DEFAULT_CONFIG.get("autoconnect")))
-    cfg = AppConfig({})
-    check("AppConfig: autoconnect True y wait 20 por defecto (dict vacío)",
-          cfg.autoconnect is True and cfg.autoconnect_wait_seconds == 20)
-    cfg = AppConfig({"autoconnect": False,
-                     "autoconnect_wait_seconds": 3})
-    check("AppConfig: autoconnect=false se respeta y wait se acota al 5..60",
-          cfg.autoconnect is False
-          and cfg.autoconnect_wait_seconds == 5,
-          str(cfg.autoconnect_wait_seconds))
-    cfg = AppConfig({"autoconnect_wait_seconds": 999})
-    check("AppConfig: wait 999 → acotado a 60; basura → 20",
-          cfg.autoconnect_wait_seconds == 60
-          and AppConfig({"autoconnect_wait_seconds": "basura"})
-          .autoconnect_wait_seconds == 20,
-          str(cfg.autoconnect_wait_seconds))
+    # autoconnect ELIMINADO (decisión del dueño, 2026-11): la autoconexión
+    # determinista salió del launcher — el juego necesita correr como
+    # ADMINISTRADOR (el launcher pide elevación: manifest requireAdministrator).
+    # Las claves sobrantes en configs viejas quedan inofensivas por el merge.
+    check("DEFAULT_CONFIG: sin claves de autoconnect (eliminadas)",
+          not ({"autoconnect", "autoconnect_wait_seconds"} & set(DEFAULT_CONFIG)),
+          str(sorted(DEFAULT_CONFIG)))
     cfg = AppConfig({"servers": [
         {"name": "Vieja", "address": "10.0.0.5:28960",
          "fsGame": "mods/mp_bots"}]})
@@ -1065,136 +1046,6 @@ def phase_wait_process_exit() -> None:
 
     check("wait_process_exit: poll() que explota → True (asume muerto)",
           gf.wait_process_exit(Broken(), timeout=5, poll=0.01) is True)
-
-
-# ---------------------------------------------------------------------------
-# 8b. game_flow: autoconexión determinista (puras del fix "conecta cuando
-# quiere"): split del address, is_connected sobre netstat crudo, comandos de
-# consola y la secuencia EXACTA del inyector con un fake que graba.
-def phase_autoconnect_pures() -> None:
-    print("\n=== Units: autoconexión (is_connected / comandos de consola) ===")
-
-    # --- split_server_address ---------------------------------------------
-    check("split_server_address: 'host:puerto' → tupla (host, puerto)",
-          split_server_address("192.168.2.251:28960") == ("192.168.2.251", 28960))
-    check("split_server_address: host pelado → puerto default del juego (28960)",
-          split_server_address("mi-server.lan") == ("mi-server.lan", DEFAULT_GAME_PORT)
-          and DEFAULT_GAME_PORT == 28960,
-          str(split_server_address("mi-server.lan")))
-    check("split_server_address: vacía → None (el hilo aborta sin drama)",
-          split_server_address("") is None and split_server_address("  ") is None)
-
-    # --- is_connected: SOLO UDP del pid del juego hacia el server ----------
-    netstat_ok = (
-        "\nConexiones activas\n\n"
-        "  Proto  Dirección local      Dirección remota       Estado      PID\n"
-        "  TCP    192.168.1.10:49671   192.168.2.251:3000     ESTABLISHED 4242\n"
-        "  UDP    0.0.0.0:28001        192.168.2.251:28960    *:*         4242\n"
-        "  UDP    0.0.0.0:5353         *:*                                1111\n"
-    )
-    check("is_connected: línea UDP del pid hacia ip:puerto → True",
-          is_connected(netstat_ok, 4242, "192.168.2.251", 28960) is True)
-    check("is_connected: PID distinto → False (jamás mira otros procesos)",
-          is_connected(netstat_ok, 9999, "192.168.2.251", 28960) is False)
-    check("is_connected: puerto equivocado → False",
-          is_connected(netstat_ok, 4242, "192.168.2.251", 28961) is False)
-
-    netstat_tcp = (
-        "  TCP    192.168.1.10:49672   192.168.2.251:28960    ESTABLISHED 4242\n"
-    )
-    check("is_connected: línea TCP aunque matchee pid+destino NO cuenta",
-          is_connected(netstat_tcp, 4242, "192.168.2.251", 28960) is False)
-
-    netstat_v6 = (
-        "  UDP    [::]:50000           [::1]:1900             *:*         4242\n"
-        "  UDP    [::]:28001           [::ffff:192.168.2.251]:28960 *:*   4242\n"
-    )
-    check("is_connected: formato con corchetes IPv6 NO rompe (parsea limpio)",
-          is_connected(netstat_v6, 4242, "192.168.2.251", 28960) is True)
-    check("is_connected: IPv6 sin match → False (sin crash)",
-          is_connected(netstat_v6, 4242, "::1", 28961) is False)
-
-    # Host como IP literal va a la llamada real (127.0.0.1: sin DNS).
-    netstat_loop = "  UDP    127.0.0.1:28001      127.0.0.1:28961        *:*         777\n"
-    check("is_connected: llamada real con '127.0.0.1' (IP literal, sin DNS) → True",
-          is_connected(netstat_loop, 777, "127.0.0.1", 28961) is True)
-    check("is_connected: netstat vacío/basura → False sin lanzar",
-          is_connected("", 4242, "192.168.2.251", 28960) is False
-          and is_connected(None, 4242, "192.168.2.251", 28960) is False
-          and is_connected(netstat_ok, None, "192.168.2.251", 28960) is False)
-    check("resolve_host_ip: IP literal va tal cual (sin tocar DNS)",
-          resolve_host_ip("192.168.2.251") == "192.168.2.251"
-          and resolve_host_ip("127.0.0.1") == "127.0.0.1")
-
-    # --- build_console_commands --------------------------------------------
-    check("consola: con nick con espacios → name primero, luego connect",
-          build_console_commands("Mandango ProMax", "192.168.2.251", 28960)
-          == ["name Mandango ProMax", "connect 192.168.2.251:28960"],
-          str(build_console_commands("Mandango ProMax", "192.168.2.251", 28960)))
-    check("consola: nick con espacios en extremos se recorta",
-          build_console_commands("  Spam Bot  ", "1.2.3.4", 28961)[0]
-          == "name Spam Bot")
-    check("consola: sin nick → SOLO connect (sin name)",
-          build_console_commands("", "1.2.3.4", 28961)
-          == ["connect 1.2.3.4:28961"]
-          and build_console_commands(None, "1.2.3.4", 28961)
-          == ["connect 1.2.3.4:28961"])
-
-    # --- send_console_sequence: contrato EXACTO con inyector fake ----------
-    class FakeInjector:
-        """Grabador de la secuencia (mismo contrato que KeyboardInjector)."""
-
-        def __init__(self) -> None:
-            self.calls: list = []
-
-        def focus_window(self, hwnd) -> None:
-            self.calls.append(("focus", hwnd))
-
-        def open_console(self) -> None:
-            self.calls.append("open")
-
-        def type_text(self, text) -> None:
-            self.calls.append(("type", text))
-
-        def press_enter(self) -> None:
-            self.calls.append("enter")
-
-        def close_console(self) -> None:
-            self.calls.append("close")
-
-    fake = FakeInjector()
-    send_console_sequence(fake, 4242,
-                          build_console_commands("El Tester", "1.2.3.4", 28960))
-    check("secuencia del inyector: open→type(name)→enter→type(connect)→"
-          "enter→close (con focus al inicio)",
-          fake.calls == [("focus", 4242), "open",
-                         ("type", "name El Tester"), "enter",
-                         ("type", "connect 1.2.3.4:28960"), "enter",
-                         "close"], str(fake.calls))
-
-    fake = FakeInjector()
-    send_console_sequence(fake, 99, build_console_commands("", "5.6.7.8", 28960))
-    check("secuencia del inyector sin nick: SOLO connect (sin type name)",
-          fake.calls == [("focus", 99), "open",
-                         ("type", "connect 5.6.7.8:28960"), "enter",
-                         "close"], str(fake.calls))
-
-    # KeyboardInjector real: tipos ctypes definidos y tamaños correctos —
-    # INPUT debe medir 40 bytes en x64 (DWORD + union cuyo miembro mayor es
-    # MOUSEINPUT=32); KEYBDINPUT=24. Los métodos NO se invocan (tocarían
-    # el teclado real).
-    injector = gf.KeyboardInjector()
-    size_input = gf.ctypes.sizeof(gf._INPUT)
-    check("KeyboardInjector real: se instancia, interface completa e INPUT "
-          "x64 mide 40 bytes (union con MOUSEINPUT correcta)",
-          hasattr(injector, "open_console") and hasattr(injector, "type_text")
-          and hasattr(injector, "press_enter")
-          and hasattr(injector, "close_console")
-          and hasattr(injector, "focus_window")
-          and size_input == 40
-          and gf.ctypes.sizeof(gf._KEYBDINPUT) == 24
-          and gf.ctypes.sizeof(gf._MOUSEINPUT) == 32,
-          f"sizeof(INPUT)={size_input}")
 
 
 # ---------------------------------------------------------------------------
@@ -1898,7 +1749,6 @@ def main() -> int:
     phase_salas_endpoint()
     phase_kill_tree()
     phase_wait_process_exit()
-    phase_autoconnect_pures()
     phase_verify_restore()
     phase_autosave()
     phase_medal_parts()

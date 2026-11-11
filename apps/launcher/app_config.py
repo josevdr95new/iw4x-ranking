@@ -31,14 +31,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         {"name": "Local",   "address": "127.0.0.1:28961"},
     ],
     "default_server": 0,
-    # Autoconexión determinista (fix "conecta cuando quiere"): tras lanzar
-    # el juego, un hilo verifica por netstat si conectó al server; si no,
-    # inyecta `connect ip:puerto` por la consola del juego. Red de
-    # seguridad del +connect intermitente de la build.
-    "autoconnect": True,
-    # Ventana de gracia (segundos, 5-60) al +connect del cmdline antes de
-    # inyectar por consola. Editable en launcher.config.json.
-    "autoconnect_wait_seconds": 20,
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo
     # para poder probar el polling de vinculación contra la API.
     "simulate_game": False,
@@ -263,29 +255,6 @@ class AppConfig:
     @property
     def simulate_game(self) -> bool:
         return bool(self.data.get("simulate_game", False))
-
-    @property
-    def autoconnect(self) -> bool:
-        """Autoconexión determinista tras lanzar el juego (default True).
-
-        Red de seguridad del ``+connect`` intermitente de la build: un
-        hilo verifica por netstat si el juego conectó al server y, si no,
-        inyecta ``connect ip:puerto`` por la consola. ``false`` →
-        comportamiento antiguo (solo el cmdline).
-        """
-        return bool(self.data.get("autoconnect", True))
-
-    @property
-    def autoconnect_wait_seconds(self) -> int:
-        """Ventana de gracia (s) al ``+connect`` del cmdline (5-60, def 20).
-
-        Basura fuera de rango → acotada al 5..60 del contrato; el 0 del
-        constructor interno de GameFlow solo existe en tests (inyección).
-        """
-        try:
-            return min(60, max(5, int(self.data.get("autoconnect_wait_seconds", 20))))
-        except (TypeError, ValueError):
-            return 20
 
     @property
     def cloud_save(self) -> bool:

@@ -723,10 +723,6 @@ class App(ctk.CTk):
             display_name=display_name,
             cloud_save=self.cfg.cloud_save,
             export_classes=self.cfg.export_classes,
-            # Autoconexión determinista (red de seguridad del +connect
-            # intermitente): valores del config (default: True / 20s).
-            autoconnect=self.cfg.autoconnect,
-            autoconnect_wait_seconds=self.cfg.autoconnect_wait_seconds,
             game_dir=os.path.dirname(self.cfg.game_path) if self.cfg.game_path else "",
             user_id=str((self.user or {}).get("id") or ""),
         )
