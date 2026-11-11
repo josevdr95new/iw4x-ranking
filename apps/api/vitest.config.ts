@@ -24,6 +24,9 @@ export default defineConfig({
       // Moderación nativa RCON: DESACTIVADA por defecto en tests (los tests de
       // moderación fijan RCON_PASSWORD/RCON_PORT por test contra un fake UDP).
       RCON_PASSWORD: '',
+      // Multi-sala: desactivada por defecto en tests (los tests de salas fijan
+      // RCON_SALAS por-test con los puertos efímeros de sus FakeRconServer).
+      RCON_SALAS: '',
       RCON_BANS_FILE: '',
       RCON_SPACING_MS: '15',
       RCON_RESPONSE_TIMEOUT_MS: '150',

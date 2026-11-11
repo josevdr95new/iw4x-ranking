@@ -35,9 +35,14 @@ import { SKILL, botDecayFactor, clampAndBonus, clampElo, killEloDelta, round2, s
  * histórico completo (kills + bonus) → mismo skill final.
  */
 
-const SKILL_EVENT_BATCH = 2_000;
+const SKILL_EVENT_BATCH = 200;
 /** Los bonus son ~3 por partida: un lote pequeño basta. */
-const MATCH_BONUS_BATCH = 500;
+const MATCH_BONUS_BATCH = 100;
+// NOTA (deploy 2026-11-11): los límites de lote 200/100 son un MOD DE
+// PRODUCCIÓN del LXC (commit quirúrgico previo al cambio de bots; lotes
+// pequeños reducen la contención de locks de SQLite bajo carga). Se conservan
+// en el merge: la matemática ELO es batch-independiente (clamp/redondeo
+// inline por evento), así que el tamaño de lote solo afecta al rendimiento.
 
 export interface SkillProcessResult {
   /** Eventos que se marcaron como procesados (incluye no-kill, teamkill y bonus). */
@@ -237,7 +242,13 @@ async function processBatch(batch: SkillEvent[]): Promise<void> {
     const row = rowByGuid.get(guid);
     const newElo = clampRound(elo.get(guid) ?? SKILL.START);
     if (row === undefined) {
-      // GUID huérfano (evento insertado sin Player): se crea solo con el ELO actual.
+      // GUID huérfano (evento insertado sin Player): se crea solo con el ELO
+      // actual. EXCEPCIÓN BOTS (2026-11-11): un guid del rango 0xb07… JAMÁS se
+      // crea aquí — los bots ya no tienen Player row (cero estadística de bot)
+      // y crearles fila re-introduciría bots en la DB. Su ELO (default
+      // SKILL.START=1000 si no hay Player) vive SOLO en memoria para calcular
+      // el delta del HUMANO; el bot NO acumula skill.
+      if (isBotGuid(guid)) continue;
       operations.push(
         prisma.player.create({
           data: { guid, name: 'unknown', skillElo: newElo, skill: clampAndBonus(newElo, 0) },

@@ -114,7 +114,7 @@ describe('alias durante la ingesta del games_mp.log', () => {
     expect(await prisma.playerAlias.count()).toBe(2);
   });
 
-  it('BOTS incluidos: J y K de botN (guid mapeado) crean sus alias por el mismo funnel', async () => {
+  it('BOTS excluidos (2026-11-11): J y K de botN NO crean alias del bot; el humano sí', async () => {
     const BOT5 = BigInt('0xb07000000000005').toString(10);
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -123,9 +123,11 @@ describe('alias durante la ingesta del games_mp.log', () => {
     ]);
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(result.ok).toBe(true);
-    const laupetin = await prisma.playerAlias.findUnique({ where: { guid_name: { guid: BOT5, name: 'Laupetin' } } });
-    expect(laupetin?.occurrences).toBe(2); // J + K atacante
-    expect((await prisma.playerAlias.findUnique({ where: { guid_name: { guid: DEC_A, name: 'Alpha' } } }))?.occurrences).toBe(1); // solo K como víctima (sin J previa)
+    // Cero alias del bot (sin Player row, la FK de PlayerAlias lo impediría igual).
+    expect(await prisma.playerAlias.findUnique({ where: { guid_name: { guid: BOT5, name: 'Laupetin' } } })).toBeNull();
+    expect(await prisma.playerAlias.count({ where: { guid: BOT5 } })).toBe(0);
+    // El humano del evento conserva su alias (K como killer, sin J previa).
+    expect((await prisma.playerAlias.findUnique({ where: { guid_name: { guid: DEC_A, name: 'Alpha' } } }))?.occurrences).toBe(1);
   });
 
   it('K con víctima world (sin guid) → SOLO alias del atacante, nunca "world"', async () => {

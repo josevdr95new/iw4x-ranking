@@ -72,8 +72,12 @@ export interface PlayerAliasUpsert {
  * Upsert de un alias (guid, name): existe → lastSeenAt=max, lastServer si viene,
  * occurrences+1; no existe → crea con firstSeenAt=lastSeenAt=when.
  * Los nombres vacíos/'unknown' se ignoran (no aportan identidad).
+ * BOTS (2026-11-11): los guids del rango 0xb07… NUNCA crean alias — los bots
+ * ya no tienen Player row (cero estadística de bot) y PlayerAlias tiene FK a
+ * Player: crear un alias de bot fallaría y re-crearía identidad de bot.
  */
 export async function upsertPlayerAlias(input: PlayerAliasUpsert): Promise<boolean> {
+  if (isBotGuid(input.guid)) return false;
   if (isMeaninglessName(input.name)) return false;
   await prisma.playerAlias.upsert({
     where: { guid_name: { guid: input.guid, name: input.name } },
@@ -410,7 +414,12 @@ export async function rebuildAliases(options: { logPath?: string | null }): Prom
         continue;
       }
       if (!event || event === 'ignored') continue;
+      // BOTS (2026-11-11): sus pares (guid, name) del log se DESCARTAN — los
+      // bots no tienen Player row (FK de PlayerAlias) ni alias (cero
+      // estadística de bot). Sin este skip, el create de un alias de bot
+      // fallaría por FK.
       if (event.kind === 'connect') {
+        if (isBotGuid(event.guid)) continue;
         if (!isMeaninglessName(event.name)) {
           const key = `${event.guid}\u0000${event.name}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -418,12 +427,18 @@ export async function rebuildAliases(options: { logPath?: string | null }): Prom
       } else if (event.kind === 'kill') {
         // Semántica de esta build: killerName (2º bloque) y victimName (1er bloque).
         // A los efectos de alias el rol no importa: ambos participantes cuentan.
-        if (!isMeaninglessName(event.killerName ?? '')) {
+        const killerIsBot = event.killerGuid !== null && isBotGuid(event.killerGuid);
+        if (!killerIsBot && !isMeaninglessName(event.killerName ?? '')) {
           const key = `${event.killerGuid}\u0000${event.killerName}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
         // Víctima "world" no tiene guid (killerGuid null) → skip.
-        if (event.victimGuid !== event.killerGuid && event.victimName && !isMeaninglessName(event.victimName)) {
+        if (
+          !isBotGuid(event.victimGuid) &&
+          event.victimGuid !== event.killerGuid &&
+          event.victimName &&
+          !isMeaninglessName(event.victimName)
+        ) {
           const key = `${event.victimGuid}\u0000${event.victimName}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }

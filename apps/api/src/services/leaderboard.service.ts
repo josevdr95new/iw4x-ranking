@@ -15,6 +15,13 @@ import { SKILL } from './skill/elo.js';
  * VECES ("admin" con 14 kills + "admin" con 40 kills). La identidad es la
  * CUENTA (User): el leaderboard agrupa por cuenta y NUNCA borra links/players.
  *
+ * BOTS (2026-11-11, decisión del dueño): los bots DEJARON DE EXISTIR como
+ * jugadores en la DB (sin Player row: ingesta no los crea, cleanup los borró).
+ * Por tanto NO PUEDEN aparecer aquí por construcción. El query param
+ * `includeBots` SIGUE ACEPTÁNDOSE por compatibilidad con la web, pero se
+ * IGNORA: bots nunca aparecen. (Defensa en profundidad: loadAccountRows además
+ * filtra isBot=false, así una fila de bot huérfana jamás rankea.)
+ *
  * Contrato de agregación (documentado en docs/API.md):
  *  - Una fila por User con al menos 1 guid vinculado (humano). Los guids
  *    SIN cuenta no rankean (ranked = con cuenta; con exigir-launcher los
@@ -30,11 +37,10 @@ import { SKILL } from './skill/elo.js';
  *  - `guid` = el "guid primario" de la cuenta: el de MAYOR skill (empate:
  *    mayor kills, luego guid menor) — mantiene el shape (la web navega al
  *    perfil por guid) sin exponer preferencia por ninguna PC.
- *  - `linked` SIEMPRE true en filas de cuenta; los bots (includeBots=true)
- *    siguen apareciendo per-guid con linked=false (los bots no son cuentas).
+ *  - `linked` SIEMPRE true (todas las filas nacen de un AccountLink).
  *  - `rank` = posición GLOBAL de la CUENTA entre la población rankeada
- *    (cuentas + bots si includeBots), kills desc / displayName asc,
- *    independiente de búsqueda/filtros/paginación.
+ *    (cuentas), kills desc / displayName asc, independiente de
+ *    búsqueda/filtros/paginación.
  */
 
 export interface LeaderboardEntry {
@@ -82,7 +88,7 @@ export interface LeaderboardResponse {
   players: LeaderboardEntry[];
 }
 
-/** Fila intermedia de agregación por cuenta (antes de orden/paginación). */
+/** Fila de agregación por cuenta (antes de orden/paginación). */
 interface AccountAgg {
   userId: number;
   guid: string;
@@ -101,21 +107,8 @@ interface AccountAgg {
   eloQualified: boolean;
 }
 
-/** Fila de bot (includeBots=true): per-guid, sin cuenta. */
-interface BotAgg {
-  guid: string;
-  name: string;
-  kills: number;
-  deaths: number;
-  timePlayed: number;
-  connections: number;
-  skill: number;
-  headshots: number;
-  level: number | null;
-  lastConnection: Date | null;
-}
-
-type RankableRow = ({ kind: 'account'; agg: AccountAgg } | { kind: 'bot'; agg: BotAgg }) & { rank: number };
+/** Fila rankeable. Desde 2026-11-11 SOLO cuentas: los bots no existen en DB. */
+type RankableRow = { kind: 'account'; agg: AccountAgg } & { rank: number };
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
@@ -238,40 +231,10 @@ function compareText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-async function loadBotRows(): Promise<BotAgg[]> {
-  const bots = await prisma.player.findMany({
-    where: { isBot: true },
-    select: {
-      guid: true,
-      name: true,
-      kills: true,
-      deaths: true,
-      timePlayed: true,
-      connections: true,
-      skill: true,
-      headshots: true,
-      saveLevel: true,
-      lastConnection: true,
-    },
-  });
-  return bots.map((bot) => ({
-    guid: bot.guid,
-    name: bot.name,
-    kills: bot.kills,
-    deaths: bot.deaths,
-    timePlayed: bot.timePlayed,
-    connections: bot.connections,
-    skill: bot.skill,
-    headshots: bot.headshots,
-    level: bot.saveLevel ?? null,
-    lastConnection: bot.lastConnection,
-  }));
-}
-
 /**
- * Posición global (kills desc, empate name asc) sobre la población rankeada:
- * cuentas (+ bots si includeBots). Asigna ranks SECUENCIALES (1,2,3…) igual
- * que el ROW_NUMBER anterior: sin saltos por empate.
+ * Posición global (kills desc, empate name asc) sobre la población rankeada
+ * (SOLO cuentas: los bots no existen en DB). Asigna ranks SECUENCIALES
+ * (1,2,3…) igual que el ROW_NUMBER anterior: sin saltos por empate.
  */
 function assignGlobalRanks(rows: RankableRow[]): void {
   const ordered = [...rows].sort(
@@ -302,35 +265,30 @@ function skillRanksForAccounts(accounts: AccountAgg[]): Map<number, number> {
 export async function getLeaderboard(query: unknown): Promise<LeaderboardResponse> {
   const q = parseWith(leaderboardQuerySchema, query ?? {});
   const search = q.search?.toLowerCase() ?? null;
+  // includeBots (si vino) se ACEPTA pero se IGNORA: los bots no tienen Player
+  // rows (decisión 2026-11-11) → la query solo ve cuentas. Compat web.
 
-  const [accountRows, botRows] = await Promise.all([
-    loadAccountRows(),
-    q.includeBots ? loadBotRows() : Promise.resolve([] as BotAgg[]),
-  ]);
+  const accountRows = await loadAccountRows();
 
-  const all: RankableRow[] = [
-    ...accountRows.map((agg) => ({ kind: 'account' as const, agg, rank: 0 })),
-    ...botRows.map((agg) => ({ kind: 'bot' as const, agg, rank: 0 })),
-  ];
+  const all: RankableRow[] = accountRows.map((agg) => ({ kind: 'account' as const, agg, rank: 0 }));
 
   // Rank global SIEMPRE sobre la población completa (búsqueda/filtros no afectan).
   assignGlobalRanks(all);
 
   // globalRank por SKILL solo hace falta para las LEYENDAS (tier 8, skill ≥
-  // MEDAL_LEGEND_MIN_SKILL): población = cuentas ELO-calificadas (los bots
-  // NUNCA rankean por skill).
+  // MEDAL_LEGEND_MIN_SKILL): población = cuentas ELO-calificadas.
   const legendAccounts = accountRows.filter((account) => account.skill >= MEDAL_LEGEND_MIN_SKILL);
   const skillRanks =
     legendAccounts.length > 0 ? skillRanksForAccounts(accountRows) : new Map<number, number>();
 
   // Búsqueda por displayName de cuenta Y por nick de cualquier guid vinculado
-  // ("pepe" encuentra la cuenta aunque la fila sea por cuenta). Bots: por nick.
+  // ("pepe" encuentra la cuenta aunque la fila sea por cuenta).
   const matchesSearch = (row: RankableRow): boolean => {
     if (search === null) return true;
     if (row.agg.name.toLowerCase().includes(search)) return true;
-    return row.kind === 'account' && row.agg.nickNames.some((nick) => nick.toLowerCase().includes(search));
+    return row.agg.nickNames.some((nick) => nick.toLowerCase().includes(search));
   };
-  // minMatches sobre conexiones AGREGADAS (cuentas) o propias (bots).
+  // minMatches sobre conexiones AGREGADAS de la cuenta.
   const matchesMin = (row: RankableRow): boolean => row.agg.connections >= q.minMatches;
 
   const filtered = all.filter((row) => matchesSearch(row) && matchesMin(row));
@@ -388,11 +346,8 @@ export async function getLeaderboard(query: unknown): Promise<LeaderboardRespons
       headshots: row.agg.headshots,
       level: row.agg.level,
       lastConnection: row.agg.lastConnection?.toISOString() ?? null,
-      linked: row.kind === 'account',
-      medal:
-        row.kind === 'account'
-          ? medalFor(row.agg.skill, skillRanks.get(row.agg.userId) ?? null)
-          : medalFor(row.agg.skill, null), // bots: NUNCA en la población ELO
+      linked: true, // todas las filas son cuentas (los bots no existen en DB)
+      medal: medalFor(row.agg.skill, skillRanks.get(row.agg.userId) ?? null),
     })),
   };
 }

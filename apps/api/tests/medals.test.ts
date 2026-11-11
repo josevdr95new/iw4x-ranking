@@ -130,7 +130,7 @@ async function seedSkillFixture(): Promise<void> {
     await prisma.accountLink.create({ data: { userId: user.id, guid: row.guid } });
   }
   // Bot (rango 0xb07…): skill alto, NUNCA en la población del rank por skill
-  // y NUNCA es cuenta (solo aparece con includeBots=true, per-guid).
+  // y (desde 2026-11-11) NUNCA aparece en el leaderboard: sin Player row.
   const botGuid = BigInt('0xb07000000000042').toString(10);
   await prisma.player.create({
     data: { guid: botGuid, name: 'BotFortyTwo', isBot: true, kills: 500, skill: 2500, skillElo: 2500, connections: 1 },
@@ -220,14 +220,14 @@ describe('medal en la superficie HTTP', () => {
     expect(soldado.medal).toMatchObject({ tier: 2, stars: 2, globalRank: null, eliteTop12: false });
   });
 
-  it('población del rank por skill SOLO-humanos: el bot con skill 2500 NO desplaza a nadie ni tiene rank', async () => {
+  it('población del rank por skill SOLO-humanos: el bot con skill 2500 NO aparece NI desplaza a nadie', async () => {
     const res = await req().get('/api/leaderboard?sort=skill&order=desc&pageSize=100&includeBots=true');
     expect(res.status).toBe(200);
     const body = res.body as { players: Array<{ guid: string; medal: { globalRank: number | null } }> };
 
-    const bot = body.players.find((p) => p.guid === BigInt('0xb07000000000042').toString(10))!;
-    expect(bot).toBeDefined();
-    expect(bot.medal.globalRank).toBeNull(); // excluido de la población ELO (isBot)
+    // BOTS IMPOSIBLES (2026-11-11): el bot sembrado no aparece ni con el param.
+    const botGuid = BigInt('0xb07000000000042').toString(10);
+    expect(body.players.find((p) => p.guid === botGuid)).toBeUndefined();
 
     // Sin el bot en la población, el mejor humano SIGUE siendo globalRank 1.
     const legend1 = body.players.find((p) => p.guid === guidAt(1))!;

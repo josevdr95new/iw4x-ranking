@@ -5,7 +5,7 @@ import { clampInt, GUID_PATTERN } from '../lib/validation.js';
 import { weaponDisplayName } from '../lib/weapons.js';
 import { MEDAL_LEGEND_MIN_SKILL, medalFor, type Medal } from '../lib/medals.js';
 import { computeDefaultRank, computeSkillGlobalRank } from './ranking.service.js';
-import { getPlayerAliases, type PlayerAliasDto } from './alias.service.js';
+import { getPlayerAliases, isBotGuid, type PlayerAliasDto } from './alias.service.js';
 import { MELEE_MOD } from './sync/gamelog.reader.js';
 import { getStoredPlayerClasses } from './classes.service.js';
 import type { ParsedLoadoutClass } from '../lib/classes/parse-console-log.js';
@@ -84,6 +84,12 @@ export interface KillEventDto {
   isKnife: boolean;
   server: string | null;
   opponentGuid: string;
+  /**
+   * Nombre del oponente de la kill: el DENORMALIZADO del log (nombre EXACTO al
+   * momento del evento, humano o bot) con fallback al Player actual (humanos).
+   * Los BOTS ya no tienen Player row → sin la denormalización su nombre en el
+   * feed sería null ("mataste a" sin quién).
+   */
   opponentName: string | null;
 }
 
@@ -245,8 +251,18 @@ function assertValidGuid(guidRaw: string): string {
   return guid;
 }
 
+/**
+ * GUARD DE BOTS (2026-11-11): los bots ya NO existen como jugadores en la DB
+ * (sin Player row). Un guid del rango 0xb07… pide perfil/armas/mapas/historial
+ * → 404 idéntico a "no encontrado" (los bots no son jugadores rankeables).
+ */
+function assertNotBot(guid: string): void {
+  if (isBotGuid(guid)) throw Errors.playerNotFound(guid);
+}
+
 export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDto> {
   const guid = assertValidGuid(guidRaw);
+  assertNotBot(guid);
   const player = await getPlayerOrThrow(guid);
   const rank = await computeDefaultRank(player.kills, player.name);
 
@@ -331,7 +347,10 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
       isKnife: event.mod === MELEE_MOD,
       server: event.server,
       opponentGuid,
-      opponentName: nameByGuid.get(opponentGuid) ?? null,
+      // Feed con nombres denormalizados: "mataste a Lunarion" SIN Player row
+      // del bot (los bots ya no tienen una). Fallback: Player del oponente
+      // (humanos; también cubre eventos previos a las columnas de nombres).
+      opponentName: (isOrigin ? event.targetName : event.originName) ?? nameByGuid.get(opponentGuid) ?? null,
     };
   });
 
@@ -360,6 +379,7 @@ export async function getPlayerProfile(guidRaw: string): Promise<PlayerProfileDt
 
 export async function getPlayerHistory(guidRaw: string, daysRaw: unknown): Promise<PlayerHistoryDto> {
   const guid = assertValidGuid(guidRaw);
+  assertNotBot(guid);
   const days = clampInt(daysRaw, 1, 90, 30);
   const player = await getPlayerOrThrow(guid);
 

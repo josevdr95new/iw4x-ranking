@@ -492,6 +492,7 @@ describe('SyncState/cursor de log (LogIngestState)', () => {
  */
 const BOT5_DEC = BigInt('0xb07000000000005').toString(10);
 const BOT6_DEC = BigInt('0xb07000000000006').toString(10);
+const BOT8_DEC = BigInt('0xb07000000000008').toString(10); // "Lunarion" (feed denormalizado)
 
 const BOT_LINES = [
   '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -512,77 +513,72 @@ const BOT_LINES = [
   '  0:20 Q;bot5;15;Laupetin',
 ];
 
-describe('ingesta con BOTS (guid literal "botN")', () => {
-  it('crea Players de bots con nombre, cuenta kills/deaths en los 4 sentidos y cierra su sesión con Q', async () => {
+describe('ingesta con BOTS (guid literal "botN") — bots SIN existencia en DB (2026-11-11)', () => {
+  it('los bots NO crean Player/Session/alias NI acumulan stats; el HUMANO conserva kills/deaths/daño y los eventos llevan nombres denormalizados', async () => {
     writeLog(BOT_LINES);
     const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
 
     expect(result.ok).toBe(true);
-    expect(result.eventsSkipped).toBe(0); // ningún bot descartado por guid inválido
-    expect(result.killEventsSynced).toBe(3); // bot→bot, humano→bot, bot→humano
-    expect(result.linesParsed).toBe(10); // InitGame + 3 J + 5 K + Q
-    expect(result.sessionsOpened).toBe(3);
-    expect(result.sessionsClosed).toBe(1); // Q de bot5
+    expect(result.eventsSkipped).toBe(0); // ningún evento descartado por guid inválido
+    // KillEvents SOLO con ≥1 humano: humano→bot y bot→humano. La kill
+    // bot-vs-bot NO genera evento (no hay humano que acreditar).
+    expect(result.killEventsSynced).toBe(2);
+    expect(result.linesParsed).toBe(10); // InitGame + 3 J + 5 K + Q (los J de bot SÍ cuentan como parseadas)
+    expect(result.sessionsOpened).toBe(1); // SOLO Alpha (bots: sin Session)
+    expect(result.sessionsClosed).toBe(0); // el Q de bot5 no cierra nada
+    expect(result.aliasesUpserted).toBe(3); // J de Alpha + 2 K de Alpha (killer y víctima); bots: 0
 
-    const laupetin = await prisma.player.findUnique({ where: { guid: BOT5_DEC } });
-    const botsix = await prisma.player.findUnique({ where: { guid: BOT6_DEC } });
+    // CERO filas de bot: sin Player, sin Session, sin alias.
+    expect(await prisma.player.findUnique({ where: { guid: BOT5_DEC } })).toBeNull();
+    expect(await prisma.player.findUnique({ where: { guid: BOT6_DEC } })).toBeNull();
+    expect(await prisma.session.count({ where: { guid: { in: [BOT5_DEC, BOT6_DEC] } } })).toBe(0);
+    expect(await prisma.playerAlias.count({ where: { guid: { in: [BOT5_DEC, BOT6_DEC] } } })).toBe(0);
+
+    // HUMANO sin regresión: Alpha mató al bot y murió contra el bot; sus
+    // kills/deaths/daño cuentan IGUAL que antes (su progresión vs bots es lo
+    // importante para el dueño).
     const alpha = await prisma.player.findUnique({ where: { guid: DEC_A } });
-
-    // El J del bot creó el Player con SU nombre (guid mapeado, no 'unknown').
-    expect(laupetin?.name).toBe('Laupetin');
-    // Laupetin: 0 kills, 2 muertes (victima del headshot de BotSix + suicidio).
-    expect(laupetin?.kills).toBe(0);
-    expect(laupetin?.deaths).toBe(2);
-    expect(laupetin?.headshots).toBe(0);
-    expect(laupetin?.damageDealt).toBe(0);
-    expect(laupetin?.damageTaken).toBe(420); // 120 (headshot de BotSix) + 300 (suicidio)
-    expect(laupetin?.connections).toBe(1);
-    // Su sesión se cerró con Q.
-    const laupetinSessions = await prisma.session.findMany({ where: { guid: BOT5_DEC } });
-    expect(laupetinSessions).toHaveLength(1);
-    expect(laupetinSessions[0]?.end).not.toBeNull();
-
-    // BotSix: killer en 2 líneas (headshot a Laupetin + kill a Alpha), murió 2 veces.
-    expect(botsix?.name).toBe('BotSix');
-    expect(botsix?.kills).toBe(2);
-    expect(botsix?.deaths).toBe(2); // Alpha lo mató (0:12) + world (0:16)
-    expect(botsix?.headshots).toBe(1); // headshot sobre Laupetin
-    expect(botsix?.damageDealt).toBe(210); // 120 (headshot) + 90 (kill de Alpha)
-    expect(botsix?.damageTaken).toBe(200); // 100 (kill de Alpha) + 100 (world)
-
-    // HUMANO sin regresión: Alpha mató al bot y murió contra el bot, guid hex intacto.
     expect(alpha?.guid).toBe(DEC_A);
     expect(alpha?.kills).toBe(1);
     expect(alpha?.deaths).toBe(1);
     expect(alpha?.damageDealt).toBe(100);
     expect(alpha?.damageTaken).toBe(90);
 
-    // KillEvents: las 3 kills válidas (semántica DB stock: origin=killer, target=víctima).
+    // KillEvents con nombres DENORMALIZADOS del log (humano o bot): el feed
+    // puede mostrar "mataste a BotSix" sin Player row del bot.
     const events = await prisma.killEvent.findMany({ orderBy: [{ id: 'asc' }] });
-    expect(events).toHaveLength(3);
-    expect(events[0]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: BOT5_DEC, headshot: true, damage: 120, weapon: 'ak47', map: 'mp_rust', gametype: 'war' });
-    expect(events[1]).toMatchObject({ originGuid: DEC_A, targetGuid: BOT6_DEC, headshot: false, damage: 100, weapon: 'mp5k' });
-    expect(events[2]).toMatchObject({ originGuid: BOT6_DEC, targetGuid: DEC_A, headshot: false, damage: 90, weapon: 'ak74u' });
+    expect(events).toHaveLength(2);
+    // Alpha mata a BotSix: origin=humano, target=bot.
+    expect(events[0]).toMatchObject({
+      originGuid: DEC_A, targetGuid: BOT6_DEC, originName: 'Alpha', targetName: 'BotSix',
+      headshot: false, damage: 100, weapon: 'mp5k', map: 'mp_rust', gametype: 'war',
+    });
+    // BotSix mata a Alpha: origin=bot, target=humano.
+    expect(events[1]).toMatchObject({
+      originGuid: BOT6_DEC, targetGuid: DEC_A, originName: 'BotSix', targetName: 'Alpha',
+      headshot: false, damage: 90, weapon: 'ak74u',
+    });
 
-    // World (línea 4) y suicidio (línea 5) NO generaron evento.
-    expect(events.some((e) => e.targetGuid === '' )).toBe(false);
+    // Ni bot-vs-bot (línea 1), ni world/suicidio de bots (líneas 4 y 5) dejaron evento.
+    expect(events.some((e) => e.originGuid === BOT6_DEC && e.targetGuid === BOT5_DEC)).toBe(false);
+    expect(events.some((e) => e.targetGuid === '')).toBe(false);
 
-    // Sesiones: 3 abiertas por los J, solo la del bot cerrada por Q (las otras siguen en curso).
-    expect(await prisma.session.count()).toBe(3);
-    expect(await prisma.session.findFirst({ where: { guid: BOT6_DEC, end: null } })).not.toBeNull();
+    // Sesiones: solo la de Alpha (abierta en curso).
+    expect(await prisma.session.count()).toBe(1);
     expect(await prisma.session.findFirst({ where: { guid: DEC_A, end: null } })).not.toBeNull();
   });
 
-  it('es incremental con bots: re-ingesta no duplica y el guid del bot es estable', async () => {
+  it('es incremental con bots: re-ingesta no duplica, cero filas de bot y el guid del bot es estable', async () => {
     writeLog(BOT_LINES);
     await ingestGameLog(LOG_PATH, SERVER_LABEL);
     const second = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(second.killEventsSynced).toBe(0);
-    expect(await prisma.killEvent.count()).toBe(3);
-    expect(await prisma.player.count()).toBe(3);
+    expect(await prisma.killEvent.count()).toBe(2);
+    // SOLO el humano existe como Player (los bots no tienen fila).
+    expect(await prisma.player.count()).toBe(1);
 
-    // Misma partida tras un "reboot" del server (log nuevo, mismo bot5): MISMO guid.
-    // ESTA build: bot5 (1er bloque) es la VÍCTIMA de bot6 (2º bloque).
+    // Misma partida tras un "reboot" del server (log nuevo, mismo bot5): MISMO
+    // guid determinista, y de nuevo cero filas/eventos de bot-vs-bot.
     const fresh = [
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
       '  0:04 J;bot5;15;Laupetin',
@@ -591,16 +587,43 @@ describe('ingesta con BOTS (guid literal "botN")', () => {
     writeFileSync(LOG_PATH, fresh.map((l) => `${l}\n`).join(''), 'utf8');
     const reboot = await ingestGameLog(LOG_PATH, SERVER_LABEL);
     expect(reboot.ok).toBe(true);
-    expect(reboot.killEventsSynced).toBe(1);
+    expect(reboot.killEventsSynced).toBe(0); // bot-vs-bot: sin evento
+    expect(await prisma.player.count()).toBe(1); // sigue existiendo solo Alpha
+    expect(await prisma.playerAlias.count({ where: { guid: BOT5_DEC } })).toBe(0);
+  });
 
-    // El bot6 de "mañana" acumula sobre el perfil de "hoy" (mismo guid decimal);
-    // bot5 acumula DEATHS (aquí siempre es la víctima).
-    const botsix = await prisma.player.findUnique({ where: { guid: BOT6_DEC } });
-    expect(botsix?.name).toBe('BotSix');
-    expect(botsix?.kills).toBe(3); // 2 del primer log + 1 del segundo
-    const laupetin = await prisma.player.findUnique({ where: { guid: BOT5_DEC } });
-    expect(laupetin?.deaths).toBe(3); // 2 del primer log + 1 del segundo
-    expect(laupetin?.connections).toBe(2); // 1 conexión por "sesión de server"
+  it('HUMANO mata a bot: sus counters, alias y KillEvent denormalizado quedan intactos (progresión del dueño)', async () => {
+    writeLog([
+      '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
+      '  0:04 J;bot8;8;Lunarion',
+      `  0:05 J;${HEX_A};0;Alpha`,
+      `  0:10 K;bot8;8;allies;Lunarion;${HEX_A};0;axis;Alpha;mp5k;100;MOD_RIFLE_BULLET;head\n`,
+    ]);
+    const result = await ingestGameLog(LOG_PATH, SERVER_LABEL);
+    expect(result.ok).toBe(true);
+    expect(result.killEventsSynced).toBe(1);
+
+    const alpha = await prisma.player.findUniqueOrThrow({ where: { guid: DEC_A } });
+    expect(alpha.kills).toBe(1);
+    expect(alpha.headshots).toBe(1); // hitloc head: headshot ACREDITADO al humano
+    expect(alpha.damageDealt).toBe(100);
+
+    // Alias del humano: UNA fila (guid,'Alpha') con 2 apariciones (J + K);
+    // el bot no tiene alias ni Player.
+    expect(await prisma.playerAlias.count({ where: { guid: DEC_A } })).toBe(1);
+    expect(await prisma.playerAlias.count({ where: { guid: BOT8_DEC } })).toBe(0);
+
+    // El evento lleva el nombre del bot para el feed.
+    const event = await prisma.killEvent.findFirstOrThrow();
+    expect(event).toMatchObject({ originGuid: DEC_A, targetGuid: BOT8_DEC, originName: 'Alpha', targetName: 'Lunarion' });
+
+    // Y el FEED del perfil resuelve "mataste a Lunarion" SIN Player row del bot.
+    await prisma.session.deleteMany(); // limpiar para no afectar otros tests
+    const res = await req().get(`/api/players/${DEC_A}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { recentEvents: Array<{ opponentGuid: string; opponentName: string | null }> };
+    expect(body.recentEvents).toHaveLength(1);
+    expect(body.recentEvents[0]).toMatchObject({ opponentGuid: BOT8_DEC, opponentName: 'Lunarion' });
   });
 });
 
@@ -687,15 +710,15 @@ describe('FIXTURES REALES de esta build: víctima-primero (regresión de formato
     expect(admin?.headshots).toBe(1); // …y el headshot
     expect(admin?.deaths).toBe(0);
 
-    const bot4 = await prisma.player.findUnique({ where: { guid: RBOT4_DEC } });
-    expect(bot4?.deaths).toBe(1); // la VÍCTIMA (1er bloque) suma la muerte
-    expect(bot4?.kills).toBe(0);
-    expect(bot4?.damageTaken).toBe(55);
+    // La víctima bot4 NO tiene Player row (2026-11-11: cero estadística de bot).
+    expect(await prisma.player.findUnique({ where: { guid: RBOT4_DEC } })).toBeNull();
 
     const event = await prisma.killEvent.findFirstOrThrow();
     expect(event).toMatchObject({
       originGuid: ADMIN_DEC, // semántica DB stock: origin = killer
       targetGuid: RBOT4_DEC, // target = víctima
+      originName: 'admin', // denormalizados: nombre del log (feed sin Player del bot)
+      targetName: '/dev/console',
       headshot: true,
       hitloc: 'head',
       weapon: 'ump45_eotech_mp',
@@ -737,7 +760,17 @@ describe('FIXTURES REALES de esta build: víctima-primero (regresión de formato
     // Los dos nombres del dueño quedan como ALIASES del MISMO guid (no players nuevos).
     const adminAliases = await prisma.playerAlias.findMany({ where: { guid: ADMIN_DEC } });
     expect(adminAliases.map((a) => a.name).sort()).toEqual(['admin', 'pollacaballo']);
-    expect(await prisma.player.count()).toBe(4); // Mandango + dueño + bot5 + bot8 (world no crea player)
+    // SOLO humanos: Mandango + dueño (bot5/bot8 ya NO tienen Player row).
+    expect(await prisma.player.count()).toBe(2);
+    // La kill del dueño contra bot5 quedó con el nombre del bot denormalizado;
+    // su suicidio (19:30, targetGuid='') también sale aquí como origin.
+    const ownerEvents = await prisma.killEvent.findMany({ where: { originGuid: ADMIN_DEC } });
+    expect(ownerEvents).toHaveLength(2); // kill 3:04 contra bot5 + suicidio 19:30
+    const botKill = ownerEvents.find((event) => event.targetGuid !== '');
+    expect(botKill).toMatchObject({ targetGuid: RBOT5_DEC, targetName: '/dev/../', originName: 'pollacaballo' });
+    // Y la muerte del dueño a manos de bot8 (3:17) lleva los dos nombres.
+    const deathByBot = await prisma.killEvent.findFirstOrThrow({ where: { targetGuid: ADMIN_DEC } });
+    expect(deathByBot).toMatchObject({ originGuid: RBOT8_DEC, originName: '/dev/full', targetName: 'admin' });
   });
 
   it('expone headshots + hsRatio (ratio 2 dec) en el perfil; hsRatio es null con 0 kills', async () => {
@@ -1029,7 +1062,7 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −2', () => {
     expect(processed.skillProcessed).toBe(true);
   });
 
-  it('BOT que muere por world/suicidio: SOLO counters (deaths++/daño), NINGÚN evento ni skill −2', async () => {
+  it('BOT que muere por world/suicidio: NADA (sin counters, sin Player, sin evento)', async () => {
     const BOT6 = BigInt('0xb07000000000006').toString(10);
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
@@ -1042,16 +1075,10 @@ describe('world/suicidio → KillEvent (targetGuid="") + skill −2', () => {
     expect(result.killEventsSynced).toBe(0); // bots excluidos: sin eventos
     expect(await prisma.killEvent.count()).toBe(0);
 
-    // Los counters del bot se mantienen EXACTAMENTE como antes del fix.
-    const bot = await prisma.player.findUniqueOrThrow({ where: { guid: BOT6 } });
-    expect(bot.deaths).toBe(2); // world + suicidio
-    expect(bot.damageTaken).toBe(400); // 100 + 300
-    expect(bot.kills).toBe(0);
-
-    // El skill del bot NO recibe la pérdida world (queda en el START inicial).
-    await processSkillUpdates();
-    const after = await prisma.player.findUniqueOrThrow({ where: { guid: BOT6 } });
-    expect(after.skillElo).toBe(SKILL.START);
+    // CERO existencia del bot en la DB (2026-11-11): ni Player con counters.
+    expect(await prisma.player.count()).toBe(0);
+    expect(await prisma.player.findUnique({ where: { guid: BOT6 } })).toBeNull();
+    expect(await prisma.session.count()).toBe(0); // ni sesión (el J del bot no abre)
   });
 
   it('RECOMPUTE determinista con eventos world: replay desde cero → mismo skill final', async () => {

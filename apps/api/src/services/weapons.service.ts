@@ -4,11 +4,19 @@ import { parseWith } from '../middleware/validate.js';
 import { weaponsQuerySchema } from '../dto/weapons.dto.js';
 import type { WeaponsQuery } from '../dto/weapons.dto.js';
 import { GUID_PATTERN } from '../lib/validation.js';
+import { isBotGuid } from './alias.service.js';
 
 /**
  * Agregaciones por arma y por mapa sobre KillEvent.
  * Solo cuentan los eventos K almacenados (isKill=true, víctima válida):
  * los world/suicide y los D no generan evento (ver gamelog.reader).
+ *
+ * BOTS (2026-11-11): los bots NO tienen Player row (cero estadística de bot),
+ * así que los breakdowns por jugador responden 404 para un guid de bot.
+ * El ranking GLOBAL de armas agrega los KillEvent ya almacenados —incluidos
+ * los históricos con guids de bot, que el dueño mandó CONSERVAR (son las
+ * kills de humanos contra bots)—; una kill humana vs bot acredita al arma del
+ * HUMANO, que es lo que el ranking debe reflejar.
  */
 
 export interface WeaponRankingEntry {
@@ -130,6 +138,7 @@ export interface PlayerWeaponBreakdown {
 
 export async function getPlayerWeapons(guidRaw: string): Promise<PlayerWeaponBreakdown> {
   const guid = assertValidGuid(guidRaw);
+  if (isBotGuid(guid)) throw Errors.playerNotFound(guid); // bots: sin Player row ni perfil
   const player = await prisma.player.findUnique({ where: { guid }, select: { guid: true, name: true } });
   if (!player) throw Errors.playerNotFound(guid);
 
@@ -206,6 +215,7 @@ export interface PlayerMapsBreakdown {
 
 export async function getPlayerMaps(guidRaw: string): Promise<PlayerMapsBreakdown> {
   const guid = assertValidGuid(guidRaw);
+  if (isBotGuid(guid)) throw Errors.playerNotFound(guid); // bots: sin Player row ni perfil
   const player = await prisma.player.findUnique({ where: { guid }, select: { guid: true, name: true } });
   if (!player) throw Errors.playerNotFound(guid);
 

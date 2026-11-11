@@ -70,7 +70,10 @@ model Player {
   teamkills     Int         @default(0) // kills con ateam == vteam (fuente log)
   matchesPlayed Int         @default(0) // mapas distintos con actividad (eventos + sesiones, aprox)
   /// true si el guid viene del rango dedicado a bots (0xb07…, mapeo de "botN").
-  /// Set por la ingesta del log; bootstrap: npm run rebuild:aliases.
+  /// LEGADO/defensa en profundidad (2026-11-11): la ingesta YA NO crea filas de
+  /// bot (cero estadística de bot: sin Player, alias, sesiones ni skill) y el
+  /// cleanup (npm run cleanup:bots) borra las históricas. La columna queda para
+  /// filtros (leaderboard/ranking) y para el penal de moderación IAM.
   isBot        Boolean     @default(false)
   /// Progresión parseada del cloud save (iw4x.stat) de la cuenta vinculada
   /// (link primario). Campo inválido según sanity → null individual;
@@ -176,6 +179,14 @@ model KillEvent {
   id         Int      @id @default(autoincrement())
   originGuid String
   targetGuid String
+  /// Nombres DENORMALIZADOS del log (origin=killer, target=víctima; en
+  /// world/suicidio ambos = nombre de la víctima): permiten que el feed muestre
+  /// "mataste a Lunarion" SIN Player row del oponente — desde 2026-11-11 los
+  /// BOTS ya NO tienen fila en Player (cero estadística de bot) y sin estos
+  /// nombres su participación en kills de humanos sería anónima. Null en
+  /// eventos previos a la columna (fallback: lookup de Player, solo humanos).
+  originName String?
+  targetName String?
   isKill     Boolean  @default(true) // false = evento no letal en IW4MAdmin
   damage     Int      @default(0)
   weapon     String?  // arma base del log (ej. "mp5k_mp"); sin attachments

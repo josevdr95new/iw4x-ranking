@@ -60,11 +60,10 @@ import { prisma } from '../lib/prisma.js';
 import { LEVEL_XP_TABLE, levelFromXp } from '../lib/save-parser/parse-stat-blob.js';
 import { isBotGuid } from './alias.service.js';
 import {
-  getSharedRcon,
   hexGuidToDecimal,
-  isRconConfigured,
   stripColorCodes,
 } from '../lib/rcon/iw4x-rcon.js';
+import { getRconTargets, isModerationRconConfigured, type RconTarget } from '../lib/rcon/salas.js';
 import { getAntiUnlockAutokick } from './setting.service.js';
 
 /** XP máximo de la tabla de rangos (2516000 = L70 completo, listo para prestigio). */
@@ -340,26 +339,45 @@ export function getLiveStatsOverview(): { file: string | null; updatedAt: string
 
 // ── Kick anti-unlock (mismo patrón que el enforcer: tell + clientkick) ──────
 
-/** Busca el cid de un guid decimal conectado (bots/conectando excluidos). */
-async function findCidByGuid(guid: string): Promise<number | null> {
-  const status = await getSharedRcon().status();
-  for (const slot of status.players) {
-    if (slot.connecting || slot.isBot) continue;
-    const slotGuid = hexGuidToDecimal(slot.guid);
-    if (slotGuid === guid) return slot.cid;
+/**
+ * Busca el cid de un guid decimal conectado (bots/conectando excluidos) en
+ * TODAS las salas (RCON_SALAS) o en el server único (compat). Devuelve cada
+ * sala donde apareció con su cid.
+ */
+async function findCidsByGuid(guid: string): Promise<Array<{ target: RconTarget; cid: number }>> {
+  const matches: Array<{ target: RconTarget; cid: number }> = [];
+  for (const target of getRconTargets()) {
+    try {
+      const status = await target.client.status();
+      for (const slot of status.players) {
+        if (slot.connecting || slot.isBot) continue;
+        const slotGuid = hexGuidToDecimal(slot.guid);
+        if (slotGuid === guid) {
+          matches.push({ target, cid: slot.cid });
+          break; // una sala aporta a lo sumo un slot del guid
+        }
+      }
+    } catch (err) {
+      console.warn(`[livestats] anti-unlock: sala=${target.id} (${target.host}:${target.port}) sin status: ${errMessage(err)}`);
+    }
   }
-  return null;
+  return matches;
 }
 
 async function kickSuspicious(entry: LiveStatEntry, name: string): Promise<boolean> {
-  if (!isRconConfigured()) return false;
+  if (!isModerationRconConfigured()) return false;
   try {
-    const cid = await findCidByGuid(entry.guid);
-    if (cid === null) return false; // ya se fue: nada que kickear
-    await getSharedRcon().tell(cid, env.antiUnlockKickMsg);
-    await getSharedRcon().clientkick(cid);
-    console.log(`[livestats] anti-unlock: "${stripColorCodes(entry.name)}" (guid=${entry.guid}, cid=${cid}, xp=${entry.xp}) kickeado: stats modificados detectados.`);
-    return true;
+    const matches = await findCidsByGuid(entry.guid);
+    if (matches.length === 0) return false; // ya se fue: nada que kickear
+    let kicked = false;
+    // MULTI-SALA: kickea en TODAS las salas donde esté conectado.
+    for (const { target, cid } of matches) {
+      await target.client.tell(cid, env.antiUnlockKickMsg);
+      await target.client.clientkick(cid);
+      kicked = true;
+      console.log(`[livestats] anti-unlock: sala=${target.id} "${stripColorCodes(entry.name)}" (guid=${entry.guid}, cid=${cid}, xp=${entry.xp}) kickeado: stats modificados detectados.`);
+    }
+    return kicked;
   } catch (err) {
     console.warn(`[livestats] anti-unlock: fallo al kickear guid=${entry.guid} (${name}): ${errMessage(err)}`);
     return false;

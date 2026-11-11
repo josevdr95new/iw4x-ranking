@@ -1,6 +1,6 @@
 /**
  * ENFORCER de moderación nativa: worker por intervalo que garantiza las
- * penalidades de NUESTRA DB contra el server IW4x vía rcon.
+ * penalidades de NUESTRA DB contra EL/LOS server(s) IW4x vía rcon.
  *
  * ¿Por qué existe? El juego NO tiene tempban per-caso por minutos (el nativo
  * `tempbanclient` usa el dvar GLOBAL sv_kickBanTime) y el ban permanente solo
@@ -11,12 +11,16 @@
  *    de nuestra DB, hace `status` por rcon y clientkick a cualquier guid
  *    baneado que esté conectado (log discreto). Al expirar el tempban el
  *    jugador vuelve solo: la fila queda inactive y deja de kickearse.
+ *  - MULTI-SALA (env `RCON_SALAS`): itera TODAS las salas y kickea al guid en
+ *    cada sala donde esté conectado. Una sala caída no afecta a las demás.
+ *    Sin RCON_SALAS: server único de siempre (COMPAT total).
  *  - Nunca reintentos ciegos: los kicks del enforcer son writes de 1 intento.
- *  - Se arranca SOLO si RCON_PASSWORD está configurado y NODE_ENV != test.
+ *  - Se arranca SOLO si hay RCON (RCON_PASSWORD o RCON_SALAS) y NODE_ENV != test.
  */
 import { prisma } from '../lib/prisma.js';
 import { errMessage } from '../lib/errors.js';
-import { getSharedRcon, isRconConfigured, statusGuidDecimal, stripColorCodes, type StatusPlayer } from '../lib/rcon/iw4x-rcon.js';
+import { statusGuidDecimal, stripColorCodes, type StatusPlayer } from '../lib/rcon/iw4x-rcon.js';
+import { getRconTargets, isModerationRconConfigured } from '../lib/rcon/salas.js';
 import { normalizeDisplayName } from './alias.service.js';
 import { getLauncherOnly } from './setting.service.js';
 import { env } from '../config/env.js';
@@ -69,20 +73,27 @@ export async function runEnforcerTick(now: number = Date.now()): Promise<number>
     }
 
     let kicks = 0;
-    const status = await getSharedRcon().status();
-    for (const slot of status.players) {
-      const guid = slotGuid(slot);
-      if (guid === null) continue;
-      const penalty = wanted.get(guid);
-      if (!penalty) continue;
+    // MULTI-SALA: status + kicks por sala; una sala caída solo se loguea.
+    for (const target of getRconTargets()) {
       try {
-        await getSharedRcon().clientkick(slot.cid);
-        kicks += 1;
-        console.log(
-          `[enforcer] guid=${guid} (${penalty.offenderName ?? 'unknown'}) kickeado por ${penalty.type} activo (penalty#${penalty.id}).`,
-        );
+        const status = await target.client.status();
+        for (const slot of status.players) {
+          const guid = slotGuid(slot);
+          if (guid === null) continue;
+          const penalty = wanted.get(guid);
+          if (!penalty) continue;
+          try {
+            await target.client.clientkick(slot.cid);
+            kicks += 1;
+            console.log(
+              `[enforcer] sala=${target.id} guid=${guid} (${penalty.offenderName ?? 'unknown'}) kickeado por ${penalty.type} activo (penalty#${penalty.id}).`,
+            );
+          } catch (err) {
+            console.warn(`[enforcer] sala=${target.id} fallo al kickear guid=${guid} slot=${slot.cid}: ${errMessage(err)}`);
+          }
+        }
       } catch (err) {
-        console.warn(`[enforcer] fallo al kickear guid=${guid} slot=${slot.cid}: ${errMessage(err)}`);
+        console.warn(`[enforcer] sala=${target.id} (${target.host}:${target.port}) sin status: ${errMessage(err)}`);
       }
     }
     return kicks;
@@ -102,8 +113,8 @@ export async function runEnforcerTick(now: number = Date.now()): Promise<number>
  */
 export function startModerationEnforcer(intervalMs?: number): NodeJS.Timeout | null {
   if (process.env.NODE_ENV === 'test') return null;
-  if (!isRconConfigured()) {
-    console.log('[enforcer] moderación nativa desactivada: falta RCON_PASSWORD.');
+  if (!isModerationRconConfigured()) {
+    console.log('[enforcer] moderación nativa desactivada: falta RCON_PASSWORD/RCON_SALAS.');
     return null;
   }
   const interval = intervalMs ?? Number(process.env.RCON_ENFORCER_INTERVAL_MS ?? '30000');
@@ -146,31 +157,41 @@ export async function runLauncherOnlyTick(now: number = Date.now()): Promise<num
   try {
     const enabled = await getLauncherOnly();
     if (!enabled) return 0;
-    if (!isRconConfigured()) return 0;
+    if (getRconTargets().length === 0) return 0;
 
     const sessions = await prisma.playSession.findMany({ where: { expiresAt: { gt: new Date(now) } } });
     const byGuid = new Set(sessions.filter((s) => s.guid !== null).map((s) => s.guid as string));
     const byNick = new Set(sessions.map((s) => normalizeDisplayName(s.nick)).filter((n) => n !== ''));
 
-    const status = await getSharedRcon().status();
     const message = env.launcherOnlyKickMsg;
     let kicks = 0;
-    for (const slot of status.players) {
-      if (slot.connecting) continue; // gracia mientras conecta (CNCT/ZMBI)
-      if (slot.isBot) continue; // bots SIEMPRE exentos
-      const guid = statusGuidDecimal(slot);
-      const nick = normalizeDisplayName(stripColorCodes(slot.name));
-      const allowed = (guid !== null && byGuid.has(guid)) || (nick !== '' && byNick.has(nick));
-      if (allowed) continue;
+    // MULTI-SALA: las sesiones válidas (por guid o nick) cubren TODAS las
+    // salas; en cada una se kickea a los humanos sin sesión.
+    for (const target of getRconTargets()) {
+      let status;
       try {
-        await getSharedRcon().tell(slot.cid, message);
-        await getSharedRcon().clientkick(slot.cid);
-        kicks += 1;
-        console.log(
-          `[enforcer] launcher-only: slot=${slot.cid} "${stripColorCodes(slot.name)}" (guid=${guid ?? slot.guid}) kickeado: sin sesión de launcher activa.`,
-        );
+        status = await target.client.status();
       } catch (err) {
-        console.warn(`[enforcer] launcher-only: fallo al kickear slot=${slot.cid}: ${errMessage(err)}`);
+        console.warn(`[enforcer] launcher-only: sala=${target.id} (${target.host}:${target.port}) sin status: ${errMessage(err)}`);
+        continue;
+      }
+      for (const slot of status.players) {
+        if (slot.connecting) continue; // gracia mientras conecta (CNCT/ZMBI)
+        if (slot.isBot) continue; // bots SIEMPRE exentos
+        const guid = statusGuidDecimal(slot);
+        const nick = normalizeDisplayName(stripColorCodes(slot.name));
+        const allowed = (guid !== null && byGuid.has(guid)) || (nick !== '' && byNick.has(nick));
+        if (allowed) continue;
+        try {
+          await target.client.tell(slot.cid, message);
+          await target.client.clientkick(slot.cid);
+          kicks += 1;
+          console.log(
+            `[enforcer] launcher-only: sala=${target.id} slot=${slot.cid} "${stripColorCodes(slot.name)}" (guid=${guid ?? slot.guid}) kickeado: sin sesión de launcher activa.`,
+          );
+        } catch (err) {
+          console.warn(`[enforcer] launcher-only: sala=${target.id} fallo al kickear slot=${slot.cid}: ${errMessage(err)}`);
+        }
       }
     }
     return kicks;

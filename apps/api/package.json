@@ -19,6 +19,7 @@
     "promote:admin": "tsx src/scripts/promote-admin.ts",
     "seed:admin": "tsx scripts/seed-admin.ts",
     "db:clean": "tsx scripts/clean-testdata.ts",
+    "cleanup:bots": "tsx scripts/cleanup-bots.ts",
     "test": "vitest run",
     "postinstall": "prisma generate"
   },

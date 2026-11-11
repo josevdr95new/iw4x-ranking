@@ -7,6 +7,10 @@
  *
  *  - Upstream → rcon directo (lib/rcon/iw4x-rcon.ts): status/getinfo para leer,
  *    tell/clientkick/banClient/unbanClient para escribir (1 intento, sin retry).
+ *  - MULTI-SALA (env RCON_SALAS): las penalidades resuelven en qué sala está
+ *    el jugador (busca en TODAS) y aplican ahí; el unban barre todas las salas
+ *    (cada sala tiene su propio bans.json). El enforcer cubre las salas todas
+ *    (ver enforcer.service.ts). Sin RCON_SALAS: server único (COMPAT total).
  *  - Historial de penalidades → NUESTRA DB (modelo Penalty), ya NO la SQLite
  *    de IW4MAdmin.
  *  - Warn/kick aplican a players CONECTADOS (slot cid); tempban/ban funcionan
@@ -31,7 +35,9 @@ import {
   type InfoString,
   type RconStatus,
   type StatusPlayer,
+  type IW4XRcon,
 } from '../lib/rcon/iw4x-rcon.js';
+import { getRconTargets, isModerationRconConfigured, type RconTarget } from '../lib/rcon/salas.js';
 import { prisma } from '../lib/prisma.js';
 import { MAX_TEMPBAN_MINUTES, type IamClientsQuery, type IamLiveQuery, type IamPenaltiesQuery, type IamPenaltyInput, type IamPenaltyType } from '../dto/iam.dto.js';
 
@@ -69,10 +75,8 @@ async function withModerationErrors<T>(operation: () => Promise<T>): Promise<T> 
 
 // ── Identidad del server (id estable derivado de host:port) ────────────────
 
-/** Id numérico estable del server (host sin puntos + puerto). Ej: 127.0.0.1:28961 → 12700128961. */
-export function moderationServerId(): number {
-  const host = process.env.RCON_HOST?.trim() || '127.0.0.1';
-  const port = process.env.RCON_PORT?.trim() || '28961';
+/** Id numérico estable de un host:port (host sin puntos + puerto). Ej: 127.0.0.1:28961 → 12700128961. */
+export function serverIdForHostPort(host: string, port: number | string): number {
   const digitsOnly = host.replace(/\D+/g, '');
   const composed = Number(`${digitsOnly}${port}`);
   if (Number.isSafeInteger(composed) && composed > 0) return composed;
@@ -82,6 +86,60 @@ export function moderationServerId(): number {
     hash = (hash * 31 + ch.charCodeAt(0)) % 2_000_000_000;
   }
   return hash + 1;
+}
+
+/** Id numérico estable del server LEGACY (env RCON_HOST/RCON_PORT; modo compat). */
+export function moderationServerId(): number {
+  const host = process.env.RCON_HOST?.trim() || '127.0.0.1';
+  const port = process.env.RCON_PORT?.trim() || '28961';
+  return serverIdForHostPort(host, port);
+}
+
+// ── Targets multi-sala ─────────────────────────────────────────────────────
+
+/**
+ * Targets RCON activos; sin ninguno (ni RCON_PASSWORD ni RCON_SALAS) → 503
+ * MODERATION_NOT_CONFIGURED. Con RCON_SALAS: una entrada POR sala.
+ */
+function moderationTargetsOrThrow(): RconTarget[] {
+  const targets = getRconTargets();
+  if (targets.length === 0) {
+    throw new AppError(
+      503,
+      'MODERATION_NOT_CONFIGURED',
+      'La moderación nativa no está configurada: define RCON_PASSWORD (el del server.cfg del server IW4x) o RCON_SALAS (con el rcon_password de cada sala).',
+    );
+  }
+  return targets;
+}
+
+/** Una sala con su status ya leído. */
+interface SalaStatus {
+  target: RconTarget;
+  status: RconStatus;
+}
+
+/**
+ * Lee `status` de TODAS las salas EN PARALELO. Las salas caídas se saltan
+ * (warning en el log): la acción procede con las que respondan. Solo si
+ * NINGUNA responde lanza (→ 502 MODERATION_UNREACHABLE / 503 no configurado,
+ * comportamiento idéntico al server único de antes).
+ */
+async function readSalaStatuses(targets: RconTarget[]): Promise<SalaStatus[]> {
+  const settled = await Promise.allSettled(targets.map((target) => target.client.status()));
+  const entries: SalaStatus[] = [];
+  const errors: string[] = [];
+  settled.forEach((result, index) => {
+    const target = targets[index]!;
+    if (result.status === 'fulfilled') {
+      entries.push({ target, status: result.value });
+    } else {
+      errors.push(`[${target.id}] ${errMessage(result.reason)}`);
+    }
+  });
+  if (entries.length === 0 && errors.length > 0) throw new Error(errors.join(' | '));
+  if (errors.length > 0) console.warn(`[moderation] salas sin status (se saltan): ${errors.join(' | ')}`);
+  return entries;
 }
 
 // ── GET /api/admin/iam/status (diagnóstico; SIEMPRE 200) ───────────────────
@@ -103,10 +161,14 @@ export interface ModerationStatus {
   }>;
 }
 
-/** Diagnóstico del server rcon. Nunca explota 502: expone el error legible. */
+/**
+ * Diagnóstico: UNA entrada por sala configurada (o el server único). Nunca
+ * explota 502: expone el error legible. `reachable` = al menos una sala
+ * respondió; las caídas quedan en `error` (prefijadas con su id).
+ */
 export async function getModerationStatus(): Promise<ModerationStatus> {
   return withModerationErrors(async () => {
-    const configured = isRconConfigured();
+    const configured = isModerationRconConfigured();
     const status: ModerationStatus = {
       configured,
       reachable: false,
@@ -118,25 +180,41 @@ export async function getModerationStatus(): Promise<ModerationStatus> {
       status.error = 'RCON_PASSWORD no está configurado: la moderación nativa está deshabilitada.';
       return status;
     }
-    try {
-      const rcon = getSharedRcon();
-      const [info, live] = await Promise.all([rcon.getinfo(), rcon.status()]);
-      status.reachable = true;
-      status.servers = [
-        {
-          id: moderationServerId(),
-          name: info.hostname ?? '(sin hostname)',
-          game: 'IW4',
-          map: live.map ?? info.mapname ?? null,
-          gametype: info.gametype ?? null,
-          players: live.players.filter((player) => !player.connecting).length,
-          maxPlayers: Number(info.sv_maxclients ?? 0),
-          parser: 'IW4x RCON',
-        },
-      ];
-    } catch (err) {
-      status.error = errMessage(err);
+    const targets = getRconTargets();
+    const multi = targets.length > 1 || targets[0]?.fromSalasEnv === true;
+    const collected = await Promise.all(
+      targets.map(async (target, index) => {
+        try {
+          const [info, live] = await Promise.all([target.client.getinfo(), target.client.status()]);
+          return {
+            index,
+            ok: true as const,
+            entry: {
+              id: multi ? serverIdForHostPort(target.host, target.port) : moderationServerId(),
+              name: info.hostname ?? (multi ? target.name : '(sin hostname)'),
+              game: 'IW4',
+              map: live.map ?? info.mapname ?? null,
+              gametype: info.gametype ?? null,
+              players: live.players.filter((player) => !player.connecting).length,
+              maxPlayers: Number(info.sv_maxclients ?? 0),
+              parser: 'IW4x RCON',
+            },
+          };
+        } catch (err) {
+          return { index, ok: false as const, error: `[${target.id}] ${errMessage(err)}` };
+        }
+      }),
+    );
+    const errors: string[] = [];
+    for (const result of collected.sort((a, b) => a.index - b.index)) {
+      if (result.ok) {
+        status.reachable = true;
+        status.servers.push(result.entry);
+      } else {
+        errors.push(result.error);
+      }
     }
+    if (errors.length > 0) status.error = errors.join(' | ');
     return status;
   });
 }
@@ -144,15 +222,21 @@ export async function getModerationStatus(): Promise<ModerationStatus> {
 // ── Utilidades de targeting ────────────────────────────────────────────────
 
 export interface ResolvedTarget {
-  /** Slot (cid) si el target está conectado. */
+  /** Slot (cid) si el target está conectado (el PRIMERO encontrado; compat). */
   cid: number | null;
-  /** Fila de status si está conectado. */
+  /** Fila de status si está conectado (la PRIMERA encontrada; compat). */
   slot: StatusPlayer | null;
   /** Guid normalizado (decimal, o "botN" para bots). */
   guid: string;
   /** Nombre limpio (sin color codes) del objetivo. */
   name: string;
   isBot: boolean;
+  /**
+   * MULTI-SALA: TODAS las salas donde el objetivo está conectado AHORA (lo
+   * normal es 1; puede estar en 2 salas a la vez). Las acciones con slot
+   * (warn/kick/tempban/ban online) aplican en TODAS estas salas.
+   */
+  online: Array<{ target: RconTarget; slot: StatusPlayer }>;
 }
 
 function cleanName(raw: string): string {
@@ -176,11 +260,16 @@ function findSlotByCid(status: RconStatus, cid: number): StatusPlayer | undefine
 }
 
 /**
- * Resuelve el objetivo desde el status VIVO. Puede fallar con:
- *  - 404 MODERATION_TARGET_NOT_FOUND (clientId de Player inexistente)
- *  - 400 TARGET_NOT_ONLINE (warn/kick sin slot conectado)
+ * Resuelve el objetivo desde los status VIVOS de TODAS las salas. Puede fallar
+ * con:
+ *  - 404 MODERATION_TARGET_NOT_FOUND (clientId de Player inexistente / nombre
+ *    sin match exacto en ninguna sala)
+ *  - 400 TARGET_NOT_ONLINE (warn/kick sin slot conectado; se lanza por el
+ *    llamador cuando online queda vacío)
+ *  - 400 VALIDATION_ERROR (cid existente en varias salas a la vez / nombre
+ *    ambiguo)
  */
-async function resolveTarget(input: IamPenaltyInput, status: RconStatus): Promise<ResolvedTarget> {
+async function resolveTarget(input: IamPenaltyInput, entries: SalaStatus[]): Promise<ResolvedTarget> {
   if (input.clientId !== undefined) {
     const player = await prisma.player.findUnique({ where: { id: input.clientId } });
     if (!player) {
@@ -190,28 +279,52 @@ async function resolveTarget(input: IamPenaltyInput, status: RconStatus): Promis
         `No existe ningún jugador conocido con clientId ${input.clientId} (no está en la base del ranking).`,
       );
     }
-    const slot = findSlotByGuid(status, player.guid);
+    // MULTI-SALA: el mismo guid puede estar conectado en más de una sala.
+    const online: ResolvedTarget['online'] = [];
+    for (const entry of entries) {
+      const slot = findSlotByGuid(entry.status, player.guid);
+      if (slot) online.push({ target: entry.target, slot });
+    }
+    const first = online[0] ?? null;
     return {
-      cid: slot?.cid ?? null,
-      slot: slot ?? null,
+      cid: first?.slot.cid ?? null,
+      slot: first?.slot ?? null,
       guid: player.guid,
-      name: slot ? stripColorCodes(slot.name) : player.name,
-      isBot: player.isBot || (slot?.isBot ?? false),
+      name: first ? stripColorCodes(first.slot.name) : player.name,
+      isBot: player.isBot || (first?.slot.isBot ?? false),
+      online,
     };
   }
 
   if (input.cid !== undefined) {
-    const slot = findSlotByCid(status, input.cid);
-    if (!slot) {
+    const hits: ResolvedTarget['online'] = [];
+    for (const entry of entries) {
+      const slot = findSlotByCid(entry.status, input.cid);
+      if (slot) hits.push({ target: entry.target, slot });
+    }
+    if (hits.length === 0) {
       throw Errors.validation(`El slot ${input.cid} no tiene ningún jugador conectado (o sigue conectando).`);
     }
+    if (hits.length > 1) {
+      throw Errors.validation(
+        `El slot ${input.cid} tiene jugadores conectados en ${hits.length} salas (${hits
+          .map((hit) => hit.target.id)
+          .join(', ')}): ambiguo — envía clientId o clientName para desambiguar.`,
+      );
+    }
+    const slot = hits[0]!.slot;
     const guid = slot.isBot ? slot.guid.toLowerCase() : statusGuidDecimal(slot) ?? slot.guid;
-    return { cid: slot.cid, slot, guid, name: stripColorCodes(slot.name), isBot: slot.isBot };
+    return { cid: slot.cid, slot, guid, name: stripColorCodes(slot.name), isBot: slot.isBot, online: hits };
   }
 
-  // clientName: match EXACTO (limpio) contra los players EN VIVO.
+  // clientName: match EXACTO (limpio) contra los players EN VIVO de TODAS las salas.
   const wanted = cleanName(input.clientName ?? '');
-  const exacts = findSlotByName(status, wanted);
+  const exacts: ResolvedTarget['online'] = [];
+  for (const entry of entries) {
+    for (const slot of findSlotByName(entry.status, wanted)) {
+      exacts.push({ target: entry.target, slot });
+    }
+  }
   if (exacts.length === 0) {
     throw new AppError(
       404,
@@ -221,29 +334,30 @@ async function resolveTarget(input: IamPenaltyInput, status: RconStatus): Promis
   }
   if (exacts.length > 1) {
     throw Errors.validation(
-      `El nombre coincide con ${exacts.length} jugadores conectados (slots: ${exacts
-        .map((slot) => slot.cid)
-        .join(', ')}) — envía clientId o cid para desambiguar.`,
+      `El nombre coincide con ${exacts.length} jugadores conectados (salas: ${exacts
+        .map((hit) => hit.target.id)
+        .join(', ')}; slots: ${exacts.map((hit) => hit.slot.cid).join(', ')}) — envía clientId o cid para desambiguar.`,
     );
   }
-  const slot = exacts[0]!;
+  const slot = exacts[0]!.slot;
   const guid = slot.isBot ? slot.guid.toLowerCase() : statusGuidDecimal(slot) ?? slot.guid;
-  return { cid: slot.cid, slot, guid, name: stripColorCodes(slot.name), isBot: slot.isBot };
+  return { cid: slot.cid, slot, guid, name: stripColorCodes(slot.name), isBot: slot.isBot, online: exacts };
 }
 
 /**
- * Anti-TOCTOU: ANTES de una escritura con slot, RE-LÉE status y verifica que
- * ese cid sigue teniendo el guid del objetivo. Si cambió → 409 CID_MISMATCH.
+ * Anti-TOCTOU: ANTES de una escritura con slot, RE-LÉE el status de ESA sala
+ * y verifica que ese cid sigue teniendo el guid del objetivo. Si cambió →
+ * 409 CID_MISMATCH.
  */
-async function verifySlotGuid(cid: number, expectedGuid: string): Promise<void> {
-  const fresh = await getSharedRcon().status();
+async function verifySlotGuid(client: IW4XRcon, salaId: string, cid: number, expectedGuid: string): Promise<void> {
+  const fresh = await client.status();
   const slot = findSlotByCid(fresh, cid);
   const freshGuid = slot ? (slot.isBot ? slot.guid.toLowerCase() : statusGuidDecimal(slot)) : null;
   if (!slot || freshGuid !== expectedGuid) {
     throw new AppError(
       409,
       'CID_MISMATCH',
-      `El slot ${cid} ya no corresponde al objetivo (cambió el jugador en ese slot entre la lectura y la acción): ` +
+      `En la sala ${salaId} el slot ${cid} ya no corresponde al objetivo (cambió el jugador en ese slot entre la lectura y la acción): ` +
         'no se envió ningún comando. Reintenta: el target se re-resuelve contra el estado nuevo.',
     );
   }
@@ -321,62 +435,78 @@ function tempbanExpiry(durationMinutes: number): Date {
  * Emite una penalidad NATIVA. Target por clientId (Player del ranking, sirve
  * offline para tempban/ban), por clientName (exacto, solo conectados) o por
  * cid (slot directo). El motivo es obligatorio (validado por zod).
+ *
+ * MULTI-SALA: el objetivo se busca en TODAS las salas (RCON_SALAS) y la
+ * acción se aplica en CADA sala donde esté conectado (normalmente una). Si no
+ * está conectado en ninguna: tempban/ban quedan SOLO en DB (el enforcer
+ * multi-sala los aplica al conectar); warn/kick → 400 TARGET_NOT_ONLINE.
  */
 export async function createPenalty(input: IamPenaltyInput, punisher?: PunisherInfo): Promise<ModerationPenaltyResult> {
   return withModerationErrors(async () => {
-    if (!isRconConfigured()) {
-      throw new AppError(
-        503,
-        'MODERATION_NOT_CONFIGURED',
-        'La moderación nativa no está configurada: define RCON_PASSWORD (el del server.cfg del server IW4x).',
-      );
-    }
-    const rcon = getSharedRcon();
-    const status = await rcon.status();
-    const target = await resolveTarget(input, status);
+    const targets = moderationTargetsOrThrow();
+    const entries = await readSalaStatuses(targets);
+    const target = await resolveTarget(input, entries);
     assertBotsAllowed(input.type, target.isBot);
+
+    const multi = targets.length > 1;
+    /** Prefijo de sala en el relé de comandos (solo multi-sala; compat sin cambio). */
+    const tag = (salaId: string): string => (multi ? `[${salaId}] ` : '');
 
     const reason = input.reason.replace(/[\r\n]+/g, ' ').trim();
     const output: string[] = [];
     let expiresAt: Date | null = null;
 
+    /**
+     * Aplica la acción con slot en TODAS las salas donde el target está
+     * online, con verificación anti-TOCTOU por sala (re-lee el status de ESA
+     * sala antes de escribir).
+     */
+    const applyOnline = async (
+      action: (client: IW4XRcon, cid: number) => Promise<string>,
+      describe: (cid: number) => string,
+    ): Promise<void> => {
+      for (const online of target.online) {
+        await verifySlotGuid(online.target.client, online.target.id, online.slot.cid, target.guid);
+        const reply = await action(online.target.client, online.slot.cid);
+        output.push(`${tag(online.target.id)}${describe(online.slot.cid)}`);
+        if (reply.length > 0) output.push(reply.trim());
+      }
+    };
+
     switch (input.type) {
       case 'warn': {
-        if (target.cid === null) throw targetNotOnline('warn');
-        await verifySlotGuid(target.cid, target.guid);
-        const reply = await rcon.tell(target.cid, reason);
-        output.push(`tell ${target.cid} "${reason}"`);
-        if (reply.length > 0) output.push(reply.trim());
+        if (target.online.length === 0) throw targetNotOnline('warn');
+        await applyOnline(
+          (client, cid) => client.tell(cid, reason),
+          (cid) => `tell ${cid} "${reason}"`,
+        );
         break;
       }
       case 'kick': {
-        if (target.cid === null) throw targetNotOnline('kick');
-        await verifySlotGuid(target.cid, target.guid);
-        const reply = await rcon.clientkick(target.cid);
-        output.push(`clientkick ${target.cid}`);
-        if (reply.length > 0) output.push(reply.trim());
+        if (target.online.length === 0) throw targetNotOnline('kick');
+        await applyOnline(
+          (client, cid) => client.clientkick(cid),
+          (cid) => `clientkick ${cid}`,
+        );
         break;
       }
       case 'tempban': {
         expiresAt = tempbanExpiry(input.durationMinutes ?? 60);
-        if (target.cid !== null) {
-          // ONLINE: kick inmediato con la razón; el enforcer re-kickea si vuelve.
-          await verifySlotGuid(target.cid, target.guid);
-          const reply = await rcon.clientkick(target.cid);
-          output.push(`clientkick ${target.cid} (tempban ${input.durationMinutes}m)`);
-          if (reply.length > 0) output.push(reply.trim());
-        }
+        // ONLINE (en alguna sala): kick inmediato con la razón; el enforcer
+        // multi-sala re-kickea si vuelve. OFFLINE en todas: solo DB.
+        await applyOnline(
+          (client, cid) => client.clientkick(cid),
+          (cid) => `clientkick ${cid} (tempban ${input.durationMinutes}m)`,
+        );
         break;
       }
       case 'ban': {
-        if (target.cid !== null) {
-          // ONLINE: banClient = permanente + persistente en bans.json del server.
-          await verifySlotGuid(target.cid, target.guid);
-          const reply = await rcon.banClient(target.cid);
-          output.push(`banClient ${target.cid}`);
-          if (reply.length > 0) output.push(reply.trim());
-        }
-        // OFFLINE: solo capa DB; el enforcer re-kickea al conectar.
+        // ONLINE: banClient = permanente + persistente en bans.json DE ESA sala.
+        // OFFLINE en todas: solo capa DB; el enforcer re-kickea al conectar.
+        await applyOnline(
+          (client, cid) => client.banClient(cid),
+          (cid) => `banClient ${cid}`,
+        );
         break;
       }
       default: {
@@ -424,22 +554,20 @@ export interface ModerationUnbanResult {
 }
 
 /**
- * Revoca el ban permanente (rcon `unbanClient guid <HEX>` → bans.json del
- * server) y marca nuestras Penalty activas del guid como revocadas.
+ * Revoca el ban permanente (rcon `unbanClient guid <HEX>` → bans.json de cada
+ * sala) y marca nuestras Penalty activas del guid como revocadas.
  * Acepta clientId (Player del ranking), guid hex/decimal o cid (slot conectado).
+ *
+ * MULTI-SALA: el unban se envía a TODAS las salas (best-effort por sala: si
+ * una está caída se anota en output y las demás igual se procesan). Solo si
+ * FALLAN TODAS se propaga el error (502/503).
  */
 export async function unbanPlayer(
   input: { clientId?: number; guid?: string; cid?: number },
   punisher?: PunisherInfo,
 ): Promise<ModerationUnbanResult> {
   return withModerationErrors(async () => {
-    if (!isRconConfigured()) {
-      throw new AppError(
-        503,
-        'MODERATION_NOT_CONFIGURED',
-        'La moderación nativa no está configurada: define RCON_PASSWORD (el del server.cfg del server IW4x).',
-      );
-    }
+    const targets = moderationTargetsOrThrow();
     let guid: string | null = null;
     let name: string | null = null;
     let offenderPlayerId: number | null = null;
@@ -456,11 +584,20 @@ export async function unbanPlayer(
       name = player.name;
       offenderPlayerId = player.id;
     } else if (input.cid !== undefined) {
-      const status = await getSharedRcon().status();
-      const slot = findSlotByCid(status, input.cid);
-      if (!slot) throw Errors.validation(`El slot ${input.cid} no tiene ningún jugador conectado.`);
-      guid = slot.isBot ? slot.guid.toLowerCase() : statusGuidDecimal(slot) ?? slot.guid;
-      name = stripColorCodes(slot.name);
+      const entries = await readSalaStatuses(targets);
+      let resolvedSlot: { status: StatusPlayer } | null = null;
+      for (const entry of entries) {
+        const slot = findSlotByCid(entry.status, input.cid);
+        if (slot) {
+          resolvedSlot = { status: slot };
+          break;
+        }
+      }
+      if (!resolvedSlot) throw Errors.validation(`El slot ${input.cid} no tiene ningún jugador conectado.`);
+      guid = resolvedSlot.status.isBot
+        ? resolvedSlot.status.guid.toLowerCase()
+        : statusGuidDecimal(resolvedSlot.status) ?? resolvedSlot.status.guid;
+      name = stripColorCodes(resolvedSlot.status.name);
     } else {
       throw Errors.validation('Debes indicar clientId, guid o cid para desbanear.');
     }
@@ -474,10 +611,22 @@ export async function unbanPlayer(
       throw Errors.validation(`El guid "${guid}" no es convertible a HEX para unbanClient.`);
     }
 
-    const rcon = getSharedRcon();
-    const reply = await rcon.unbanClient('guid', hex);
-    const output = [`unbanClient guid ${hex}`];
-    if (reply.length > 0) output.push(reply.trim());
+    const multi = targets.length > 1;
+    const output: string[] = [];
+    let lastError: unknown = null;
+    let okSalas = 0;
+    for (const target of targets) {
+      try {
+        const reply = await target.client.unbanClient('guid', hex);
+        output.push(`${multi ? `[${target.id}] ` : ''}unbanClient guid ${hex}`);
+        if (reply.length > 0) output.push(reply.trim());
+        okSalas += 1;
+      } catch (err) {
+        lastError = err;
+        output.push(`${multi ? `[${target.id}] ` : ''}unban fallo: ${errMessage(err)}`);
+      }
+    }
+    if (okSalas === 0 && targets.length > 0) throw lastError ?? new Error('unbanClient falló en todas las salas.');
 
     // Marca nuestras penalidades activas (ban + tempban) como revocadas.
     const revoked = await prisma.penalty.updateMany({
@@ -494,7 +643,7 @@ export async function unbanPlayer(
       guid,
       name: name ?? 'unknown',
       isBot: false,
-      reason: `unban de ${hex} (revocadas: ${revoked.count})`,
+      reason: `unban de ${hex} (salas ok: ${okSalas}/${targets.length}, revocadas: ${revoked.count})`,
       punisher: punisher ?? null,
     });
 
@@ -795,24 +944,39 @@ function playerState(player: StatusPlayer): string {
 }
 
 /**
- * Players conectados AHORA: status() + getinfo() combinados. clientId se
- * resuelve contra nuestra base por guid (decimal); `resolve=false` lo salta
- * (compatible con el flag que ya usaba la web).
+ * Players conectados AHORA en TODAS las salas (RCON_SALAS) o en el server
+ * único (compat): status() + getinfo() combinados por sala. Una sala caída
+ * aparece con online:false y players vacío (solo si CAEN TODAS lanza 502/503,
+ * comportamiento idéntico al server único). clientId se resuelve contra
+ * nuestra base por guid (decimal); `resolve=false` lo salta (compatible con
+ * el flag que ya usaba la web).
  */
 export async function getLivePlayers(querySpec: IamLiveQuery): Promise<ModerationLiveResult> {
   return withModerationErrors(async () => {
-    if (!isRconConfigured()) {
-      throw new AppError(
-        503,
-        'MODERATION_NOT_CONFIGURED',
-        'La moderación nativa no está configurada: define RCON_PASSWORD (el del server.cfg del server IW4x).',
-      );
-    }
-    const rcon = getSharedRcon();
-    const status = await rcon.status();
-    const info: InfoString = querySpec.resolve ? await rcon.getinfo() : {};
+    const targets = moderationTargetsOrThrow();
+    const multi = targets.length > 1;
 
-    const guids = status.players
+    const results = await Promise.all(
+      targets.map(async (target, index) => {
+        try {
+          const status = await target.client.status();
+          const info: InfoString = querySpec.resolve ? await target.client.getinfo() : {};
+          return { index, ok: true as const, target, status, info };
+        } catch (err) {
+          return { index, ok: false as const, target, error: errMessage(err) };
+        }
+      }),
+    );
+    results.sort((a, b) => a.index - b.index);
+
+    // Legacy (1 sala): si falló se propaga (502/503 como siempre). Multi:
+    // las salas caídas se degradan a online:false sin tumbar el endpoint.
+    if (results.every((result) => !result.ok)) {
+      throw new Error(results.map((result) => `[${result.target.id}] ${result.ok ? '' : result.error}`).join(' | '));
+    }
+
+    const guids = results
+      .flatMap((result) => (result.ok ? result.status.players : []))
       .filter((player) => !player.connecting && !player.isBot)
       .map((player) => statusGuidDecimal(player))
       .filter((guid): guid is string => guid !== null);
@@ -822,14 +986,26 @@ export async function getLivePlayers(querySpec: IamLiveQuery): Promise<Moderatio
     const idByGuid = new Map(known.map((player) => [player.guid, player.id]));
 
     return {
-      servers: [
-        {
-          id: moderationServerId(),
-          name: info.hostname ?? '(sin hostname)',
+      servers: results.map((result) => {
+        const baseId = multi ? serverIdForHostPort(result.target.host, result.target.port) : moderationServerId();
+        if (!result.ok) {
+          return {
+            id: baseId,
+            name: result.target.name,
+            online: false,
+            map: null,
+            gametype: null,
+            players: [],
+          };
+        }
+        const info: InfoString = result.info;
+        return {
+          id: baseId,
+          name: info.hostname ?? (multi ? result.target.name : '(sin hostname)'),
           online: true,
-          map: status.map ?? info.mapname ?? null,
+          map: result.status.map ?? info.mapname ?? null,
           gametype: info.gametype ?? null,
-          players: status.players.map((player) => {
+          players: result.status.players.map((player) => {
             const decimal = player.isBot || player.connecting ? null : statusGuidDecimal(player);
             return {
               name: player.name,
@@ -844,8 +1020,8 @@ export async function getLivePlayers(querySpec: IamLiveQuery): Promise<Moderatio
               state: playerState(player),
             };
           }),
-        },
-      ],
+        };
+      }),
     };
   });
 }

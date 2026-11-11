@@ -50,8 +50,15 @@ import { awardMatchBonus, type MatchPlayerTally } from '../skill/match-bonus.js'
  *
  * BOTS (`+spawnBot N`): el guid llega como token literal "botN" en CUALQUIERA
  * de los dos bloques y se mapea DETERMINISTA a un guid decimal del rango
- * dedicado 0xb07… (ver botGuidToDecimal). El perfil del bot acumula stats
- * entre reboots.
+ * dedicado 0xb07… (ver botGuidToDecimal). DESDE 2026-11-11 (decisión del
+ * dueño) los bots DEJAN DE EXISTIR como jugadores en la DB: NINGUNA línea con
+ * bot crea/upsertea Player, alias, Session ni skill del bot. LO QUE SÍ SE
+ * GUARDA: la parte HUMANA del evento — un humano que mata a un bot suma
+ * kills/headshots/daño/racha/ELO decayado, y un humano que muere contra un bot
+ * suma deaths/daño recibido (su KillEvent queda almacenado con los nombres
+ * DENORMALIZADOS originName/targetName para que el feed muestre "mataste a
+ * Lunarion" sin necesitar Player row del bot). Las kills bot-vs-bot NO
+ * generan KillEvent (no hay ningún humano involucrado: cero estadística).
  *
  * Extracción por evento K (almacenado en KillEvent): weapon, mod (MOD_MELEE =
  * cuchillada), damage, hitloc, headshot (hitloc ∈ head/helmet, se acredita al
@@ -75,7 +82,8 @@ import { awardMatchBonus, type MatchPlayerTally } from '../skill/match-bonus.js'
  * HUMANOS, con originGuid = víctima y targetGuid = '' (marcador de "sin
  * atacante"): el motor skill aplica la pérdida plana SKILL.WORLD_LOSS=4.
  * Ese evento NO cuenta como kill en ningún agregado (streak/feed/armas/mapas
- * filtran targetGuid == ''). Los BOTS no generan evento (solo counters).
+ * filtran targetGuid == ''). Un BOT que muere por world/suicidio NO genera
+ * nada (sin counters: desde 2026-11-11 los bots no tienen Player row).
  */
 
 export interface GameLogConnect {
@@ -362,10 +370,10 @@ export async function readNewLogLines(path: string, byteOffset: bigint): Promise
 /** Resultado de una pasada de ingesta sobre el log. */
 export interface GameLogIngestResult {
   ok: boolean;
-  playersSynced: number; // upserts de Player (conexiones/kills/deaths/daño)
-  killEventsSynced: number; // KillEvent insertados
+  playersSynced: number; // upserts de Player HUMANOS (conexiones/kills/deaths/daño; bots: 0)
+  killEventsSynced: number; // KillEvent insertados (solo eventos con ≥1 humano; bot-vs-bot: 0)
   matchBonusEventsSynced: number; // MatchBonusEvent insertados (bonus top-3 al ShutdownGame)
-  aliasesUpserted: number; // apariciones de alias (J + K) aplicadas a PlayerAlias
+  aliasesUpserted: number; // apariciones de alias HUMANAS (J + K) aplicadas a PlayerAlias
   identityAlertsUpserted: number; // alertas de identidad (impersonación de nick) creadas/actualizadas
   autoLinksSynced: number; // AccountLinks creados por sesión activa del launcher (auto-link)
   sessionsOpened: number;
@@ -393,11 +401,14 @@ async function applyConnect(
   gametype: string | null,
   now: Date,
 ): Promise<{ opened: boolean }> {
+  // BOTS (2026-11-11): cero persistencia — sin Player, sin Session, sin alias.
+  // La línea J del bot se cuenta como parseada y nada más.
+  if (isBotGuid(ev.guid)) return { opened: false };
   const base = {
     name: ev.name || 'unknown',
     lastServer: server,
     lastConnection: now,
-    isBot: isBotGuid(ev.guid), // rango dedicado 0xb07… → bot (set absoluto, idempotente)
+    isBot: false, // humano: el rango 0xb07… ya salió por el guard de arriba
   };
   await prisma.player.upsert({
     where: { guid: ev.guid },
@@ -435,9 +446,15 @@ async function existingPlayer(guid: string) {
   return prisma.player.findUnique({ where: { guid }, select: { id: true } });
 }
 
-/** Incrementa un campo numérico del Player, creándolo si no existe. */
+/**
+ * Incrementa un campo numérico del Player, creándolo si no existe.
+ * GUARD DE BOTS (2026-11-11): un guid del rango 0xb07… NUNCA toca Player —
+ * ni update ni create (cero estadística de bot). Los callsites ya filtran,
+ * esto es defensa en profundidad.
+ */
 async function incrementPlayer(guid: string, data: Record<string, number | { increment: number }>, now: Date): Promise<void> {
-  const withBot = { ...data, isBot: isBotGuid(guid) } as never;
+  if (isBotGuid(guid)) return;
+  const withBot = { ...data, isBot: false } as never;
   const existing = await existingPlayer(guid);
   if (existing) {
     await prisma.player.update({ where: { guid }, data: withBot });
@@ -450,7 +467,7 @@ async function incrementPlayer(guid: string, data: Record<string, number | { inc
     // registrada) debe quedar con el importe REAL del evento.
     create[key] = typeof value === 'number' ? value : value.increment;
   }
-  create.isBot = isBotGuid(guid);
+  create.isBot = false;
   await prisma.player.create({ data: create as never });
 }
 
@@ -668,59 +685,89 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         matchStartSec = null;
         matchTally = new Map();
       } else if (event.kind === 'connect') {
-        const { opened } = await applyConnect(event, server, currentMap, currentGametype, now);
-        if (opened) result.sessionsOpened += 1;
-        result.playersSynced += 1;
-        noteHuman(event.guid, event.name); // participante humano de la partida (bonus top-3)
-        // Historial de alias: cada J cuenta una aparición del (guid, name).
-        if (await upsertPlayerAlias({ guid: event.guid, name: event.name, server, when: now })) {
-          result.aliasesUpserted += 1;
+        // BOTS (2026-11-11): cero persistencia — sin Player/Session/alias/
+        // auto-link/alertas (esos servicios ya se defienden solos; aquí ni los
+        // invocamos). La línea SÍ cuenta como parseada (telemetría estable).
+        if (!isBotGuid(event.guid)) {
+          const { opened } = await applyConnect(event, server, currentMap, currentGametype, now);
+          if (opened) result.sessionsOpened += 1;
+          result.playersSynced += 1;
+          noteHuman(event.guid, event.name); // participante humano de la partida (bonus top-3)
+          // Historial de alias: cada J cuenta una aparición del (guid, name).
+          if (await upsertPlayerAlias({ guid: event.guid, name: event.name, server, when: now })) {
+            result.aliasesUpserted += 1;
+          }
+          // AUTO-LINK por sesión (sustituye el polling del launcher): nick
+          // registrado SIN guids + PlaySession ACTIVA → AccountLink directo.
+          // Sin sesión activa (o guid ya vinculado) → alerta anti-impersonación
+          // como siempre. Un auto-link con éxito deja la alerta sin sentido (el
+          // guid pasa a ser del dueño) → no se reporta.
+          const autoLink = await tryAutoLinkBySession({ guid: event.guid, name: event.name, when: now });
+          if (autoLink.outcome === 'linked') {
+            result.autoLinksSynced += 1;
+          } else {
+            // Anti-impersonación: ¿el cleanName es un nick REGISTRADO de otro user?
+            const alert = await reportIdentityAlert({ guid: event.guid, name: event.name, when: now });
+            if (alert.outcome !== 'skipped') result.identityAlertsUpserted += 1;
+          }
+          touched.add(event.guid);
         }
-        // AUTO-LINK por sesión (sustituye el polling del launcher): nick
-        // registrado SIN guids + PlaySession ACTIVA → AccountLink directo.
-        // Sin sesión activa (o guid ya vinculado) → alerta anti-impersonación
-        // como siempre. Un auto-link con éxito deja la alerta sin sentido (el
-        // guid pasa a ser del dueño) → no se reporta.
-        const autoLink = await tryAutoLinkBySession({ guid: event.guid, name: event.name, when: now });
-        if (autoLink.outcome === 'linked') {
-          result.autoLinksSynced += 1;
-        } else {
-          // Anti-impersonación: ¿el cleanName es un nick REGISTRADO de otro user?
-          const alert = await reportIdentityAlert({ guid: event.guid, name: event.name, when: now });
-          if (alert.outcome !== 'skipped') result.identityAlertsUpserted += 1;
-        }
-        touched.add(event.guid);
       } else if (event.kind === 'disconnect') {
-        await prisma.player.updateMany({
-          where: { guid: event.guid },
-          data: { lastConnection: now, ...(server !== null ? { lastServer: server } : {}) },
-        });
-        if (await applyDisconnect(event.guid, now)) result.sessionsClosed += 1;
-        touched.add(event.guid);
+        // BOTS: sin Player row ni Session → nada que actualizar/cerrar.
+        if (!isBotGuid(event.guid)) {
+          await prisma.player.updateMany({
+            where: { guid: event.guid },
+            data: { lastConnection: now, ...(server !== null ? { lastServer: server } : {}) },
+          });
+          if (await applyDisconnect(event.guid, now)) result.sessionsClosed += 1;
+          touched.add(event.guid);
+        }
       } else if (event.kind === 'damage') {
         // D: no letal → solo agregados de daño (NO crea evento ni kill/death).
         // Semántica de esta build: receiver (1er bloque) recibe, dealer (2º) inflige.
+        // BOTS (2026-11-11): el bot NO acumula daño (sin Player); el HUMANO del
+        // evento sí (damageDealt contra bots / damageTaken recibido de bots).
         const self = event.dealerGuid === null || event.dealerGuid === event.receiverGuid;
+        const dealerIsHuman = !self && !isBotGuid(event.dealerGuid!);
+        const receiverIsHuman = !isBotGuid(event.receiverGuid);
         if (self) {
-          await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
-          touched.add(event.receiverGuid);
+          if (receiverIsHuman) {
+            await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
+            touched.add(event.receiverGuid);
+          }
         } else {
-          await incrementPlayer(event.dealerGuid!, { damageDealt: { increment: event.damage } }, now);
-          await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
-          touched.add(event.dealerGuid!);
-          touched.add(event.receiverGuid);
+          if (dealerIsHuman) {
+            await incrementPlayer(event.dealerGuid!, { damageDealt: { increment: event.damage } }, now);
+            touched.add(event.dealerGuid!);
+          }
+          if (receiverIsHuman) {
+            await incrementPlayer(event.receiverGuid, { damageTaken: { increment: event.damage } }, now);
+            touched.add(event.receiverGuid);
+          }
         }
-        result.playersSynced += self ? 1 : 2;
+        // playersSynced cuenta SOLO humanos tocados (bots: 0 por guard).
+        result.playersSynced += self
+          ? (receiverIsHuman ? 1 : 0)
+          : (dealerIsHuman ? 1 : 0) + (receiverIsHuman ? 1 : 0);
       } else {
         // K: kill (semántica de ESTA BUILD: primer bloque = VÍCTIMA).
         //  - victimGuid (1er bloque) SIEMPRE tiene guid: es quien muere.
         //  - killerGuid (2º bloque): world (null) o == victimGuid (suicidio)
         //    → death + daño recibido de la víctima + KillEvent world/suicidio
         //    (targetGuid='') SOLO si es humano: el skill aplica WORLD_LOSS.
+        // BOTS (2026-11-11): el bot NO tiene Player row (cero counters/alias);
+        // el HUMANO del evento conserva TODA su progresión: kills vs bots,
+        // deaths contra bots, daño, racha y ELO decayado (skill stream). El
+        // KillEvent se guarda SIEMPRE que haya ≥1 humano involucrado, con los
+        // nombres DENORMALIZADOS del log (originName/targetName) para que el
+        // feed muestre "mataste a Lunarion" sin Player row del bot. Una kill
+        // bot-vs-bot NO genera evento (no hay humano que acreditar).
         const isSuicide = event.killerGuid !== null && event.killerGuid === event.victimGuid;
         const killerGuid = isSuicide ? null : event.killerGuid;
         const victimGuid = event.victimGuid;
         const headshot = event.hitloc !== null && HEADSHOT_HITLOCS.has(event.hitloc.toLowerCase());
+        const killerIsBot = killerGuid !== null && isBotGuid(killerGuid);
+        const victimIsBot = isBotGuid(victimGuid);
 
         // Tally del bonus top-3: kills del killer humano, deaths del humano
         // que muere (los bots NUNCA entran al tally: noteHuman los filtra).
@@ -734,50 +781,65 @@ export async function ingestGameLog(path: string, server: string | null): Promis
         }
 
         if (killerGuid !== null) {
-          // Kill real: kills/headshot/daño para el KILLER; death para la VÍCTIMA.
-          await incrementPlayer(killerGuid, { kills: { increment: 1 }, damageDealt: { increment: event.damage } }, now);
-          await incrementPlayer(victimGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
-          if (event.isTeamkill) {
-            await incrementPlayer(killerGuid, { teamkills: { increment: 1 } }, now);
+          // Kill real: kills/headshot/daño para el KILLER humano; death para
+          // la VÍCTIMA humana (cada side pasa por su guard de bot).
+          if (!killerIsBot) {
+            await incrementPlayer(killerGuid, { kills: { increment: 1 }, damageDealt: { increment: event.damage } }, now);
+            if (event.isTeamkill) {
+              await incrementPlayer(killerGuid, { teamkills: { increment: 1 } }, now);
+            }
+            if (headshot) {
+              await incrementPlayer(killerGuid, { headshots: { increment: 1 } }, now);
+            }
           }
-          if (headshot) {
-            await incrementPlayer(killerGuid, { headshots: { increment: 1 } }, now);
+          if (!victimIsBot) {
+            await incrementPlayer(victimGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
           }
           // KillEvent guarda la semántica stock de la DB: origin = KILLER,
-          // target = VÍCTIMA (skill ELO, streaks, armas y perfiles consumen ese orden).
-          await prisma.killEvent.create({
-            data: {
-              originGuid: killerGuid,
-              targetGuid: victimGuid,
-              isKill: true,
-              damage: event.damage,
-              weapon: event.weapon,
-              mod: event.mod,
-              hitloc: event.hitloc,
-              headshot,
-              isTeamkill: event.isTeamkill,
-              map: currentMap,
-              gametype: currentGametype,
-              server,
-              time: now,
-              timeEpoch: Math.trunc(now.getTime() / 1000),
-            },
-          });
-          result.killEventsSynced += 1;
-          // Alias por K: killer + víctima real.
-          if (await upsertPlayerAlias({ guid: killerGuid, name: event.killerName ?? '', server, when: now })) {
+          // target = VÍCTIMA (skill ELO, streaks, armas y perfiles consumen ese
+          // orden). SOLO con ≥1 humano: las kills bot-vs-bot no acreditan a
+          // nadie (y el skill no debe crear Player de bots para ellas).
+          if (!killerIsBot || !victimIsBot) {
+            await prisma.killEvent.create({
+              data: {
+                originGuid: killerGuid,
+                targetGuid: victimGuid,
+                // Nombres DENORMALIZADOS del log (siempre que el log los traiga,
+                // humano o bot): el feed del perfil los usa sin Player row.
+                originName: event.killerName,
+                targetName: event.victimName,
+                isKill: true,
+                damage: event.damage,
+                weapon: event.weapon,
+                mod: event.mod,
+                hitloc: event.hitloc,
+                headshot,
+                isTeamkill: event.isTeamkill,
+                map: currentMap,
+                gametype: currentGametype,
+                server,
+                time: now,
+                timeEpoch: Math.trunc(now.getTime() / 1000),
+              },
+            });
+            result.killEventsSynced += 1;
+          }
+          // Alias por K: SOLO los participantes HUMANOS (bot: sin alias ni Player).
+          if (!killerIsBot && (await upsertPlayerAlias({ guid: killerGuid, name: event.killerName ?? '', server, when: now }))) {
             result.aliasesUpserted += 1;
           }
-          if (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now })) {
+          if (!victimIsBot && (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now }))) {
             result.aliasesUpserted += 1;
           }
-          touched.add(killerGuid);
-          touched.add(victimGuid);
+          if (!killerIsBot) touched.add(killerGuid);
+          if (!victimIsBot) touched.add(victimGuid);
+          result.playersSynced += (killerIsBot ? 0 : 1) + (victimIsBot ? 0 : 1);
         } else {
           // world / suicidio: el que muere es la VÍCTIMA (1er bloque); sin atacante.
+          // BOTS: sin counters ni evento (el guard de incrementPlayer ya no crea nada).
           await incrementPlayer(victimGuid, { deaths: { increment: 1 }, damageTaken: { increment: event.damage } }, now);
-          // Alias de la víctima; el "killer" world no tiene guid → skip.
-          if (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now })) {
+          // Alias de la víctima humana; el "killer" world no tiene guid → skip.
+          if (!victimIsBot && (await upsertPlayerAlias({ guid: victimGuid, name: event.victimName ?? '', server, when: now }))) {
             result.aliasesUpserted += 1;
           }
           // KILL EVENT world/suicidio (2026-11-08): originGuid = víctima y
@@ -785,12 +847,16 @@ export async function ingestGameLog(path: string, server: string | null): Promis
           // distinta"). El motor skill (skill.service) detecta targetGuid ''
           // → aplica la pérdida plana SKILL.WORLD_LOSS=4 al que muere, sin
           // tocar nada de skill/. SOLO HUMANOS: un bot que muere por
-          // world/suicidio no genera evento (solo sus counters de arriba).
-          if (!isBotGuid(victimGuid)) {
+          // world/suicidio no genera NADA (desde 2026-11-11 ni counters).
+          if (!victimIsBot) {
             await prisma.killEvent.create({
               data: {
                 originGuid: victimGuid,
                 targetGuid: '', // world/suicidio: skill aplica WORLD_LOSS plano
+                // Denormalizados: en world/suicidio el que muere es el propio
+                // origin (el nombre de la víctima, que el log SÍ trae).
+                originName: event.victimName,
+                targetName: event.victimName,
                 isKill: true,
                 damage: event.damage,
                 weapon: event.weapon,
@@ -806,10 +872,10 @@ export async function ingestGameLog(path: string, server: string | null): Promis
               },
             });
             result.killEventsSynced += 1;
+            touched.add(victimGuid);
+            result.playersSynced += 1;
           }
-          touched.add(victimGuid);
         }
-        result.playersSynced += killerGuid !== null ? 2 : 1;
       }
       result.linesParsed += 1;
     } catch (err) {

@@ -331,17 +331,19 @@ describe('Bootstrap de identidad (seedIdentityAlerts idempotente)', () => {
   });
 });
 
-describe('Player.isBot (set por ingesta + bootstrap) y leaderboard solo-humanos', () => {
-  it('la ingesta marca isBot=true para guids del rango bot y false para humanos', async () => {
+describe('BOTS sin existencia en DB (2026-11-11) + leaderboard solo-humanos', () => {
+  it('la ingesta NO crea Player para guids del rango bot; los humanos siguen isBot=false', async () => {
     writeLog([
       '  0:00 InitGame: \\g_gametype\\war\\map\\mp_rust\\',
       '  0:04 J;bot3;3;BotName',
       `  0:05 J;${HEX_HUMAN};0;Human Name\n`,
     ]);
     await ingestGameLog(LOG_PATH, null);
-    const bot = await prisma.player.findUnique({ where: { guid: BOT_GUID } });
+    // El bot NO existe (cero estadística de bot: ni Player, ni alias, ni sesión).
+    expect(await prisma.player.findUnique({ where: { guid: BOT_GUID } })).toBeNull();
+    expect(await prisma.playerAlias.count({ where: { guid: BOT_GUID } })).toBe(0);
+    expect(await prisma.session.count({ where: { guid: BOT_GUID } })).toBe(0);
     const human = await prisma.player.findUnique({ where: { guid: DEC_HUMAN } });
-    expect(bot?.isBot).toBe(true);
     expect(human?.isBot).toBe(false);
   });
 
@@ -362,34 +364,41 @@ describe('Player.isBot (set por ingesta + bootstrap) y leaderboard solo-humanos'
     expect(human?.isBot).toBe(false);
   });
 
-  it('leaderboard EXCLUYE bots por defecto; includeBots=true los trae; sort=skill sigue filtrando', async () => {
+  it('leaderboard: bots NUNCA aparecen (includeBots aceptado pero ignorado); sort=skill solo-humanos', async () => {
     // El leaderboard es POR CUENTA: el humano solo rankea con su cuenta vinculada.
     const owner = await registerUser('lb-botowner@test.local', 'supersecret123', 'Human Pro');
     await prisma.player.create({ data: { guid: DEC_HUMAN, name: 'Human Pro', kills: 10, skill: 1200, connections: 2 } });
+    // Fila de bot sembrada A PROPÓSITO (en producción ya no existen): regresión —
+    // aunque una huérfana existiera, jamás aparece en el leaderboard.
     await prisma.player.create({ data: { guid: BOT_GUID, name: 'Bot Killer', kills: 500, skill: 2500, connections: 50, isBot: true } });
     await prisma.accountLink.create({ data: { userId: owner.id, guid: DEC_HUMAN } });
 
-    // Default: solo humanos (la fila del humano es su CUENTA; aunque el bot lidere por kills y skill).
+    // Default: solo humanos (la fila del humano es su CUENTA).
     const def = await req().get('/api/leaderboard');
     expect(def.status).toBe(200);
     let body = def.body as { total: number; players: Array<{ guid: string }> };
     expect(body.total).toBe(1);
     expect(body.players.map((p) => p.guid)).toEqual([DEC_HUMAN]);
 
-    // includeBots=true: la cuenta + el bot per-guid (los bots no son cuentas), ordenados por kills (bot primero).
+    // includeBots=true: ACEPTADO por compat pero IGNORADO — cero bots.
     const withBots = await req().get('/api/leaderboard?includeBots=true');
     body = withBots.body as typeof body;
-    expect(body.total).toBe(2);
-    expect(body.players[0]?.guid).toBe(BOT_GUID);
+    expect(body.total).toBe(1);
+    expect(body.players.map((p) => p.guid)).toEqual([DEC_HUMAN]);
 
     // includeBots=false explícito: mismo comportamiento que el default.
     const explicit = await req().get('/api/leaderboard?includeBots=false');
     expect((explicit.body as { total: number }).total).toBe(1);
 
-    // sort=skill con el filtro: sin bots, la cuenta del humano es la #1; con bots, el bot (skill 2500).
+    // sort=skill: el humano es #1 aunque el bot sembrado tenga skill 2500.
     const skillNoBots = await req().get('/api/leaderboard?sort=skill');
     expect((skillNoBots.body as { players: Array<{ guid: string; skill: number }> }).players[0]).toMatchObject({ guid: DEC_HUMAN, skill: 1200 });
     const skillWithBots = await req().get('/api/leaderboard?sort=skill&includeBots=true');
-    expect((skillWithBots.body as { players: Array<{ guid: string; skill: number }> }).players[0]).toMatchObject({ guid: BOT_GUID, skill: 2500 });
+    expect((skillWithBots.body as { players: Array<{ guid: string; skill: number }> }).players[0]).toMatchObject({ guid: DEC_HUMAN, skill: 1200 });
+  });
+
+  it('perfil de un guid de bot → 404 (los bots ya no son jugadores rankeables)', async () => {
+    const res = await req().get(`/api/players/${BOT_GUID}`);
+    expect(res.status).toBe(404);
   });
 });

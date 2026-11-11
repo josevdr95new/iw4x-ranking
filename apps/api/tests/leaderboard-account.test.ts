@@ -27,6 +27,11 @@ const GUID_D = '400000000000000004'; // PC 2 de "Gamer"
 const GUID_SOLO = '400000000000000005'; // cuenta de un solo guid
 const GUID_LONER = '400000000000000006'; // humano SIN cuenta (no rankea)
 const BOT_GUID = BigInt('0xb07000000000077').toString(10);
+// BUG 1 (deploy 2026-11-10, "167 JUGADORES" con SOLO-humanos): en producción
+// hay MUCHOS bots (166), no uno. La regresión exige poblar varios para
+// verificar que includeBots ausente/"false" textual los excluye TODOS.
+const BOT_GUID_2 = BigInt('0xb07000000000078').toString(10);
+const BOT_GUID_3 = BigInt('0xb07000000000079').toString(10);
 
 const T1 = new Date('2026-11-01T10:00:00Z');
 const T2 = new Date('2026-11-02T10:00:00Z');
@@ -96,9 +101,18 @@ async function seed(): Promise<void> {
   // Cuenta SIN guids: no puede aparecer (no tiene ni una fila de leaderboard).
   await createUser('empty@test.local', 'Empty Account');
 
-  // Bot: nunca es cuenta; solo entra con includeBots=true.
+  // Bots sembrados A PROPÓSITO (2026-11-11 ya NO existen en producción: la
+  // ingesta no los crea y cleanup:bots los borró). Quedan aquí como REGRESIÓN:
+  // aunque una fila de bot existiera (DB vieja/stray), el leaderboard jamás la
+  // muestra — con o sin includeBots.
   await prisma.player.create({
     data: { guid: BOT_GUID, name: 'BotBot', isBot: true, kills: 100, deaths: 5, skill: 2400, skillElo: 2400, connections: 10 },
+  });
+  await prisma.player.create({
+    data: { guid: BOT_GUID_2, name: 'RektInator', isBot: true, kills: 62, deaths: 20, skill: 1900, skillElo: 1900, connections: 4 },
+  });
+  await prisma.player.create({
+    data: { guid: BOT_GUID_3, name: 'Louvenarde', isBot: true, kills: 55, deaths: 18, skill: 1750, skillElo: 1750, connections: 3 },
   });
 }
 
@@ -231,15 +245,40 @@ describe('leaderboard POR CUENTA: una fila por cuenta con N guids', () => {
     expect(minMatches.players.map((row) => row.name).sort()).toEqual(['Admin Duo', 'The Gamer']);
   });
 
-  it('includeBots=true: bots per-guid (linked=false), las cuentas conservan su rank desplazado', async () => {
-    const body = await leaderboard('&includeBots=true');
-    expect(body.total).toBe(4); // 3 cuentas + 1 bot per-guid
+  it('BOTS IMPOSIBLES (2026-11-11): includeBots ausente, "false" textual o "true" → CERO bots SIEMPRE', async () => {
+    const botGuids = [BOT_GUID, BOT_GUID_2, BOT_GUID_3];
 
-    const bot = body.players.find((row) => row.guid === BOT_GUID)!;
-    expect(bot).toMatchObject({ name: 'BotBot', linked: false, kills: 100, skill: 2400 });
-    // El bot (100 kills) desplaza a las cuentas en la población rankeada.
-    expect(bot.rank).toBe(1);
-    expect(body.players.find((row) => row.name === 'Admin Duo')?.rank).toBe(2);
+    // 1) Sin el param (lo que manda la web).
+    const absent = await leaderboard();
+    expect(absent.total).toBe(3); // solo las 3 cuentas
+    expect(absent.players.filter((row) => botGuids.includes(row.guid))).toHaveLength(0);
+    expect(absent.players.every((row) => row.linked)).toBe(true);
+
+    // 2) "false" TEXTO explícito (lo que la web envía con el toggle SOLO-humanos).
+    const explicitFalse = await leaderboard('&includeBots=false');
+    expect(explicitFalse.total).toBe(3);
+    expect(explicitFalse.players.filter((row) => botGuids.includes(row.guid))).toHaveLength(0);
+
+    // 3) "true" textual: el param se ACEPTA por compat pero se IGNORA — los
+    // bots ya NO tienen Player row y aunque una huérfana existiera (seed de
+    // arriba), la query jamás los trae. Ranks de las cuentas intactos.
+    const explicitTrue = await leaderboard('&includeBots=true');
+    expect(explicitTrue.total).toBe(3); // SOLO las 3 cuentas
+    expect(explicitTrue.players.filter((row) => botGuids.includes(row.guid))).toHaveLength(0);
+    expect(explicitTrue.players.every((row) => row.linked)).toBe(true);
+    expect(explicitTrue.players.map((row) => row.name)).toEqual(['Admin Duo', 'The Gamer', 'Solo Player']);
+    expect(explicitTrue.players.map((row) => row.rank)).toEqual([1, 2, 3]);
+  });
+
+  it('los bots no desplazan ranks ni medallas: población rankeada = solo cuentas', async () => {
+    // El bot sembrado (100 kills, skill 2400) NO afecta: sin él, Duo (40
+    // kills) es rank 1 y el sort=skill pone a Solo (2200) arriba.
+    const body = await leaderboard('&includeBots=true'); // param ignorado
+    expect(body.players.find((row) => row.name === 'Admin Duo')?.rank).toBe(1);
+    expect(body.players.find((row) => row.guid === BOT_GUID)).toBeUndefined();
+
+    const bySkill = await leaderboard('&sort=skill&order=desc&includeBots=true');
+    expect(bySkill.players[0]).toMatchObject({ name: 'Solo Player', skill: 2200 });
   });
 });
 
