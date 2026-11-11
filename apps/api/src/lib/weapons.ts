@@ -134,6 +134,15 @@ function humanizeToken(token: string): string {
 }
 
 /**
+ * Variantes que llegan como PREFIJO del código en logs/mods viejos (el diccionario
+ * solo trae códigos base y el attachment infix "_gl_"): "gl_famas" → base "famas".
+ * Mismo patrón que apps/web/src/pages/PlayerPage.tsx WEAPON_CODE_PREFIXES.
+ */
+const WEAPON_CODE_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+  ['gl_', ' + Lanzagranadas'],
+];
+
+/**
  * Decodifica un weaponCode crudo del log a nombre display humano.
  * Unknown → título humanizado del código (strip "_mp", split por "_",
  * capitalize); nunca devuelve el crudo. null/vacío → "Desconocida".
@@ -147,7 +156,16 @@ export function weaponDisplayName(code: string | null | undefined): string {
   const full = WEAPON_DISPLAY_NAMES[stripped];
   if (full !== undefined) return full;
 
-  // 2) Primer token = arma base; resto = attachments. Con base DESCONOCIDA los
+  // 2) Variante como PREFIJO (mods/logs viejos, ej. "gl_famas_mp"): se decodifica
+  //    la base con esta misma función (diccionario o fallback humanizado) y la
+  //    variante va al final → "FAMAS + Lanzagranadas" (nunca "Gl Famas").
+  for (const [prefix, suffix] of WEAPON_CODE_PREFIXES) {
+    if (stripped.startsWith(prefix) && stripped.length > prefix.length) {
+      return `${weaponDisplayName(stripped.slice(prefix.length))}${suffix}`;
+    }
+  }
+
+  // 3) Primer token = arma base; resto = attachments. Con base DESCONOCIDA los
   //    tokens no-attachment se humanizan como palabras (nunca "X + Y" falso):
   //    "mystery_gun_mp" → "Mystery Gun", "exotic_sniper_thermal_mp" → "Exotic Sniper + Térmica".
   const tokens = stripped.split('_').filter((token) => token.length > 0);

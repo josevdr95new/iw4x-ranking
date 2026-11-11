@@ -184,6 +184,12 @@ describe('weaponDisplayName (diccionario MW2/IW4x)', () => {
   it('decodifica sufijos de attachments (incluye combinaciones múltiples)', () => {
     expect(weaponDisplayName('ump45_eotech_mp')).toBe('UMP45 + EOTech');
     expect(weaponDisplayName('famas_gl_mp')).toBe('FAMAS + Lanzagranadas');
+    // Variante como PREFIJO (mods viejos): "gl_famas" → base + sufijo al final.
+    expect(weaponDisplayName('gl_famas')).toBe('FAMAS + Lanzagranadas');
+    expect(weaponDisplayName('gl_famas_mp')).toBe('FAMAS + Lanzagranadas');
+    expect(weaponDisplayName('gl_ak47_reflex_mp')).toBe('AK-47 + Mira holográfica + Lanzagranadas');
+    // Prefijo con base desconocida → fallback humanizado + sufijo (nunca "Gl Famas").
+    expect(weaponDisplayName('gl_mystery_gun_mp')).toBe('Mystery Gun + Lanzagranadas');
     expect(weaponDisplayName('spas12_silencer_mp')).toBe('SPAS-12 + Silenciador');
     // Fixture REAL del dueño: el "_tactical" de las secondary es el Tactical Knife de MW2.
     expect(weaponDisplayName('coltanaconda_tactical_mp')).toBe('Colt Anaconda + Cuchillo táctico');
