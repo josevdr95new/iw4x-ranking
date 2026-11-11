@@ -20,15 +20,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "api_url": "http://192.168.2.251:3000",
     "game_path": "D:\\Call of Duty 6\\iw4x.exe",
     # Servers por defecto: las DOS salas del LXC de producción + Local
-    # (mismo host que la API/web de arriba).
+    # (mismo host que la API/web de arriba). SIN "fsGame": el MOD lo manda
+    # el server en el handshake — precargarlo con +set fs_game abría la
+    # carrera con el +connect (evidencia del dueño: su acceso directo sin
+    # mod conecta SIEMPRE). El campo sigue ACEPTÁNDOSE en configs viejas
+    # (se ignora, sin error).
     "servers": [
-        {"name": "Sala 1",  "address": "192.168.2.251:28960",
-         "fsGame": "mods/mp_bots"},
-        {"name": "Sala 2",  "address": "192.168.2.251:28961",
-         "fsGame": "mods/mp_bots"},
+        {"name": "Sala 1",  "address": "192.168.2.251:28960"},
+        {"name": "Sala 2",  "address": "192.168.2.251:28961"},
         {"name": "Local",   "address": "127.0.0.1:28961"},
     ],
     "default_server": 0,
+    # Autoconexión determinista (fix "conecta cuando quiere"): tras lanzar
+    # el juego, un hilo verifica por netstat si conectó al server; si no,
+    # inyecta `connect ip:puerto` por la consola del juego. Red de
+    # seguridad del +connect intermitente de la build.
+    "autoconnect": True,
+    # Ventana de gracia (segundos, 5-60) al +connect del cmdline antes de
+    # inyectar por consola. Editable en launcher.config.json.
+    "autoconnect_wait_seconds": 20,
     # Flag de prueba: NO abre el juego real, solo simula el paso de lanzarlo
     # para poder probar el polling de vinculación contra la API.
     "simulate_game": False,
@@ -162,8 +172,10 @@ def sanitize_servers(rows: Any, default_index: int = 0
     - Dirección inválida → ``ValueError`` con mensaje claro: la UI lo
       muestra y NO se guarda nada (jamás se persiste una lista rota).
     - Nombre vacío → ``"Server N"`` (N = posición 1-based en la lista final).
-    - ``fsGame`` (mod precargado del server, OPCIONAL): se recorta; vacío →
-      la clave NO se persiste (sin mod que precargar).
+    - ``fsGame`` (mod del server, OPCIONAL): se recorta; vacío → la clave NO
+      se persiste. COMPATIBILIDAD: se sigue guardando si el dueño lo escribió
+      en su config, pero el launcher ya NO lo usa (el mod lo manda el server
+      en el handshake — ``+set fs_game`` abría la carrera con ``+connect``).
     Devuelve ``([{"name", "address", "fsGame"?}, ...], default_server)``
     con el índice acotado a la lista final (0 si queda vacía).
     """
@@ -231,8 +243,10 @@ class AppConfig:
         for s in raw:
             if isinstance(s, dict) and s.get("name") and s.get("address"):
                 row = {"name": str(s["name"]), "address": str(s["address"])}
-                # fsGame opcional (mod precargado del server — evita la
-                # doble conexión de IW4x): solo si viene no vacío.
+                # fsGame (configs viejas): se CONSERVA en la fila sin error
+                # pero ya NO se usa — el mod lo manda el server en el
+                # handshake (precargarlo con +set fs_game abría la carrera
+                # con el +connect; el launcher no envía nunca ese +set).
                 fs_game = str(s.get("fsGame") or "").strip()
                 if fs_game:
                     row["fsGame"] = fs_game
@@ -249,6 +263,29 @@ class AppConfig:
     @property
     def simulate_game(self) -> bool:
         return bool(self.data.get("simulate_game", False))
+
+    @property
+    def autoconnect(self) -> bool:
+        """Autoconexión determinista tras lanzar el juego (default True).
+
+        Red de seguridad del ``+connect`` intermitente de la build: un
+        hilo verifica por netstat si el juego conectó al server y, si no,
+        inyecta ``connect ip:puerto`` por la consola. ``false`` →
+        comportamiento antiguo (solo el cmdline).
+        """
+        return bool(self.data.get("autoconnect", True))
+
+    @property
+    def autoconnect_wait_seconds(self) -> int:
+        """Ventana de gracia (s) al ``+connect`` del cmdline (5-60, def 20).
+
+        Basura fuera de rango → acotada al 5..60 del contrato; el 0 del
+        constructor interno de GameFlow solo existe en tests (inyección).
+        """
+        try:
+            return min(60, max(5, int(self.data.get("autoconnect_wait_seconds", 20))))
+        except (TypeError, ValueError):
+            return 20
 
     @property
     def cloud_save(self) -> bool:

@@ -58,7 +58,9 @@ juego + Local (Sala 1 primero). Para **desarrollo local** sobreescribe
   "default_server": 0,
   "simulate_game": false,
   "export_classes": true,
-  "autosave_minutes": 10
+  "autosave_minutes": 10,
+  "autoconnect": true,
+  "autoconnect_wait_seconds": 20
 }
 ```
 
@@ -85,7 +87,9 @@ salas de juego (:28960 y :28961):
   "cloud_save": true,
   "export_classes": true,
   "autosave_minutes": 10,
-  "remember_session": false
+  "remember_session": false,
+  "autoconnect": true,
+  "autoconnect_wait_seconds": 20
 }
 ```
 
@@ -113,6 +117,8 @@ salas de juego (:28960 y :28961):
 | `cloud_save`            | **true** por defecto: sincroniza el progreso (`players\iw4x.stat`, `iw4x_config.cfg`, `mods\<mod>\iw4x.stat`) con la cuenta antes de abrir el juego y al cerrarlo (backup automático previo en `%APPDATA%\iw4x-ranking-launcher\save-backups\`). Editable en Ajustes. |
 | `export_classes`        | **true** por defecto: al arrancar el juego el launcher inyecta el comando nativo **`+dumpPlayerData`** (después de `+connect`) y al cerrarlo lee el `console_mp.log` del CLIENTE, extrae el dump de clases (sección `customClasses`) y lo sube a la API → las 15 clases aparecen en tu perfil web sin pasos manuales. Editable en Ajustes ("Exportar mis clases al perfil web (se genera al arrancar el juego)"). Ver [Clases de loadout al perfil web](#clases-de-loadout-al-perfil-web-sin-pasos-manuales). |
 | `simulate_game`         | **Flag de prueba**: simula el paso "abrir juego" sin lanzar el exe real (para probar el flujo JUGAR contra la API). |
+| `autoconnect`           | **true** por defecto: AUTOCONEXIÓN determinista tras abrir el juego. La build IW4x procesa el `+connect` del cmdline de forma INTERMITENTE (carrera con la carga del juego — el `+set fs_game` precargado abría la carrera y **ya no se envía**: el mod lo manda el server, igual que el acceso directo del dueño `iw4x.exe +connect ip:puerto` que funciona SIEMPRE). Red de seguridad: un hilo daemon verifica cada segundo por `netstat` si el juego ya abrió UDP hacia el server; si conectó solo → log `Conectado al server.` (cero disturbio); si no, a los `autoconnect_wait_seconds` inyecta por la consola del juego (~) `name <nick>` + `connect ip:puerto` con SendInput Unicode y a los 10s re-verifica (sin reintentos). `false` → comportamiento antiguo (solo cmdline). |
+| `autoconnect_wait_seconds` | Ventana de gracia (segundos, **5-60**, default **20**) al `+connect` del cmdline antes de la inyección por consola. |
 | `remember_session`      | **false** por defecto (cyber-café): al **CERRAR** el launcher se **borra el token guardado** (log `Sesión cerrada. Hasta la próxima.`) y al **ABRIR** aparece el **LOGIN** — cada quien hace su propio login, nadie hereda sesiones. `true` = auto-login con el token como siempre. Editable en Ajustes ("Mantener mi sesión abierta al cerrar el launcher"). |
 | `autosave_minutes`      | **Auto-guardado** del progreso en la nube cada X minutos (default **10**; **0 = desactivado**). Evita perder progreso si la PC muere a mitad de sesión: sube solo lo que cambió, respeta lo más nuevo y no consulta la API si nada cambió. Editable en Ajustes. |
 
@@ -208,7 +214,13 @@ dentro del juego.
    partida)` y se continúa — jugar jamás se bloquea por sync.
 4. **PASO 2/2 — Ejecutar**: lanza
    `iw4x.exe +set name <displayName> +connect <server> +dumpPlayerData`
-   (subprocess con lista de args, cwd = carpeta del juego). El nick del
+   (subprocess con lista de args, cwd = carpeta del juego). SIN
+   `+set fs_game` (evidencia del dueño, 2026-11): su acceso directo
+   `iw4x.exe +connect ip:puerto` conecta SIEMPRE — el mod lo manda el server
+   en el handshake; precargar `fs_game` retrasaba el arranque y abría la
+   carrera con el `+connect` ("conecta cuando quiere"). Bonus: sin mod
+   precargado el cliente SIEMPRE escribe el `console_mp.log` del juego base,
+   así el dump de clases funciona en todas las salas. El nick del
    ranking es **OBLIGATORIO y SIEMPRE viaja** en el comando (`+set name`): los
    engines Q3 lo procesan tras cargar configs, así el displayName de la cuenta
    gana al nick guardado en el config del juego, sin tocar archivos. Si la
@@ -216,7 +228,26 @@ dentro del juego.
    actualizarlo en Mi Cuenta (web). Con `export_classes` activo (default), el
    `+dumpPlayerData` va AL FINAL para que el dump de clases corra con el
    playerdata ya inicializado (ver la sección de clases).
-5. El botón héroe pasa a **DETENER** mientras el juego (que este launcher
+5. **AUTOCONEXIÓN determinista** (`autoconnect`, default **true**): tras el
+   arranque un hilo daemon custodia la conexión en dos fases —
+   - **Fase 1 — gracia al cmdline** (`autoconnect_wait_seconds`, 20s):
+     verifica cada segundo por `netstat -ano` si el proceso del juego ya
+     abrió UDP hacia `host:puerto`. Si conectó solo → log
+     `Conectado al server.` y se termina (cero disturbio). Si el juego se
+     cierra, aborta en silencio.
+   - **Fase 2 — inyección por consola**: si venció la ventana sin conexión,
+     log `Autoconectando a <host:puerto>… (el juego no conectó solo)`,
+     enfoca la ventana del juego (hasta 30s), abre la consola (~ con
+     `keybd_event`), teclea `name <nick>` y `connect <host:puerto>` con
+     `SendInput` Unicode (layout-independiente), cierra la consola y a los
+     10s re-verifica: `Conectado al server.` o `Aún sin conexión — revisa
+     que el server esté arriba o conecta manual (~): connect <host:puerto>`
+     (UNA sola vez, sin reintentos). Si no encuentra la ventana del juego,
+     pide el manual y no toca nada.
+   - Los logs llegan por la misma cola de la consola mini (jamás toca
+     widgets de Tk) y los primitivos (netstat/ventana/teclado) son
+     inyectables para los tests.
+6. El botón héroe pasa a **DETENER** mientras el juego (que este launcher
    abrió) siga vivo; al cerrarse el juego solo, vuelve a JUGAR. Los stats
    siguen refrescando cada 30s como siempre. Al cerrar iw4x.exe sube el
    progreso de la sesión.
@@ -350,8 +381,8 @@ py apps\launcher\tests\test_smoke.py   # solo E2E/GUI (requiere API :3000)
 | Archivo              | Qué cubre |
 | -------------------- | --------- |
 | `tests/run_all.py`   | Runner: ejecuta **units primero** y **smoke después**; resumen por archivo (checks OK/fallidos, tiempo, exit del proceso) y exit != 0 si algo falla. |
-| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), aislamiento de identidad (`decide_guid_action` restore/quarantine/none + manifest None, `quarantine_local_guid` con rutas inyectadas), `build_game_args` (+set name SIEMPRE), defaults/merge de `app_config`, `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`), **`server_status`** (parser `\players\<N>\` del `statusResponse` Q3 con fixture real + fallback `\clients\`, basura → sin cifra; `split_address` reusando la validación del config; texto `ONLINE · N jugadores`/`OFFLINE`/`verificando…`; clave de color ok/dim/accent), `kill_tree` / `wait_process_exit` (taskkill `/PID /T /F` con stub de subprocess; fallos tragados) y el **autosave** (decisión de subida con stub, caché sin API, server más nuevo respetado, save ilegible → skip, config `autosave_minutes`). |
-| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR simplificado (sin polling: log de auto-link, sesión de juego `POST /api/play/session` con stub + aviso dim único), pipeline de cuarentena guid.dat → identidad nueva → upload (y restauración de seguridad <10s), stats en vivo, cloud-sync (pipeline stub + E2E contra la API), contrato `/api/play/session` contra la API real (404 → PENDIENTE mientras el backend despliega), **login compacto** (ENTRAR y CREAR CUENTA dentro del viewport en 980x640, franja CONEXIÓN colapsable, Canvas+Scrollbar con rueda en pantallas bajas), regresión visual del formulario, el **cierre del launcher** (kill tree del PID lanzado + upload único con stubs; sin juego vivo no toca nada), el **autosave + guardado final al cerrar** y el **estado REAL de servers** (server TCP falso en puerto efímero + respondedor UDP getstatus → `● ONLINE · 3 jugadores` verde; TCP sin UDP → ONLINE sin cifra; puerto cerrado → `● OFFLINE` dim; pintado en Ajustes/HOME sin bloquear la UI con timeouts acotados). |
+| `tests/test_units.py`| Funciones **puras**, sin red ni GUI: puras de `save_sync` (`local_save_files`, `sha256_of`, `decide_sync`, `build_upload_files` con caps, `detect_build`), aislamiento de identidad (`decide_guid_action` restore/quarantine/none + manifest None, `quarantine_local_guid` con rutas inyectadas), `build_game_args` (+set name SIEMPRE; **sin `fs_game`** — el mod lo manda el server), **autoconexión** (`split_server_address`, `is_connected` sobre netstat crudo: SOLO UDP del pid hacia el destino, TCP no cuenta, IPv6 con corchetes no rompe; `build_console_commands` con/sin nick; `send_console_sequence` con fake que graba la secuencia exacta; tipos ctypes del inyector con tamaños x64 correctos), defaults/merge de `app_config` (incluye `autoconnect` y su ventana 5-60), `normalize_api_url` (esquema faltante, barra final, espacios, vacío → default; sin inventar puertos — incluye el caso real `127.0.0.1:5173`), **`server_status`** (parser `\players\<N>\` del `statusResponse` Q3 con fixture real + fallback `\clients\`, basura → sin cifra; `split_address` reusando la validación del config; texto `ONLINE · N jugadores`/`OFFLINE`/`verificando…`; clave de color ok/dim/accent), `kill_tree` / `wait_process_exit` (taskkill `/PID /T /F` con stub de subprocess; fallos tragados) y el **autosave** (decisión de subida con stub, caché sin API, server más nuevo respetado, save ilegible → skip, config `autosave_minutes`). |
+| `tests/test_smoke.py`| Suite **E2E/GUI** en vivo contra la API real y CustomTkinter: registro/login por NICK, auto-login por token, JUGAR simplificado (sin polling: log de auto-link, sesión de juego `POST /api/play/session` con stub + aviso dim único), **autoconexión determinista con stubs** (autoconnect/simulate → sin hilo; camino rápido fase 1 sin inyector; inyección UNA vez con secuencia completa; post-inyección conecta/no conecta; sin ventana → manual; proceso muerto → silencio), pipeline de cuarentena guid.dat → identidad nueva → upload (y restauración de seguridad <10s), stats en vivo, cloud-sync (pipeline stub + E2E contra la API), contrato `/api/play/session` contra la API real (404 → PENDIENTE mientras el backend despliega), **login compacto** (ENTRAR y CREAR CUENTA dentro del viewport en 980x640, franja CONEXIÓN colapsable, Canvas+Scrollbar con rueda en pantallas bajas), regresión visual del formulario, el **cierre del launcher** (kill tree del PID lanzado + upload único con stubs; sin juego vivo no toca nada), el **autosave + guardado final al cerrar** y el **estado REAL de servers** (server TCP falso en puerto efímero + respondedor UDP getstatus → `● ONLINE · 3 jugadores` verde; TCP sin UDP → ONLINE sin cifra; puerto cerrado → `● OFFLINE` dim; pintado en Ajustes/HOME sin bloquear la UI con timeouts acotados). |
 
 Cuenta de prueba: `launcher-test@test.local` / `LauncherTest2026` (la crea el
 propio smoke si la DB está limpia). NO es pytest: scripts secuenciales que
