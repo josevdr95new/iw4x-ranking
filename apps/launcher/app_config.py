@@ -14,14 +14,13 @@ from typing import Any, Dict, List, Tuple
 
 log = logging.getLogger("config")
 
-# Valores por defecto según el contrato del proyecto.
+# Valores por defecto según el contrato del proyecto: PRODUCCIÓN (el LXC).
+# Así cualquier instalación nueva / PC del cyber arranca apuntando al real.
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "api_url": "http://192.168.3.99:3000",
+    "api_url": "http://192.168.2.251:3000",
     "game_path": "D:\\Call of Duty 6\\iw4x.exe",
-    # Servers por defecto: las DOS salas del LXC de producción (Sala 1
-    # primero = default) + Local. Los defaults de api_url/web_url siguen
-    # siendo los de DESARROLLO: es el config de distribución
-    # (dist\launcher.config.json) el que apunta API/web al LXC.
+    # Servers por defecto: las DOS salas del LXC de producción + Local
+    # (mismo host que la API/web de arriba).
     "servers": [
         {"name": "Sala 1",  "address": "192.168.2.251:28960"},
         {"name": "Sala 2",  "address": "192.168.2.251:28961"},
@@ -91,15 +90,17 @@ def normalize_api_url(url: str, default: str = DEFAULT_CONFIG["api_url"]) -> str
     return (scheme or "http://") + rest
 
 
-# Puerto de la web de ranking (Vite, apps/web): el launcher la abre en el
-# navegador con los enlaces "RANKING WEB ↗" / "WEB ↗".
-WEB_PORT = 5173
+# Puerto de la web de ranking en el LXC (Vite preview, apps/web): el
+# launcher la abre en el navegador con los enlaces "RANKING WEB ↗" / "WEB ↗".
+# Para desarrollo local (Vite dev en 5173) sobreescribe api_url/web_url en tu
+# launcher.config.json.
+WEB_PORT = 4173
 
 
 def default_web_url(api_url: str = DEFAULT_CONFIG["api_url"]) -> str:
     """Web del ranking derivada de la API (pura): MISMO host, puerto WEB_PORT.
 
-    ``http://192.168.3.99:3000`` → ``http://192.168.3.99:5173``. Del api_url
+    ``http://192.168.2.251:3000`` → ``http://192.168.2.251:4173``. Del api_url
     solo se toma el host (se descartan puerto y posible path); esquema y
     barra los recompone ``normalize_api_url``. Si el api_url no tiene host
     utilizable → ``""``.

@@ -429,8 +429,8 @@ def phase_app_config() -> None:
                                   "default_server", "simulate_game",
                                   "cloud_save", "autosave_minutes"},
           str(sorted(DEFAULT_CONFIG)))
-    check("DEFAULT_CONFIG: api_url de LAN y cloud_save activado",
-          DEFAULT_CONFIG["api_url"] == "http://192.168.3.99:3000"
+    check("DEFAULT_CONFIG: api_url del LXC de producción y cloud_save activado",
+          DEFAULT_CONFIG["api_url"] == "http://192.168.2.251:3000"
           and DEFAULT_CONFIG["cloud_save"] is True
           and DEFAULT_CONFIG["simulate_game"] is False, str(DEFAULT_CONFIG["api_url"]))
     check("DEFAULT_CONFIG: sin claves del polling de candidatos (eliminado)",
@@ -472,16 +472,16 @@ def phase_app_config() -> None:
     check("app_config: servers inválidos se filtran (solo {name,address})",
           cfg.servers == [{"name": "LAN", "address": "1.1.1.1:1"},], str(cfg.servers))
 
-    # --- web_url (nueva): default DERIVADO del api_url (mismo host, :5173) ----
+    # --- web_url (nueva): default DERIVADO del api_url (mismo host, :4173) ----
     check("web_url: clave nueva en DEFAULT_CONFIG, derivada del api_url del contrato",
-          DEFAULT_CONFIG.get("web_url") == "http://192.168.3.99:5173",
+          DEFAULT_CONFIG.get("web_url") == "http://192.168.2.251:4173",
           str(DEFAULT_CONFIG.get("web_url")))
-    check("web_url: dict vacío → derivada del api_url default (host 192.168.3.99)",
-          AppConfig({}).web_url == "http://192.168.3.99:5173",
+    check("web_url: dict vacío → derivada del api_url default (host 192.168.2.251)",
+          AppConfig({}).web_url == "http://192.168.2.251:4173",
           AppConfig({}).web_url)
-    check("web_url: api_url distinta → misma regla (host de la API, puerto 5173)",
+    check("web_url: api_url distinta → misma regla (host de la API, puerto 4173)",
           AppConfig({"api_url": "http://10.0.0.5:3000"}).web_url
-          == "http://10.0.0.5:5173",
+          == "http://10.0.0.5:4173",
           AppConfig({"api_url": "http://10.0.0.5:3000"}).web_url)
     check("web_url: clave propia manda y se normaliza (esquema/barra, puerto intacto)",
           AppConfig({"web_url": "miweb.lan:5173/"}).web_url

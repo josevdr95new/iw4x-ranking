@@ -11,7 +11,7 @@ servers crezca.
 
 CONEXIÓN: API URL (normalizada al guardar, PROBAR sigue igual) y WEB URL
 (el launcher la abre en el navegador con ABRIR; vacía = derivada del
-api_url: mismo host, puerto 5173).
+api_url: mismo host, puerto 4173).
 
 SERVERS DE JUEGO: lista EDITABLE completa — cada fila es nombre+dirección
 con USAR (default_server, el que usa JUGAR) y BORRAR; AÑADIR agrega una
@@ -148,7 +148,7 @@ class SettingsFrame(ctk.CTkFrame):
         _caption(inner, "DIRECCIÓN DE LA API").pack(fill="x")
         self.api_url = _entry(inner)
         self.api_url.pack(fill="x", pady=(2, 0))
-        _hint(inner, "URL de la API del ranking — ej. http://192.168.3.99:3000"
+        _hint(inner, "URL de la API del ranking — ej. http://192.168.2.251:3000"
               ).pack(fill="x", pady=(0, SP["m"]))
 
         _caption(inner, "WEB URL").pack(fill="x")
@@ -162,7 +162,7 @@ class SettingsFrame(ctk.CTkFrame):
         bind_ghost_focus(self.web_open_btn)
         self.web_hint = _hint(
             inner, "Web del ranking en tu navegador. "
-            "vacío = mismo host que la API, puerto 5173")
+            "vacío = mismo host que la API, puerto 4173")
         self.web_hint.pack(fill="x", pady=(0, SP["m"]))
 
         hairline(inner).pack(fill="x", pady=(0, SP["m"]))
@@ -446,7 +446,7 @@ class SettingsFrame(ctk.CTkFrame):
         self.api_url.delete(0, "end")
         self.api_url.insert(0, cfg.api_url)
         # WEB URL: el valor fijado en el config (si la clave no existe, el
-        # campo queda VACÍO = se deriva del api_url: mismo host, puerto 5173).
+        # campo queda VACÍO = se deriva del api_url: mismo host, puerto 4173).
         self.web_url.delete(0, "end")
         self.web_url.insert(0, str(cfg.data.get("web_url") or ""))
         self.game_path.delete(0, "end")
@@ -720,14 +720,14 @@ class SettingsFrame(ctk.CTkFrame):
         set_button_busy(self.save_btn, "GUARDANDO…")
         try:
             # WEB URL: normalizada al guardar; VACÍA → se QUITA la clave para
-            # que siga derivándose del api_url (mismo host, puerto 5173) y
+            # que siga derivándose del api_url (mismo host, puerto 4173) y
             # los enlaces WEB no se oculten.
             web_typed = self.web_url.get().strip()
             if web_typed:
                 web = normalize_api_url(web_typed, default="")
                 if not web:
                     self.feedback.configure(
-                        text="WEB URL no válida (ej. http://192.168.3.99:5173)",
+                        text="WEB URL no válida (ej. http://192.168.2.251:4173)",
                         text_color=COLORS["warn"],
                     )
                     return

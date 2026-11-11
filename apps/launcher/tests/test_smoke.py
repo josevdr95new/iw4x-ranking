@@ -3158,8 +3158,8 @@ def phase_settings_servers() -> None:
                   f"api={st.api_url.winfo_ismapped()} "
                   f"web={st.web_url.winfo_ismapped()}")
             check("ajustes: hint del WEB URL documenta la derivación "
-                  "('vacío = mismo host que la API, puerto 5173')",
-                  "puerto 5173" in str(st.web_hint.cget("text")),
+                  "('vacío = mismo host que la API, puerto 4173')",
+                  "puerto 4173" in str(st.web_hint.cget("text")),
                   repr(str(st.web_hint.cget("text"))))
             check("ajustes: hint de servers con el formato esperado "
                   "('host:puerto — ej. 192.168.1.50:28961')",

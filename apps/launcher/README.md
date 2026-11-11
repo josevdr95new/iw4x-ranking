@@ -40,15 +40,15 @@ ratón).
 
 ### Ejemplo (valores por defecto si no existe)
 
-Los defaults del código (`DEFAULT_CONFIG` en `app_config.py`) son de
-**DESARROLLO** en API/web (contrato dev: la API del dueño y la web en el
-puerto 5173 de Vite); los **servers** por defecto son las DOS salas del LXC
-de producción (Sala 1 primero) + Local:
+Los defaults del código (`DEFAULT_CONFIG` en `app_config.py`) son los de
+**PRODUCCIÓN** (el LXC): API en `:3000`, web en `:4173` y las DOS salas de
+juego + Local (Sala 1 primero). Para **desarrollo local** sobreescribe
+`api_url` y `web_url` en tu `launcher.config.json` (Vite dev corre en 5173):
 
 ```json
 {
-  "api_url": "http://192.168.3.99:3000",
-  "web_url": "http://192.168.3.99:5173",
+  "api_url": "http://192.168.2.251:3000",
+  "web_url": "http://192.168.2.251:4173",
   "game_path": "D:\\Call of Duty 6\\iw4x.exe",
   "servers": [
     { "name": "Sala 1",  "address": "192.168.2.251:28960" },
@@ -65,8 +65,10 @@ de producción (Sala 1 primero) + Local:
 ### Producción (LXC Debian 12 en Proxmox — 192.168.2.251)
 
 El **config de distribución** (`dist\launcher.config.json`, el que se entrega
-JUNTO al `IW4xLauncher.exe`) apunta al LXC de producción, donde corren la API
-ranking (:3000), la web (:4173) y DOS salas de juego (:28960 y :28961):
+JUNTO al `IW4xLauncher.exe`) apunta al mismo LXC de producción — y los
+defaults del exe coinciden, así que una instalación sin config también
+arranca bien. En el LXC corren la API ranking (:3000), la web (:4173) y DOS
+salas de juego (:28960 y :28961):
 
 ```json
 {
@@ -88,14 +90,14 @@ ranking (:3000), la web (:4173) y DOS salas de juego (:28960 y :28961):
 ```
 
 > La web de PRODUCCIÓN corre en el puerto **4173** (preview de Vite), no en
-> el 5173 del dev: por eso el config de distribución fija `web_url`
-> explícito en vez de derivarlo del `api_url`. El launcher lee este archivo
-> EN CADA ARRANQUE (runtime): cambiar el config NO requiere rebuild — pero
-> sí **cerrar y volver a abrir** el launcher (uno abierto conserva la config
-> que cargó al arrancar).
+> el 5173 del dev: el default se deriva del `api_url` con ese puerto, y el
+> config de distribución además fija `web_url` explícito. El launcher lee
+> este archivo EN CADA ARRANQUE (runtime): cambiar el config NO requiere
+> rebuild — pero sí **cerrar y volver a abrir** el launcher (uno abierto
+> conserva la config que cargó al arrancar).
 
 > **OJO con `api_url`:** apunta a la **API** (puerto **3000**), no a la web
-> (puerto 5173). Un valor como `"127.0.0.1:5173"` deja el launcher sin poder
+> (puerto 4173). Un valor como `"127.0.0.1:4173"` deja el launcher sin poder
 > entrar. Si escribes la IP sin esquema (`"127.0.0.1:3000"`), el launcher la
 > normaliza solo a `http://127.0.0.1:3000` (nunca inventa ni cambia puertos).
 > Con la API mal configurada, la franja CONEXIÓN del login queda en rojo
@@ -104,7 +106,7 @@ ranking (:3000), la web (:4173) y DOS salas de juego (:28960 y :28961):
 | Clave                   | Significado                                                  |
 | ----------------------- | ------------------------------------------------------------ |
 | `api_url`               | Base de la API (el launcher añade el prefijo `/api/...`). Editable **desde el login** (franja CONEXIÓN) y en Ajustes. |
-| `web_url`               | Web del ranking que se abre en el navegador con los enlaces **RANKING WEB ↗** (login) y **WEB ↗** (cabecera de la home). Default **derivado del `api_url`**: mismo host, puerto **5173** (la web Vite dev) — p. ej. `http://192.168.3.99:3000` → `http://192.168.3.99:5173`. Si la web vive en otro host/puerto, escríbelo aquí (se normaliza: añade `http://` y recorta la barra final, nunca inventa puertos). Un valor **vacío (`""`) oculta los dos enlaces**. En PRODUCCIÓN la web va en el **4173** (preview de Vite) y el config de distribución lo fija explícito (`http://192.168.2.251:4173`). |
+| `web_url`               | Web del ranking que se abre en el navegador con los enlaces **RANKING WEB ↗** (login) y **WEB ↗** (cabecera de la home). Default **derivado del `api_url`**: mismo host, puerto **4173** (la web en el LXC) — p. ej. `http://192.168.2.251:3000` → `http://192.168.2.251:4173`. Si la web vive en otro host/puerto, escríbelo aquí (se normaliza: añade `http://` y recorta la barra final, nunca inventa puertos). Un valor **vacío (`""`) oculta los dos enlaces**. Para desarrollo local (Vite dev en 5173) sobreescribe `api_url` y `web_url` en tu `launcher.config.json`. |
 | `game_path`             | Ruta de `iw4x.exe`. Editable en Ajustes (con selector).       |
 | `servers`               | Lista de servers `{name, address}` para el dropdown.          |
 | `default_server`        | Índice del server seleccionado al abrir. Editable en Ajustes. |
