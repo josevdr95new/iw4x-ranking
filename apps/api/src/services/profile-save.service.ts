@@ -291,6 +291,16 @@ export function getLatestSave(userId: number): SaveManifest | null {
   return readLatestManifest(userId);
 }
 
+/**
+ * Borra COMPLETO el árbol de cloud saves de una cuenta (<dir>/<userId>/):
+ * latest.json + todas las versiones. Lo usa DELETE /api/admin/accounts/:id
+ * (borrado de cuenta por el admin). Idempotente: si la cuenta nunca subió un
+ * save, el dir no existe y rmSync force no falla.
+ */
+export function deleteProfileStorage(userId: number): void {
+  rmSync(userRoot(userId), { recursive: true, force: true });
+}
+
 /** GET /api/profile/save/versions: resumen de todas las versiones retenidas (nueva primero). */
 export function listSaveVersions(userId: number): SaveVersionSummary[] {
   const summaries: SaveVersionSummary[] = [];

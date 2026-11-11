@@ -44,11 +44,16 @@ import {
   setBotCount,
   setBotDifficulty,
 } from '../services/server-bots.service.js';
+import { adminAccountsRouter } from './admin-accounts.routes.js';
 
 export const adminRouter: Router = Router();
 
 // Toda la rama /admin exige JWT + rol ADMIN (leído fresco de la DB en cada request).
 adminRouter.use(requireAuth, requireAdmin);
+
+// Gestión de cuentas (ver/cambiar password/renombrar/rol/borrar/desvincular guid).
+// Montada debajo del gate: hereda requireAuth + requireAdmin.
+adminRouter.use('/accounts', adminAccountsRouter);
 
 adminRouter.get(
   '/server-config',

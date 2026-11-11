@@ -128,4 +128,40 @@ export const Errors = {
       `El GUID ${guid} pertenece al rango dedicado de BOTS (0xb07…): los bots no son cuentas y no se pueden vincular.`,
     );
   },
+
+  // ── Gestión de cuentas por el ADMIN del panel (/api/admin/accounts) ────────
+
+  accountNotFound(): AppError {
+    return new AppError(404, 'ACCOUNT_NOT_FOUND', 'No existe ninguna cuenta con ese id.');
+  },
+  /** Password fijada por el admin fuera del rango del registro (8..64). */
+  accountWeakPassword(): AppError {
+    return new AppError(400, 'ACCOUNT_WEAK_PASSWORD', 'La contraseña debe tener entre 8 y 64 caracteres.');
+  },
+  /** Colisión de email en PATCH (código propio del panel; el registro usa EMAIL_TAKEN 409). */
+  accountEmailTaken(): AppError {
+    return new AppError(400, 'ACCOUNT_EMAIL_TAKEN', 'Ya existe OTRA cuenta con ese email.');
+  },
+  /** Colisión de nick (displayNameNormalized) en PATCH (el registro usa NICK_TAKEN 409). */
+  accountNickTaken(): AppError {
+    return new AppError(400, 'ACCOUNT_NICK_TAKEN', 'Ese nick ya está reservado por otra cuenta.');
+  },
+  /**
+   * El panel no puede quedarse sin administradores. PATCH (degradar al último
+   * ADMIN) → 403; DELETE (borrar la última cuenta ADMIN) → 400.
+   */
+  accountLastAdmin(statusCode: 400 | 403 = 403): AppError {
+    const message =
+      statusCode === 403
+        ? 'No puedes degradar a la última cuenta ADMIN restante: el panel se quedaría sin administradores.'
+        : 'No puedes borrar la última cuenta ADMIN restante: el panel se quedaría sin administradores.';
+    return new AppError(statusCode, 'ACCOUNT_LAST_ADMIN', message);
+  },
+  accountSelfDelete(): AppError {
+    return new AppError(400, 'ACCOUNT_SELF_DELETE', 'No puedes borrar tu propia cuenta desde el panel de administración.');
+  },
+  /** DELETE /api/admin/accounts/:id/guids/:guid cuando ese guid NO está vinculado a esa cuenta. */
+  accountGuidNotLinked(guid: string): AppError {
+    return new AppError(404, 'ACCOUNT_GUID_NOT_LINKED', `El GUID ${guid} no está vinculado a esa cuenta.`);
+  },
 };
