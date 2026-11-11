@@ -11,6 +11,20 @@
  *  - `current` sale SIEMPRE del status EN VIVO (línea `map:`).
  *  - Escrituras (map/map_rotate/fast_restart): UN intento, sin retry (mismo
  *    criterio que la moderación: un cambio de mapa duplicado es real).
+ *  - VERIFICACIÓN POST-FALLO (fix 502 falso negativo): al ejecutar `map <id>`
+ *    el server cierra la partida (ShutdownGame) y puede NO responder RCON a
+ *    tiempo aunque el cambio SÍ aplique (verificado en producción: el dueño
+ *    cambió Terminal→Rust, la API tiró 502 "no respondió" y el mapa CAMBIO).
+ *    Si la escritura falla, se hace polling de `status` (ignorando polls que
+ *    fallen: durante la carga el server puede seguir mudo) durante
+ *    RCON_MAP_VERIFY_TIMEOUT_MS (default 45s, cada RCON_MAP_VERIFY_INTERVAL_MS,
+ *    default 4s). Confirma el mapa pedido (o, en map_rotate, un mapa DISTINTO
+ *    al anterior) → cambio VERIFICADO; si el plazo vence → AHORA SÍ error
+ *    original (toAppError → 502 MODERATION_UNREACHABLE).
+ *  - MULTI-SALA: los comandos de mapas van por getSharedRcon() (server único
+ *    legacy, RCON_HOST/RCON_PORT — este servicio NO itera RCON_SALAS), así que
+ *    la verificación hace polling del MISMO cliente que recibió el comando:
+ *    es exacto por construcción (1 comando → 1 target → 1 status).
  *  - Errores rcon → mismo manejo que la moderación: 503 MODERATION_NOT_CONFIGURED
  *    si falta RCON_PASSWORD, 502 MODERATION_UNREACHABLE si el server no responde.
  */
@@ -91,13 +105,88 @@ export async function getMapsOverview(): Promise<MapsOverview> {
 export interface MapChangeResult {
   sent: true;
   map: string;
+  /** true cuando el cambio quedó confirmado (ACK directo o visto en status). */
+  verified: boolean;
   note: string;
+}
+
+// ── Verificación post-fallo (polling de status) ─────────────────────────────
+
+/** Lee un entero ms de la env (se lee EN CADA llamada, patrón del proyecto). */
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Ventana total de verificación tras un write fallido (default 45s). */
+function verifyTimeoutMs(): number {
+  return envMs('RCON_MAP_VERIFY_TIMEOUT_MS', 45_000);
+}
+
+/** Intervalo entre polls de status (default 4s). */
+function verifyIntervalMs(): number {
+  return envMs('RCON_MAP_VERIFY_INTERVAL_MS', 4_000);
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Polling de `status` hasta que el server reporte `map: <mapId>` (o venza el
+ * plazo). Los polls que fallen se IGNORAN (durante el cambio de mapa el server
+ * también puede no responder RCON) — la única señal de éxito es el mapname
+ * pedido apareciendo EN VIVO. true = verificado.
+ */
+async function pollUntilMap(mapId: string): Promise<boolean> {
+  const deadline = Date.now() + verifyTimeoutMs();
+  while (Date.now() < deadline) {
+    await sleep(Math.max(0, Math.min(verifyIntervalMs(), deadline - Date.now())));
+    try {
+      const status = await getSharedRcon().status();
+      if (status.map !== null && status.map.trim().toLowerCase() === mapId) return true;
+    } catch {
+      // Poll fallido: el server sigue cargando (o mudo). Se ignora y se sigue.
+    }
+  }
+  return false;
+}
+
+/** Mapa actual EN VIVO (null si el status falla o no reporta `map:`). */
+async function currentMapOrNull(): Promise<string | null> {
+  try {
+    return (await getSharedRcon().status()).map;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Polling de `status` hasta que el mapa actual sea DISTINTO al anterior
+ * (para map_rotate, cuyo destino no se conoce de antemano). Misma tolerancia
+ * a polls fallidos que pollUntilMap.
+ */
+async function pollUntilMapChanged(previousMap: string): Promise<boolean> {
+  const deadline = Date.now() + verifyTimeoutMs();
+  const previous = previousMap.trim().toLowerCase();
+  while (Date.now() < deadline) {
+    await sleep(Math.max(0, Math.min(verifyIntervalMs(), deadline - Date.now())));
+    try {
+      const status = await getSharedRcon().status();
+      if (status.map !== null && status.map.trim().toLowerCase() !== previous) return true;
+    } catch {
+      // Poll fallido: se ignora y se sigue hasta el plazo.
+    }
+  }
+  return false;
 }
 
 /**
  * POST /api/admin/server/map {map}: valida contra el catálogo (desconocido →
- * 400) y envía `map <id>` por rcon (1 intento). El cambio tarda unos segundos
- * (ShutdownGame + carga) — se documenta en la respuesta, no se espera.
+ * 400) y envía `map <id>` por rcon (1 intento). El server cierra la partida
+ * para cargar el mapa y puede NO responder RCON a tiempo aunque el cambio SÍ
+ * aplique (502 falso negativo visto en producción): si el write falla se
+ * verifica con polling de `status` (hasta 45s) antes de tirar el error.
  */
 export async function changeMap(mapIdRaw: string): Promise<MapChangeResult> {
   const mapId = mapIdRaw.trim().toLowerCase();
@@ -115,13 +204,26 @@ export async function changeMap(mapIdRaw: string): Promise<MapChangeResult> {
   }
   try {
     await getSharedRcon().map(mapId);
+    // ACK directo: el server aceptó el comando y está cargando el mapa.
     return {
       sent: true,
       map: mapId,
-      note: 'Comando enviado. El cambio de mapa tarda unos segundos en aplicarse (el server cierra la partida y carga el nuevo mapa).',
+      verified: true,
+      note: 'Comando enviado y verificado. El server está cargando el mapa (el cambio tarda unos segundos en aplicarse: cierra la partida y carga el nuevo).',
     };
-  } catch (err) {
-    throw toAppError(err);
+  } catch (sendErr) {
+    // FALLO del write (típico: RconTimeoutError durante ShutdownGame). Antes
+    // de dar 502 falso negativo: ¿el mapa pedido aparece EN VIVO?
+    if (await pollUntilMap(mapId)) {
+      return {
+        sent: true,
+        map: mapId,
+        verified: true,
+        note: 'Comando enviado y verificado por status: el server ya reporta el mapa nuevo y está cargando la partida (tarda unos segundos en completarse).',
+      };
+    }
+    // Sin confirmación en el plazo: el error original manda (502/503 real).
+    throw toAppError(sendErr);
   }
 }
 
@@ -140,6 +242,9 @@ export async function rotateMap(): Promise<RotateResult> {
       'La moderación nativa no está configurada: define RCON_PASSWORD.',
     );
   }
+  // Mapa ANTERIOR al comando (best-effort): si el write falla, la verificación
+  // compara el status EN VIVO contra este.
+  const previous = await currentMapOrNull();
   try {
     await getSharedRcon().mapRotate();
     return {
@@ -147,8 +252,18 @@ export async function rotateMap(): Promise<RotateResult> {
       command: 'map_rotate',
       note: 'Comando enviado. El server avanza al siguiente mapa de la rotación (tarda unos segundos).',
     };
-  } catch (err) {
-    throw toAppError(err);
+  } catch (sendErr) {
+    // Mismo patrón que changeMap: map_rotate cierra la partida y puede dejar
+    // el RCON mudo aunque la rotación aplique. Sin mapa anterior capturado no
+    // hay comparación posible → error original directo.
+    if (previous !== null && (await pollUntilMapChanged(previous))) {
+      return {
+        sent: true,
+        command: 'map_rotate',
+        note: 'Comando enviado y verificado por status: el server reporta un mapa distinto al anterior (rotación aplicada, tarda unos segundos).',
+      };
+    }
+    throw toAppError(sendErr);
   }
 }
 

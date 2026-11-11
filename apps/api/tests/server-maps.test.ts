@@ -175,3 +175,144 @@ describe('POST /api/admin/server/rotate y /fast_restart', () => {
     expect((await req().post('/api/admin/server/fast_restart')).status).toBe(401);
   });
 });
+
+// ── Verificación post-fallo (502 falso negativo del cambio de mapa) ────────
+//
+// Producción: `map <id>` cierra la partida y el server NO responde RCON a
+// tiempo aunque el cambio SÍ aplique. Con ackWrites:false el fake replica ese
+// comportamiento (los writes se quedan sin respuesta → RconTimeoutError) y los
+// status siguen respondiendo (con el mapa nuevo tras el cambio).
+
+const BASE_STATUS = 'map: mp_terminal\nnum score ping guid\n';
+
+/**
+ * Reemplaza el fake del beforeEach por uno que MUTA los writes (sin ACK):
+ * el write jamás responde (timeout real del cliente) pero `status` sigue
+ * respondiendo. Re-punta la env al puerto nuevo y resetea el cliente shared.
+ */
+async function useMuteWritesFake(): Promise<FakeRconServer> {
+  await fake.stop();
+  const silent = new FakeRconServer({ password: PASSWORD, ackWrites: false, statusText: BASE_STATUS });
+  await silent.start();
+  fake = silent;
+  useFake(fake);
+  resetSharedRcon();
+  return fake;
+}
+
+describe('POST /api/admin/server/map: verificación por polling tras timeout', () => {
+  const VERIFY_ENV: Record<string, string | undefined> = {
+    RCON_MAP_VERIFY_TIMEOUT_MS: process.env.RCON_MAP_VERIFY_TIMEOUT_MS,
+    RCON_MAP_VERIFY_INTERVAL_MS: process.env.RCON_MAP_VERIFY_INTERVAL_MS,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(VERIFY_ENV)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('timeout del `map` + status confirma el mapa nuevo → 200 {sent, map, verified:true}', async () => {
+    process.env.RCON_MAP_VERIFY_TIMEOUT_MS = '1500';
+    process.env.RCON_MAP_VERIFY_INTERVAL_MS = '60';
+    const silent = await useMuteWritesFake();
+    // Al recibir el write `map mp_rust`, el server "cambia" el status EN VIVO
+    // (aunque el ACK nunca llegue: ShutdownGame silencia el RCON).
+    silent.setOnCommand((command, server) => {
+      if (command.startsWith('map ')) {
+        server.setStatusText('map: mp_rust\nnum score ping guid\n');
+      }
+    });
+    const res = await req().post('/api/admin/server/map').set('Authorization', `Bearer ${adminToken}`).send({ map: 'mp_rust' });
+    expect(res.status).toBe(200);
+    const body = res.body as { sent: boolean; map: string; verified: boolean; note: string };
+    expect(body.sent).toBe(true);
+    expect(body.map).toBe('mp_rust');
+    expect(body.verified).toBe(true);
+    expect(body.note).toContain('verificado');
+    // El write salió (una sola vez, sin retry) y la verificación leyó status.
+    expect(fake.commandsWith('map ').map((entry) => entry.command)).toEqual(['map mp_rust']);
+    expect(fake.statusReplyCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('timeout del `map` + status NUNCA confirma → 502 MODERATION_UNREACHABLE (error original)', async () => {
+    process.env.RCON_MAP_VERIFY_TIMEOUT_MS = '400';
+    process.env.RCON_MAP_VERIFY_INTERVAL_MS = '60';
+    // El status sigue en mp_terminal durante toda la ventana: sin confirmación.
+    await useMuteWritesFake();
+    const res = await req().post('/api/admin/server/map').set('Authorization', `Bearer ${adminToken}`).send({ map: 'mp_rust' });
+    expect(res.status).toBe(502);
+    expect((res.body as { error: { code: string; message: string } }).error.code).toBe('MODERATION_UNREACHABLE');
+    expect((res.body as { error: { message: string } }).error.message).toContain('no respondió');
+    // Hubo polling (más de 1 status) y el write no se reintentó.
+    expect(fake.statusReplyCount).toBeGreaterThanOrEqual(2);
+    expect(fake.commandsWith('map ').map((entry) => entry.command)).toEqual(['map mp_rust']);
+  });
+
+  it('write OK a la primera → verified:true y NINGÚN polling extra de verificación', async () => {
+    const statusesBefore = fake.statusReplyCount;
+    const res = await req().post('/api/admin/server/map').set('Authorization', `Bearer ${adminToken}`).send({ map: 'mp_rust' });
+    expect(res.status).toBe(200);
+    const body = res.body as { sent: boolean; map: string; verified: boolean };
+    expect(body.sent).toBe(true);
+    expect(body.map).toBe('mp_rust');
+    expect(body.verified).toBe(true);
+    expect(fake.statusReplyCount).toBe(statusesBefore); // sin polling post-write
+  });
+});
+
+describe('POST /api/admin/server/rotate: verificación por polling tras timeout', () => {
+  const VERIFY_ENV: Record<string, string | undefined> = {
+    RCON_MAP_VERIFY_TIMEOUT_MS: process.env.RCON_MAP_VERIFY_TIMEOUT_MS,
+    RCON_MAP_VERIFY_INTERVAL_MS: process.env.RCON_MAP_VERIFY_INTERVAL_MS,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(VERIFY_ENV)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('timeout del map_rotate + status reporta mapa DISTINTO al anterior → 200 verificado', async () => {
+    process.env.RCON_MAP_VERIFY_TIMEOUT_MS = '1500';
+    process.env.RCON_MAP_VERIFY_INTERVAL_MS = '60';
+    const silent = await useMuteWritesFake();
+    silent.setOnCommand((command, server) => {
+      if (command === 'map_rotate') {
+        server.setStatusText('map: mp_highrise\nnum score ping guid\n');
+      }
+    });
+    const res = await req().post('/api/admin/server/rotate').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { sent: boolean; command: string; note: string };
+    expect(body.sent).toBe(true);
+    expect(body.command).toBe('map_rotate');
+    expect(body.note).toContain('verificado');
+    expect(fake.received.map((entry) => entry.command)).toContain('map_rotate');
+  });
+
+  it('timeout del map_rotate + status no cambia → 502 MODERATION_UNREACHABLE', async () => {
+    process.env.RCON_MAP_VERIFY_TIMEOUT_MS = '400';
+    process.env.RCON_MAP_VERIFY_INTERVAL_MS = '60';
+    await useMuteWritesFake(); // status se queda en mp_terminal
+    const res = await req().post('/api/admin/server/rotate').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+    expect((res.body as { error: { code: string } }).error.code).toBe('MODERATION_UNREACHABLE');
+    expect(fake.statusReplyCount).toBeGreaterThanOrEqual(2); // hubo polling
+    expect(fake.received.map((entry) => entry.command)).toContain('map_rotate');
+  });
+
+  it('fast_restart NO cambia: responde normal sin verificación post-fallo (comportamiento intacto)', async () => {
+    // Con writes mudos el write de fast_restart también muere... pero
+    // fast_restart no tiene polling: debe seguir fallando como siempre (502).
+    process.env.RCON_MAP_VERIFY_TIMEOUT_MS = '400';
+    process.env.RCON_MAP_VERIFY_INTERVAL_MS = '60';
+    await useMuteWritesFake();
+    const res = await req().post('/api/admin/server/fast_restart').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(502);
+    expect((res.body as { error: { code: string } }).error.code).toBe('MODERATION_UNREACHABLE');
+    expect(fake.received.map((entry) => entry.command)).toContain('fast_restart');
+  });
+});
