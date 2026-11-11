@@ -67,6 +67,9 @@ Qué verifica:
                  stub por PID + upload post-sesión y vuelve a JUGAR;
                  DETENIENDO… ignora clicks extra; si el juego se cierra
                  solo (game_closed) el botón también vuelve a JUGAR.
+  14. (GUI)      créditos META (ui/theme.py): línea de créditos en la franja
+                 inferior del home y bloque '// ACERCA DE //' al final del
+                 scroll de AJUSTES, ambos con el copy exacto derivado.
 
 Híbridos que quedan aquí (con red/GUI o estado): pipeline stub de
 cloud-sync, todas las fases GUI, fases headless contra la API real y los
@@ -97,7 +100,17 @@ import save_sync as ss  # noqa: E402
 from save_sync import decide_sync  # noqa: E402
 from ui.main_window import App  # noqa: E402
 from ui.stats_panel import GRID_ORDER, MEDAL_IMG_H  # noqa: E402
-from ui.theme import COLORS, MEDAL_TIER_COLORS  # noqa: E402
+from ui.theme import (  # noqa: E402
+    COLORS,
+    MEDAL_TIER_COLORS,
+    META,
+    credits_acerca_de,
+    credits_compact,
+    descripcion_acerca_de,
+    marca_visible,
+    section_text,
+    version_tag,
+)
 from user_store import UserStore  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -3394,6 +3407,73 @@ def phase_settings_servers() -> None:
         ac_module.config_path = orig_config_path  # siempre, incluso en abort
 
 
+def phase_meta_credits() -> None:
+    """Fase GUI: créditos META (identidad central, CTHLG.pro → ui/theme.py).
+
+    - home: caption dim mono en la FRANJA INFERIOR (cabecera de la consola)
+      con el copy exacto derivado de META: 'CTHLG MW2 RANKING v0.1.5 · 2026 ·
+      José Domínguez Ramírez · Rafael Font Rojas'.
+    - AJUSTES: bloque '// ACERCA DE //' al FINAL del scroll con marca +
+      versión grandes ('CTHLG MW2 RANKING v0.1.5'), la descripción del
+      producto (juego MW2 2009 + engine IW4x) y la línea '2026 ·
+      Desarrollado por …'. Contacto vacío en META → sin línea de contacto.
+    """
+    print("\n=== Fase créditos META: home + ACERCA DE (copy exacto) ===")
+    api = ApiClient(API_URL)
+    try:
+        token = ensure_login_retry(api)
+        UserStore(STORE_PATH).save(token, EMAIL, DISPLAY)
+    except Exception as exc:
+        check("preparación créditos (login)", False, str(exc))
+        return
+
+    def step_home_credits(app: App, done: Callable[[], None]) -> None:
+        def ok() -> None:
+            lbl = app.home_frame.credits_label
+            check("home: línea de créditos MAPEADA en la franja inferior",
+                  bool(lbl.winfo_ismapped()), f"mgr={lbl.winfo_manager()!r}")
+            check("home: créditos con el copy EXACTO de META "
+                  "('CTHLG MW2 RANKING v0.1.5 · 2026 · autores')",
+                  str(lbl.cget("text")) == credits_compact(),
+                  f"{lbl.cget('text')!r} != {credits_compact()!r}")
+            done()
+
+        wait_in_app(app, lambda: app.current_frame is app.home_frame
+                    and app.token is not None, ok, timeout=15)
+
+    def step_about_settings(app: App, done: Callable[[], None]) -> None:
+        app.show_settings()
+        app.update_idletasks()
+        st = app.settings_frame
+        check("ajustes: bloque '// ACERCA DE //' mapeado al final del scroll",
+              bool(st.about_title.winfo_ismapped())
+              and str(st.about_title.cget("text")) == section_text("ACERCA DE"),
+              f"text={st.about_title.cget('text')!r} "
+              f"mgr={st.about_title.winfo_manager()!r}")
+        check("ajustes: marca + versión del programa desde META "
+              "('CTHLG MW2 RANKING v0.1.5')",
+              str(st.about_name.cget("text"))
+              == f'{marca_visible()} {version_tag()}',
+              f"{st.about_name.cget('text')!r} != "
+              f"'{marca_visible()} {version_tag()}'")
+        check("ajustes: descripción del producto (MW2 2009 + engine IW4x)",
+              str(st.about_descripcion.cget("text")) == descripcion_acerca_de(),
+              f"{st.about_descripcion.cget('text')!r} != "
+              f"{descripcion_acerca_de()!r}")
+        check("ajustes: línea de autoría '2026 · Desarrollado por …'",
+              str(st.about_authors.cget("text")) == credits_acerca_de(),
+              f"{st.about_authors.cget('text')!r} != {credits_acerca_de()!r}")
+        check("ajustes: contacto vacío en META → SIN línea de contacto",
+              META.get("contacto") == "")
+        app.show_home()
+        done()
+
+    run_phase("créditos META (home + ACERCA DE)",
+              [step_home_credits, step_about_settings],
+              lambda: App(make_test_cfg(), ApiClient(API_URL),
+                          UserStore(STORE_PATH)))
+
+
 def phase_server_status_live() -> None:
     """Estado REAL de servers: FUENTE /api/salas (stub del contrato) + FALLBACK TCP.
 
@@ -4097,6 +4177,11 @@ def main() -> int:
     # token de prueba se borró en las fases anteriores; su GUARDAR escribe
     # el launcher.config.json con ruta INYECTADA (jamás el real del dueño).
     phase_settings_servers()
+
+    # Créditos META (identidad central theme.META): línea de créditos en la
+    # franja inferior del home + bloque '// ACERCA DE //' de AJUSTES con el
+    # copy exacto derivado (v + año + autores; contacto vacío → sin línea).
+    phase_meta_credits()
 
     # Estado REAL de servers (pedido del dueño): probe TCP+getstatus contra
     # servers falsos locales (listener efímero) + pintado en AJUSTES/HOME.

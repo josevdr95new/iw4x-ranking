@@ -23,7 +23,7 @@ from game_flow import GameFlow
 from ui.home import HomeFrame
 from ui.login import LoginFrame
 from ui.settings import SettingsFrame
-from ui.theme import COLORS, asset_path
+from ui.theme import COLORS, META, asset_path, marca_visible, version_tag
 from user_store import UserStore
 
 log = logging.getLogger("app")
@@ -103,7 +103,9 @@ class App(ctk.CTk):
         self.autosave.start()
 
         # --- Ventana ---------------------------------------------------------
-        self.title("IW4X RANKING // TERMINAL DE JUGADOR")
+        # Title desde la identidad central (theme.META ← CTHLG.pro): marca
+        # en MAYÚSCULAS + versión → 'CTHLG MW2 RANKING v0.1.5'.
+        self.title(f'{marca_visible()} {version_tag()}')
         self.geometry("980x640")
         self.minsize(760, 500)
         self.configure(fg_color=COLORS["bg"])
@@ -721,6 +723,7 @@ class App(ctk.CTk):
             display_name=display_name,
             cloud_save=self.cfg.cloud_save,
             export_classes=self.cfg.export_classes,
+            fs_game=str(server.get("fsGame") or ""),
             game_dir=os.path.dirname(self.cfg.game_path) if self.cfg.game_path else "",
             user_id=str((self.user or {}).get("id") or ""),
         )

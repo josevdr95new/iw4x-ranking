@@ -65,13 +65,16 @@ def build_game_args(
     server_address: str,
     display_name: str = "",
     export_classes: bool = True,
+    fs_game: str = "",
 ) -> List[str]:
     """Construye el comando de arranque del juego (función pura, testeable).
 
     Devuelve una LISTA de argumentos (nunca string para shell): así los
     espacios en el nick no rompen nada. Formato:
 
-        [iw4x.exe, +set, name, <nick>, +connect, <ip:puerto>
+        [iw4x.exe, +set, name, <nick>
+         (, +set, fs_game, <mod>)          ← server CON mod (opcional)
+         , +connect, <ip:puerto>
          (, +dumpPlayerData)]
 
     El nick del ranking SIEMPRE viaja en el comando (decisión del dueño: el
@@ -80,6 +83,12 @@ def build_game_args(
     que el nick queda vigente para la sesión aunque el config del juego
     tenga guardado otro nombre. Si ``display_name`` viene vacío no se añade
     el ``+set`` — GameFlow bloquea el arranque antes de llegar aquí.
+
+    ``fs_game`` (opcional, del server seleccionado en el config): precarga
+    el mod ANTES de conectar (``+set fs_game mods/mp_bots`` ANTES de
+    ``+connect``) — fix del dueño: sin fs_game precargado, conectar a un
+    server con mod descarga, carga el mod y DEVUELVE AL MENÚ (hay que
+    conectar DOS veces). Sin fs_game → sin el ``+set`` (server sin mod).
 
     ``+dumpPlayerData`` (export_classes, default True) va AL FINAL, después
     de ``+connect``: los ``+`` comandos se ejecutan en orden tras cargar las
@@ -92,6 +101,9 @@ def build_game_args(
     nick = (display_name or "").strip()
     if nick:
         args += ["+set", "name", nick]
+    mod = (fs_game or "").strip()
+    if mod:
+        args += ["+set", "fs_game", mod]
     args += ["+connect", server_address]
     if export_classes:
         args += ["+dumpPlayerData"]
@@ -193,6 +205,7 @@ class GameFlow:
         quarantine_root_path: Optional[Path] = None,
         stat_quarantine_root_path: Optional[Path] = None,
         classes_store_path: Optional[Path] = None,
+        fs_game: str = "",
     ) -> None:
         self.api = api
         self.token = token
@@ -203,6 +216,7 @@ class GameFlow:
         self.already_linked = already_linked
         self.simulate = simulate
         self.display_name = display_name
+        self.fs_game = (fs_game or "").strip()
         self.cloud_save = cloud_save
         # Exportación de clases (dump /dumpPlayerData → perfil web) y su
         # store de hash INYECTABLE (tests: jamás toca el %APPDATA% real).
@@ -642,7 +656,7 @@ class GameFlow:
 
         cmd = build_game_args(
             self.game_path, self.server_address, self.display_name,
-            export_classes=self.export_classes,
+            export_classes=self.export_classes, fs_game=self.fs_game,
         )
 
         if self.simulate:
