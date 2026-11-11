@@ -600,6 +600,8 @@ export interface ServerMapsResponse {
 export interface ServerMapResult {
   sent: true;
   map: string;
+  /** true cuando el cambio quedó confirmado (ACK directo o visto en status tras el polling de verificación). */
+  verified: boolean;
   note: string;
 }
 
@@ -699,6 +701,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   let response: Response;
   try {
+    // Sin timeout de app a propósito: fetch espera la respuesta completa. Las escrituras de
+    // mapa/rotate (verificación RCON por polling) pueden tardar hasta ~45s y NO deben cortarse.
     response = await fetch(`/api${path}`, {
       method,
       headers,
@@ -883,12 +887,19 @@ export const api = {
     return request<ServerMapsResponse>("/admin/server/maps", { auth: true });
   },
 
-  /** POST /admin/server/map {map}: cambia el mapa (400 si desconocido). El cambio tarda unos segundos. */
+  /**
+   * POST /admin/server/map {map}: cambia el mapa (400 si desconocido). Puede tardar HASTA ~45s:
+   * si el server no responde RCON al enviar `map <id>` (normal al cerrar la partida), la API hace
+   * polling de verificación antes de responder (200 `{sent, map, verified, note}`) o 502 real.
+   */
   changeMap(map: string) {
     return request<ServerMapResult>("/admin/server/map", { method: "POST", body: { map }, auth: true });
   },
 
-  /** POST /admin/server/rotate: `map_rotate` — avanza al siguiente mapa de la rotación. */
+  /**
+   * POST /admin/server/rotate: `map_rotate` — avanza al siguiente mapa de la rotación.
+   * También puede tardar hasta ~45s (misma verificación por polling; 502 real si el server murió).
+   */
   rotateMap() {
     return request<ServerRotateResult>("/admin/server/rotate", { method: "POST", body: {}, auth: true });
   },

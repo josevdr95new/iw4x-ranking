@@ -16,7 +16,7 @@ import { ConfirmModal } from "../../components/ui/ConfirmModal";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Input } from "../../components/ui/Input";
 import { Panel } from "../../components/ui/Panel";
-import { Skeleton } from "../../components/ui/Spinner";
+import { Skeleton, Spinner } from "../../components/ui/Spinner";
 import { formatExpiresIn, formatInt, formatRelative } from "../../lib/format";
 import type { ReactNode } from "react";
 
@@ -39,6 +39,23 @@ function rconErrorText(error: unknown): string {
     return error.message;
   }
   return "No hay conexión con el servidor.";
+}
+
+/**
+ * Franja de estado "en espera" (HUD del panel, no alert): comando enviado y
+ * verificando con el server. La verificación RCON de map/rotate puede tardar ~45s.
+ */
+function WaitingStrip({ text }: { text: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-center gap-2.5 rounded-md border border-border-strong bg-surface-2 px-4 py-3 text-sm"
+    >
+      <Spinner size={16} />
+      <p className="type-caption text-text-2">{text}</p>
+    </div>
+  );
 }
 
 function Banner({ tone, children }: { tone: "success" | "warning"; children: ReactNode }) {
@@ -171,6 +188,8 @@ function MapsPanel() {
   const [pendingMap, setPendingMap] = useState<string | null>(null);
   const [busyMap, setBusyMap] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  /** Texto de la franja de espera mientras la API verifica el cambio con el server (hasta ~45s). */
+  const [waiting, setWaiting] = useState<string | null>(null);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [restartOpen, setRestartOpen] = useState(false);
   const [busyCommand, setBusyCommand] = useState<"rotate" | "fast_restart" | null>(null);
@@ -250,14 +269,18 @@ function MapsPanel() {
   const handleChangeMap = async (mapId: string) => {
     setBusyMap(mapId);
     setNotice(null);
+    // La API puede tardar hasta ~45s (verificación RCON por polling): franja de espera HUD.
+    const mapName = data?.maps.find((map) => map.id === mapId)?.name ?? mapId;
+    setWaiting(`CAMBIANDO A ${mapName.toUpperCase()}… verificando con el server (puede tardar hasta ~45s).`);
     try {
       const result = await api.changeMap(mapId);
-      setNotice({ ok: true, text: result.note });
+      setNotice({ ok: true, text: result.note || "MAPA VERIFICADO ✓" });
       setPendingMap(null);
       refreshSoon();
     } catch (error) {
       setNotice({ ok: false, text: rconErrorText(error) });
     } finally {
+      setWaiting(null);
       setBusyMap(null);
     }
   };
@@ -265,6 +288,10 @@ function MapsPanel() {
   const handleCommand = async (command: "rotate" | "fast_restart") => {
     setBusyCommand(command);
     setNotice(null);
+    // map_rotate también se verifica por polling (hasta ~45s); fast_restart es instantáneo.
+    if (command === "rotate") {
+      setWaiting("ROTANDO MAPA… verificando con el server (puede tardar hasta ~45s).");
+    }
     try {
       const result =
         command === "rotate" ? await api.rotateMap() : await api.fastRestart();
@@ -277,6 +304,7 @@ function MapsPanel() {
       setRotateOpen(false);
       setRestartOpen(false);
     } finally {
+      setWaiting(null);
       setBusyCommand(null);
     }
   };
@@ -334,6 +362,7 @@ function MapsPanel() {
     >
       <div className="space-y-5" aria-live="polite">
         {pollError && <Banner tone="warning">{pollError}</Banner>}
+        {waiting && <WaitingStrip text={waiting} />}
         {notice && <Banner tone={notice.ok ? "success" : "warning"}>{notice.text}</Banner>}
 
         <p className="type-caption text-text-2">
