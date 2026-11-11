@@ -39,7 +39,7 @@ from ui.hud import (
     set_button_busy,
     set_button_idle,
 )
-from ui.theme import COLORS, RADIUS, SP, font, section_text, tracked
+from ui.theme import COLORS, META, RADIUS, SP, font, section_text, tracked
 
 if TYPE_CHECKING:  # evita import circular solo por tipado
     from ui.main_window import App
@@ -78,7 +78,8 @@ class LoginFrame(ctk.CTkFrame):
             font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
         ).pack(pady=(SP["l"], SP["xs"]))
         ctk.CTkLabel(
-            content, text=tracked("IW4X RANKING"), font=font(30, "bold", mono=True),
+            # Marca visible desde META (← CTHLG.pro): 'CTHLG MW2 RANKING'.
+            content, text=tracked(META["nombre"].upper()), font=font(30, "bold", mono=True),
             text_color=COLORS["text"],
         ).pack()
         hairline(content, COLORS["accent_border"]).pack(

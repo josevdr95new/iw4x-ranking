@@ -1,7 +1,8 @@
 ﻿"""Pantalla de ajustes: API/WEB URL, servers de juego editables, game_path.
 
 Visual: bloques de sección '// CONEXIÓN //', '// JUEGO //' y
-'// SERVERS DE JUEGO //' con hairlines; acción única ámbar (GUARDAR).
+'// SERVERS DE JUEGO //' con hairlines; al final del scroll el bloque
+'// ACERCA DE //' (créditos META); acción única ámbar (GUARDAR).
 
 COMPACTO/SCROLL (mismo patrón que el LOGIN): el contenido vive en un
 Canvas+Scrollbar (rueda del ratón) para pantallas bajas, y las ACCIONES
@@ -70,7 +71,18 @@ from ui.hud import (
     set_button_busy,
     set_button_idle,
 )
-from ui.theme import COLORS, RADIUS, SP, font, section_text
+from ui.theme import (
+    COLORS,
+    META,
+    RADIUS,
+    SP,
+    credits_acerca_de,
+    descripcion_acerca_de,
+    font,
+    marca_visible,
+    section_text,
+    version_tag,
+)
 
 if TYPE_CHECKING:
     from ui.main_window import App
@@ -278,6 +290,35 @@ class SettingsFrame(ctk.CTkFrame):
         _hint(inner, "Desmarcado (recomendado en PC compartida): al cerrar se "
               "cierra tu sesión y el próximo jugador hace su propio login."
               ).pack(fill="x", pady=(0, SP["m"]))
+
+        # --- Acerca de (créditos META, única fuente: CTHLG.pro → theme) ------
+        # ÚLTIMO bloque del scroll: '// ACERCA DE //' con marca + versión
+        # grandes, la descripción del producto (juego + engine) y la línea
+        # de autoría (aquí SÍ vive el 'Desarrollado por'). La línea de
+        # contacto SOLO se pinta si META["contacto"] no está vacío (hoy
+        # vacío → se omite).
+        hairline(inner).pack(fill="x", pady=(0, SP["m"]))
+        self.about_title = section_label(inner, "ACERCA DE")
+        self.about_title.pack(fill="x", pady=(0, SP["s"]))
+        self.about_name = ctk.CTkLabel(
+            inner, text=f'{marca_visible()} {version_tag()}',
+            font=font(15, "bold"), text_color=COLORS["text"], anchor="w",
+        )
+        self.about_name.pack(fill="x")
+        self.about_descripcion = ctk.CTkLabel(
+            inner, text=descripcion_acerca_de(),
+            font=font(10), text_color=COLORS["text_dim"], anchor="w",
+            justify="left", wraplength=420,
+        )
+        self.about_descripcion.pack(fill="x", pady=(2, 0))
+        self.about_authors = ctk.CTkLabel(
+            inner, text=credits_acerca_de(),
+            font=font(10), text_color=COLORS["text_dim"], anchor="w",
+        )
+        self.about_authors.pack(fill="x", pady=(2, 0))
+        if META.get("contacto"):
+            _hint(inner, f"Contacto: {META['contacto']}").pack(
+                fill="x", pady=(2, 0))
 
         # --- Pie FIJO (fuera del scroll): GUARDAR SIEMPRE visible -------------
         # Bug del dueño: GUARDAR quedaba cortado bajo la ventana (la pantalla
@@ -525,11 +566,14 @@ class SettingsFrame(ctk.CTkFrame):
         self._default_row = default_index if servers else 0
         for i, s in enumerate(servers):
             self._append_server_row(str(s.get("name") or ""),
-                                    str(s.get("address") or ""))
+                                    str(s.get("address") or ""),
+                                    str(s.get("fsGame") or ""))
         self._refresh_use_buttons()
 
-    def _append_server_row(self, name: str = "", address: str = "") -> None:
-        """Una fila: [nombre][dirección host:puerto][USAR][BORRAR].
+    def _append_server_row(self, name: str = "", address: str = "",
+                           fs_game: str = "") -> None:
+        """Una fila: [nombre][dirección host:puerto][USAR][BORRAR] y debajo
+        el mod OPCIONAL del server (fs_game — evita la doble conexión).
 
         Los botones se ligan a la REFERENCIA de la fila (no a su índice, que
         quedaría rancio tras un borrado); el índice se resuelve al vuelo.
@@ -568,8 +612,25 @@ class SettingsFrame(ctk.CTkFrame):
             text_color=COLORS["text_faint"], anchor="w",
         )
         state_lbl.pack(side="left", padx=(SP["xs"], 0))
+        # Mod OPCIONAL del server (segunda línea, sangrada): al precargarlo
+        # con +set fs_game el cliente NO descarga/carga el mod al conectar
+        # (la doble conexión que reportó el dueño). Caption dim inline.
+        mod_line = ctk.CTkFrame(row_frame, fg_color="transparent")
+        mod_line.pack(fill="x", pady=(SP["xs"], 0))
+        ctk.CTkLabel(
+            mod_line, text="mod:", font=font(9, "bold", mono=True),
+            text_color=COLORS["text_faint"],
+        ).pack(side="left")
+        fs_entry = _entry(mod_line)
+        fs_entry.configure(
+            placeholder_text="mod del server (opcional) — ej. mods/mp_bots")
+        fs_entry.pack(side="left", fill="x", expand=True, padx=(SP["s"], 0))
+        if fs_game:
+            fs_entry.insert(0, fs_game)
+        bind_focus_hairline(fs_entry, COLORS["border"], COLORS["accent_border"])
         row: Dict[str, Any] = {
             "frame": row_frame, "name": name_entry, "addr": addr_entry,
+            "fs_game": fs_entry,
             "use_btn": use_btn, "del_btn": del_btn,
             "dot": dot, "state": state_lbl,
         }
@@ -593,7 +654,7 @@ class SettingsFrame(ctk.CTkFrame):
         self._refresh_use_buttons()
 
     def _add_server_row(self) -> None:
-        """AÑADIR: fila nueva nombre+dirección (vacía, con placeholders)."""
+        """AÑADIR: fila nueva nombre+dirección+mod (vacía, con placeholders)."""
         self._append_server_row()
         self._refresh_use_buttons()
 
@@ -707,8 +768,10 @@ class SettingsFrame(ctk.CTkFrame):
 
         # SERVERS: validación PURA de la lista editable (dirección
         # host:puerto con puerto 1024-65535; nombre vacío → 'Server N'; una
-        # fila nunca rellenada se descarta). Error visible → no se guarda.
-        rows = [{"name": r["name"].get(), "address": r["addr"].get()}
+        # fila nunca rellenada se descarta; fsGame opcional = mod
+        # precargado del server). Error visible → no se guarda.
+        rows = [{"name": r["name"].get(), "address": r["addr"].get(),
+                 "fsGame": r["fs_game"].get()}
                 for r in self._server_rows]
         try:
             servers, default_idx = sanitize_servers(rows, self._default_row)

@@ -10,7 +10,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("config")
 
@@ -22,8 +22,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Servers por defecto: las DOS salas del LXC de producción + Local
     # (mismo host que la API/web de arriba).
     "servers": [
-        {"name": "Sala 1",  "address": "192.168.2.251:28960"},
-        {"name": "Sala 2",  "address": "192.168.2.251:28961"},
+        {"name": "Sala 1",  "address": "192.168.2.251:28960",
+         "fsGame": "mods/mp_bots"},
+        {"name": "Sala 2",  "address": "192.168.2.251:28961",
+         "fsGame": "mods/mp_bots"},
         {"name": "Local",   "address": "127.0.0.1:28961"},
     ],
     "default_server": 0,
@@ -153,19 +155,23 @@ def sanitize_servers(rows: Any, default_index: int = 0
                      ) -> Tuple[List[Dict[str, str]], int]:
     """Valida y normaliza la lista editable de servers (pura, para GUARDAR).
 
-    ``rows``: lo que hay en la UI, ``[{"name": str, "address": str}, ...]``.
+    ``rows``: lo que hay en la UI, ``[{"name": str, "address": str,
+    "fsGame": str?}, ...]``.
     - Fila TOTALMENTE vacía (sin nombre y sin dirección) → se descarta (es
       una fila "AÑADIR" que nunca se rellenó; no es un error).
     - Dirección inválida → ``ValueError`` con mensaje claro: la UI lo
       muestra y NO se guarda nada (jamás se persiste una lista rota).
     - Nombre vacío → ``"Server N"`` (N = posición 1-based en la lista final).
-    Devuelve ``([{name, address}, ...], default_server)`` con el índice
-    acotado a la lista final (0 si queda vacía).
+    - ``fsGame`` (mod precargado del server, OPCIONAL): se recorta; vacío →
+      la clave NO se persiste (sin mod que precargar).
+    Devuelve ``([{"name", "address", "fsGame"?}, ...], default_server)``
+    con el índice acotado a la lista final (0 si queda vacía).
     """
     clean: List[Dict[str, str]] = []
     for row in (rows or []):
         name = str((row or {}).get("name") or "").strip()
         addr = str((row or {}).get("address") or "").strip()
+        fs_game = str((row or {}).get("fsGame") or "").strip()
         if not name and not addr:
             continue  # fila añadida y nunca rellenada: fuera, sin drama
         addr_ok = normalize_server_address(addr)
@@ -175,8 +181,11 @@ def sanitize_servers(rows: Any, default_index: int = 0
                 "(formato host:puerto — ej. 192.168.1.50:28961, puerto "
                 "1024-65535)"
             )
-        clean.append({"name": name, "address": addr_ok})
-    out = [{"name": (row["name"] or f"Server {i + 1}"), "address": row["address"]}
+        entry: Dict[str, str] = {"name": name, "address": addr_ok}
+        if fs_game:
+            entry["fsGame"] = fs_game
+        clean.append(entry)
+    out = [dict(row, name=(row["name"] or f"Server {i + 1}"))
            for i, row in enumerate(clean)]
     idx = default_index if 0 <= default_index < len(out) else 0
     return out, idx
@@ -221,7 +230,13 @@ class AppConfig:
         out: List[Dict[str, str]] = []
         for s in raw:
             if isinstance(s, dict) and s.get("name") and s.get("address"):
-                out.append({"name": str(s["name"]), "address": str(s["address"])})
+                row = {"name": str(s["name"]), "address": str(s["address"])}
+                # fsGame opcional (mod precargado del server — evita la
+                # doble conexión de IW4x): solo si viene no vacío.
+                fs_game = str(s.get("fsGame") or "").strip()
+                if fs_game:
+                    row["fsGame"] = fs_game
+                out.append(row)
         return out
 
     @property
@@ -348,3 +363,111 @@ def load_config() -> AppConfig:
     merged.pop("link_poll_max_seconds", None)
     log.info("Config cargada desde %s (api_url=%s)", path, merged["api_url"])
     return AppConfig(merged)
+
+
+# --- Archivo de proyecto CTHLG.pro (identidad del producto) ----------------
+# La marca oficial es CTHLG MW2 Ranking (CTHolguin · Call of Duty: Modern
+# Warfare 2 (2009) · engine IW4x - AlterWare). El CTHLG.pro en la RAÍZ del
+# repo es la ÚNICA fuente de esa identidad: el launcher deriva de él su META
+# (ui/theme.py). Si el archivo no está (exe repartido solo, repo a medias),
+# se usan los defaults de abajo, IGUALES al .pro — la UI es idéntica con o
+# sin el archivo (nunca cambia la marca por la ausencia del archivo).
+
+PRO_FILENAME = "CTHLG.pro"
+
+# Defaults = contenido del CTHLG.pro del repo (misma fuente, sin leerlo).
+# AUTOR va con tildes y separador '·' porque es el copy EXACTO que muestran
+# los créditos de la UI (el .pro se lee UTF-8).
+PRO_META_DEFAULTS: Dict[str, str] = {
+    "PRO_NAME": "CTHLG MW2 Ranking",
+    "PRO_SHORT": "CTHLG",
+    "PRO_FULL": "CTHLG Call of Duty: Modern Warfare 2 - Ranking & Cloud-Save",
+    "DESCRIPCION": "Sistema de ranking, ELO y cloud-save para "
+                   "Call of Duty: Modern Warfare 2 (2009) - CTHolguin",
+    "GAME": "Call of Duty: Modern Warfare 2 (2009)",
+    "GAME_SHORT": "MW2",
+    "GAME_ENGINE": "IW4x - AlterWare r5318",
+    "VERSION": "0.1.5",
+    "ANIO": "2026",
+    "AUTOR": "Desarrollado por José Domínguez Ramírez · Rafael Font Rojas",
+    "CONTACTO": "",
+}
+
+
+def read_pro_meta(path: "Path | str") -> Dict[str, str]:
+    """Parsea un archivo .pro estilo INI (``KEY = VALUE``) → dict (pura).
+
+    - Ignora líneas vacías y comentarios (línea que empieza con ``#``).
+    - Clave = todo antes del PRIMER ``=``; valor = el resto (ambos con trim).
+    - Líneas sin ``=`` se descartan en silencio (no rompen el parseo).
+    - Archivo ausente/ilegible → ``{}``: el fallback lo decide el llamador
+      (merge_pro_meta), nunca lanza por un archivo que falte.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+def find_pro_file() -> Optional[Path]:
+    """Localiza CTHLG.pro relativo al launcher: ``../`` y ``../../``.
+
+    En dev este archivo vive en apps/launcher → la raíz del repo es
+    ``../../CTHLG.pro`` (y ``../CTHLG.pro`` por si el layout cambia).
+    Congelado (exe PyInstaller) se busca junto al .exe, por si el dueño
+    reparte el .pro con el launcher; ausente → ``None`` → defaults.
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent
+    for parent in (base.parent, base.parent.parent):
+        try:
+            candidate = parent / PRO_FILENAME
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def merge_pro_meta(values: Dict[str, str]) -> Dict[str, str]:
+    """Aplica valores de un .pro parseado sobre PRO_META_DEFAULTS (pura).
+
+    - Clave ausente o VACÍA en el .pro (``CONTACTO =``) → se queda el default.
+    - ``ANIO`` que no sean puros dígitos → default (la UI lo muestra como int).
+    """
+    meta = dict(PRO_META_DEFAULTS)
+    for key in meta:
+        raw = str(values.get(key) or "").strip()
+        if raw:
+            meta[key] = raw
+    if not meta["ANIO"].isdigit():
+        meta["ANIO"] = PRO_META_DEFAULTS["ANIO"]
+    return meta
+
+
+def launcher_pro_meta() -> Dict[str, str]:
+    """Identidad del producto: CTHLG.pro si existe; si no, defaults IGUALES.
+
+    El archivo (raíz del repo en dev) MANDA cuando está; sin él el resultado
+    es idéntico a PRO_META_DEFAULTS — la marca visible nunca depende de que
+    el .pro acompañe o no al launcher.
+    """
+    path = find_pro_file()
+    if path is None:
+        return merge_pro_meta({})
+    meta = merge_pro_meta(read_pro_meta(path))
+    log.info("Meta de proyecto desde %s (%s v%s)", path,
+             meta["PRO_NAME"], meta["VERSION"])
+    return meta

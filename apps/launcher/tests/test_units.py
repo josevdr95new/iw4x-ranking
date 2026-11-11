@@ -21,6 +21,12 @@ Qué verifica (mismo estilo [OK]/[FALLO] que test_smoke.py):
       defaults, acotes y limpieza de servers inválidos).
   6. app_config: normalize_api_url (esquema http:// faltante, barra final,
       espacios, vacío → default; JAMÁS inventa/corrige puertos).
+  7. ui/theme: META (identidad central, DERIVADA del CTHLG.pro del repo:
+      marca CTHLG MW2 Ranking) y los copys de créditos derivados (línea de
+      la franja inferior del home + bloque ACERCA DE de Ajustes).
+  8. app_config + CTHLG.pro: parser KEY = VALUE (read_pro_meta), fallback
+      con defaults iguales (merge_pro_meta) y el archivo real del repo
+      (find_pro_file / launcher_pro_meta).
 
 NO es pytest: es un script secuencial que imprime [OK]/[FALLO] por paso.
 Las suites E2E/GUI (API real, CustomTkinter) viven en tests/test_smoke.py
@@ -40,11 +46,16 @@ from subprocess import TimeoutExpired
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_config import (  # noqa: E402
+    PRO_META_DEFAULTS,
     AppConfig,
     DEFAULT_CONFIG,
     default_server_after_delete,
+    find_pro_file,
+    launcher_pro_meta,
+    merge_pro_meta,
     normalize_api_url,
     normalize_server_address,
+    read_pro_meta,
     sanitize_servers,
 )
 import game_flow as gf  # noqa: E402
@@ -88,6 +99,14 @@ from save_sync import (  # noqa: E402
     verify_restore_complete,
 )
 from ui.stats_panel import medal_detail_parts  # noqa: E402
+from ui.theme import (  # noqa: E402
+    META,
+    credits_acerca_de,
+    credits_compact,
+    descripcion_acerca_de,
+    marca_visible,
+    version_tag,
+)
 
 RESULTS: list = []
 
@@ -417,6 +436,26 @@ def phase_command_args() -> None:
           build_game_args("iw4x.exe", "1.2.3.4:28960", "Nick",
                           export_classes=True)[-1] == "+dumpPlayerData")
 
+    # fs_game (fix doble conexión): +set fs_game ANTES de +connect, SOLO
+    # cuando el server define su mod; sin fs_game → sin el +set.
+    args = build_game_args("iw4x.exe", "192.168.2.251:28960", "Nick",
+                           fs_game="mods/mp_bots")
+    check("fs_game: +set fs_game entre el +set name y el +connect (orden exacto)",
+          args == ["iw4x.exe", "+set", "name", "Nick",
+                   "+set", "fs_game", "mods/mp_bots",
+                   "+connect", "192.168.2.251:28960", "+dumpPlayerData"],
+          str(args))
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "Nick",
+                           fs_game="mods/mp_bots", export_classes=False)
+    check("fs_game: sin dump → +connect queda último tras el +set fs_game",
+          args == ["iw4x.exe", "+set", "name", "Nick",
+                   "+set", "fs_game", "mods/mp_bots",
+                   "+connect", "1.2.3.4:28960"], str(args))
+    args = build_game_args("iw4x.exe", "1.2.3.4:28960", "Nick", fs_game="  ")
+    check("fs_game solo espacios → sin +set fs_game (server sin mod)",
+          args == ["iw4x.exe", "+set", "name", "Nick",
+                   "+connect", "1.2.3.4:28960", "+dumpPlayerData"], str(args))
+
 
 # ---------------------------------------------------------------------------
 # 4. app_config: defaults del contrato y merge de claves ausentes (puras).
@@ -439,8 +478,10 @@ def phase_app_config() -> None:
     check("DEFAULT_CONFIG: servers por defecto = Sala 1/Sala 2/Local "
           "(salas del LXC de producción + local), default Sala 1",
           DEFAULT_CONFIG["servers"] == [
-              {"name": "Sala 1",  "address": "192.168.2.251:28960"},
-              {"name": "Sala 2",  "address": "192.168.2.251:28961"},
+              {"name": "Sala 1",  "address": "192.168.2.251:28960",
+               "fsGame": "mods/mp_bots"},
+              {"name": "Sala 2",  "address": "192.168.2.251:28961",
+               "fsGame": "mods/mp_bots"},
               {"name": "Local",   "address": "127.0.0.1:28961"},
           ]
           and DEFAULT_CONFIG["default_server"] == 0,
@@ -1536,6 +1577,143 @@ def phase_medal_parts() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 10. theme.META: identidad central (title + créditos home + ACERCA DE),
+#     derivada del CTHLG.pro (marca CTHLG MW2 Ranking).
+def phase_meta() -> None:
+    print("\n=== Units: theme.META (identidad CTHLG MW2 Ranking + copys) ===")
+
+    check("META: claves exactas del contrato (identidad .pro + juego/engine)",
+          set(META) == {"nombre", "version", "anio", "autor", "contacto",
+                        "descripcion", "juego", "game_short", "engine",
+                        "pro_short", "pro_full"},
+          str(sorted(META)))
+    check("META: nombre = producto CTHLG MW2 Ranking + versión 0.1.5",
+          META["nombre"] == "CTHLG MW2 Ranking"
+          and META["version"] == "0.1.5",
+          f'{META["nombre"]} v{META["version"]}')
+    check("META: juego y engine del contrato (MW2 2009 · IW4x AlterWare)",
+          META["juego"] == "Call of Duty: Modern Warfare 2 (2009)"
+          and META["game_short"] == "MW2"
+          and META["engine"] == "IW4x - AlterWare r5318",
+          f'{META["juego"]} / {META["engine"]}')
+    check("META: año 2026 y autoría con los DOS créditos",
+          META["anio"] == 2026
+          and META["autor"].startswith("Desarrollado por ")
+          and "José Domínguez Ramírez" in META["autor"]
+          and "Rafael Font Rojas" in META["autor"],
+          str(META["autor"]))
+    check("META: contacto vacío hoy (la línea NO se renderiza en ACERCA DE)",
+          META["contacto"] == "", repr(META["contacto"]))
+    check("marca_visible: marca en MAYÚSCULAS para ventana/header",
+          marca_visible() == "CTHLG MW2 RANKING", marca_visible())
+    check("credits_compact: copy EXACTO de la franja inferior del home",
+          credits_compact() == "CTHLG MW2 RANKING v0.1.5 · 2026 · "
+          "José Domínguez Ramírez · Rafael Font Rojas", credits_compact())
+    check("credits_acerca_de: copy EXACTO de la autoría en Ajustes",
+          credits_acerca_de() == "2026 · Desarrollado por José Domínguez "
+          "Ramírez · Rafael Font Rojas", credits_acerca_de())
+    check("descripcion_acerca_de: copy EXACTO de la descripción en Ajustes",
+          descripcion_acerca_de() == "Sistema de ranking, ELO y cloud-save "
+          "para Call of Duty: Modern Warfare 2 (2009) — CTHolguin · "
+          "IW4x AlterWare r5318", descripcion_acerca_de())
+    check("version_tag: 'v' + META.version (title del launcher)",
+          version_tag() == "v0.1.5", version_tag())
+
+
+# ---------------------------------------------------------------------------
+# 11. CTHLG.pro: parser (read_pro_meta), fallback (merge_pro_meta) y el
+#     archivo real del repo (find_pro_file / launcher_pro_meta).
+def phase_pro_meta() -> None:
+    print("\n=== Units: CTHLG.pro (parser KEY = VALUE + fallback defaults) ===")
+
+    # --- read_pro_meta: parseo puro sobre un .pro temporal -----------------
+    with tempfile.TemporaryDirectory() as tmp:
+        pro = Path(tmp) / "CTHLG.pro"
+        pro.write_text(
+            "# comentario del proyecto\n"
+            "\n"
+            "PRO_NAME      = CTHLG MW2 Ranking\n"
+            "VERSION   =0.1.5\n"
+            "ANIO          = 2026\n"
+            "CONTACTO      =\n"
+            "DESCRIPCION   = Sistema de ranking, ELO y cloud-save para "
+            "Call of Duty: Modern Warfare 2 (2009) - CTHolguin\n"
+            "   =valor sin clave se descarta\n"
+            "linea rota sin igual se descarta\n"
+            "SALA1 = CTHolguin Sala 1 - 192.168.2.251:28960\n",
+            encoding="utf-8",
+        )
+        meta = read_pro_meta(pro)
+        check("read_pro_meta: KEY = VALUE con trim de ambos lados",
+              meta.get("PRO_NAME") == "CTHLG MW2 Ranking"
+              and meta.get("VERSION") == "0.1.5"
+              and meta.get("ANIO") == "2026",
+              str(meta.get("PRO_NAME")))
+        check("read_pro_meta: valor con espacios internos se conserva intacto",
+              meta.get("DESCRIPCION") == "Sistema de ranking, ELO y "
+              "cloud-save para Call of Duty: Modern Warfare 2 (2009) - "
+              "CTHolguin", str(meta.get("DESCRIPCION")))
+        check("read_pro_meta: valor con host:puerto no se parte (solo 1er '=')",
+              meta.get("SALA1") == "CTHolguin Sala 1 - 192.168.2.251:28960",
+              str(meta.get("SALA1")))
+        check("read_pro_meta: comentarios (#) y líneas vacías ignorados",
+              "#" not in str(meta) and len(meta) == 6, str(sorted(meta)))
+        check("read_pro_meta: línea sin clave (o valor vacío) se descarta/sin romper",
+              "" not in meta and meta.get("CONTACTO") == "",
+              repr(meta.get("CONTACTO")))
+        vacio = read_pro_meta(Path(tmp) / "NO_EXISTE.pro")
+        check("read_pro_meta: archivo ausente → {} (fallback en el llamador)",
+              vacio == {}, str(vacio))
+
+    # --- merge_pro_meta: defaults + valores (fallback idéntico) ------------
+    base = merge_pro_meta({})
+    check("merge_pro_meta({}) → defaults IGUALES al CTHLG.pro del repo",
+          base == dict(PRO_META_DEFAULTS), str(base.get("PRO_NAME")))
+    check("defaults: identidad CTHLG MW2 Ranking (juego + engine)",
+          PRO_META_DEFAULTS["PRO_NAME"] == "CTHLG MW2 Ranking"
+          and PRO_META_DEFAULTS["GAME"] == "Call of Duty: Modern Warfare 2 (2009)"
+          and PRO_META_DEFAULTS["GAME_ENGINE"] == "IW4x - AlterWare r5318"
+          and PRO_META_DEFAULTS["GAME_SHORT"] == "MW2",
+          PRO_META_DEFAULTS["PRO_NAME"])
+    mezcla = merge_pro_meta({"VERSION": "9.9.9", "ANIO": "2030",
+                             "CONTACTO": ""})
+    check("merge_pro_meta: clave presente en el .pro MANDA sobre el default",
+          mezcla["VERSION"] == "9.9.9" and mezcla["ANIO"] == "2030",
+          f'{mezcla["VERSION"]}/{mezcla["ANIO"]}')
+    check("merge_pro_meta: clave vacía (CONTACTO=) NO pisa el default",
+          mezcla["CONTACTO"] == PRO_META_DEFAULTS["CONTACTO"],
+          repr(mezcla["CONTACTO"]))
+    basura = merge_pro_meta({"ANIO": "dos-mil-veintiséis"})
+    check("merge_pro_meta: ANIO con basura → default (la UI lo pinta como int)",
+          basura["ANIO"] == PRO_META_DEFAULTS["ANIO"], basura["ANIO"])
+
+    # --- archivo real del repo + launcher_pro_meta --------------------------
+    real = find_pro_file()
+    check("find_pro_file: CTHLG.pro existe en la raíz del repo (../../)",
+          real is not None and real.name == "CTHLG.pro" and real.is_file(),
+          str(real))
+    if real is not None:
+        del_pro = read_pro_meta(real)
+        check("CTHLG.pro real: PRO_NAME/GAME/VERSION del contrato",
+              del_pro.get("PRO_NAME") == "CTHLG MW2 Ranking"
+              and del_pro.get("GAME") == "Call of Duty: Modern Warfare 2 (2009)"
+              and del_pro.get("GAME_ENGINE") == "IW4x - AlterWare r5318"
+              and del_pro.get("VERSION") == "0.1.5"
+              and del_pro.get("ANIO") == "2026",
+              str(del_pro.get("PRO_NAME")))
+    vivo = launcher_pro_meta()
+    check("launcher_pro_meta: la identidad viva es CTHLG MW2 Ranking v0.1.5 "
+          "(con o sin archivo)",
+          vivo["PRO_NAME"] == "CTHLG MW2 Ranking"
+          and vivo["VERSION"] == "0.1.5"
+          and vivo["ANIO"] == "2026",
+          f'{vivo["PRO_NAME"]} v{vivo["VERSION"]}')
+    check("launcher_pro_meta: coincide con los defaults (UI idéntica sin .pro)",
+          vivo == merge_pro_meta(read_pro_meta(real)) if real is not None
+          else vivo == dict(PRO_META_DEFAULTS), "")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1561,6 +1739,8 @@ def main() -> int:
     phase_verify_restore()
     phase_autosave()
     phase_medal_parts()
+    phase_meta()
+    phase_pro_meta()
 
     fails = sum(1 for r in RESULTS if r.startswith("[FALLO"))
     print("\n================ RESUMEN ================")

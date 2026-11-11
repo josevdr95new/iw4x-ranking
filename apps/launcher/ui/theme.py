@@ -15,6 +15,101 @@ from pathlib import Path
 
 import customtkinter as ctk
 
+from app_config import launcher_pro_meta
+
+# --- Identidad del launcher (única fuente: CTHLG.pro en la raíz del repo) ---
+# La marca oficial es CTHLG MW2 Ranking (CTHolguin · MW2 2009 · engine IW4x).
+# app_config.launcher_pro_meta() lee el CTHLG.pro del repo y deriva TODO de
+# aquí: el title de la ventana, la línea de créditos de la franja inferior
+# del home y el bloque '// ACERCA DE //' de Ajustes leen los tres de AQUÍ.
+# Si el archivo no acompaña al exe → defaults IGUALES (app_config): la UI
+# nunca cambia por la ausencia del archivo (es UI derivada, no config).
+_PRO = launcher_pro_meta()
+
+META = {
+    "nombre": _PRO["PRO_NAME"],         # "CTHLG MW2 Ranking"
+    "version": _PRO["VERSION"],         # "0.1.5"
+    "anio": int(_PRO["ANIO"]),          # 2026
+    "autor": _PRO["AUTOR"],             # "Desarrollado por José … · Rafael …"
+    "contacto": _PRO["CONTACTO"],       # "" → sin línea de contacto en Ajustes
+    "descripcion": _PRO["DESCRIPCION"],
+    "juego": _PRO["GAME"],              # "Call of Duty: Modern Warfare 2 (2009)"
+    "game_short": _PRO["GAME_SHORT"],   # "MW2"
+    "engine": _PRO["GAME_ENGINE"],      # "IW4x - AlterWare r5318"
+    "pro_short": _PRO["PRO_SHORT"],     # "CTHLG"
+    "pro_full": _PRO["PRO_FULL"],
+}
+
+
+def version_tag() -> str:
+    """Etiqueta corta de versión desde META ('v0.1.5')."""
+    return f'v{META["version"]}'
+
+
+def marca_visible() -> str:
+    """Marca en MAYÚSCULAS para ventana/header/créditos: 'CTHLG MW2 RANKING'."""
+    return META["nombre"].upper()
+
+
+def autores_corto() -> str:
+    """Autores SIN el prefijo 'Desarrollado por ' (línea compacta del home)."""
+    return META["autor"].replace("Desarrollado por ", "", 1)
+
+
+def credits_compact() -> str:
+    """Copy EXACTO de la línea de créditos de la franja inferior del home:
+    ``CTHLG MW2 RANKING v0.1.5 · 2026 · José Domínguez Ramírez · Rafael Font Rojas``.
+    """
+    return f'{marca_visible()} {version_tag()} · {META["anio"]} · {autores_corto()}'
+
+
+def abreviar_nombre(nombre: str) -> str:
+    """Nombre con el segundo apellido abreviado a inicial (pura):
+    ``José Domínguez Ramírez`` → ``José D. Ramírez``. Con 1-2 palabras no hay
+    nada que abreviar (queda tal cual). Para la franja de créditos, que
+    comparte fila con el título del registro y no siempre cabe entera.
+    """
+    palabras = (nombre or "").strip().split()
+    if len(palabras) < 3:
+        return (nombre or "").strip()
+    return f"{palabras[0]} {palabras[1][0]}. {palabras[-1]}"
+
+
+def autores_abreviados() -> str:
+    """Autores (sin prefijo) con cada nombre abreviado, unidos por ' · ':
+    ``José D. Ramírez · Rafael F. Rojas``.
+    """
+    return " · ".join(abreviar_nombre(a)
+                      for a in autores_corto().split(" · "))
+
+
+def credits_short() -> str:
+    """Copy CORTO de la franja del home (nombres abreviados, cabe en el
+    ancho mínimo): ``CTHLG MW2 RANKING v0.1.5 · 2026 · José D. Ramírez ·
+    Rafael F. Rojas``. La UI además lo recorta con '…' medido si ni este
+    cupiera (ver Home._fit_credits)."""
+    return f'{marca_visible()} {version_tag()} · {META["anio"]} · {autores_abreviados()}'
+
+
+def credits_acerca_de() -> str:
+    """Copy EXACTO de la línea de autoría del bloque ACERCA DE de Ajustes:
+    ``2026 · Desarrollado por José Domínguez Ramírez · Rafael Font Rojas``.
+    (Aquí SÍ vive el 'Desarrollado por'; el home lo lleva sin prefijo.)
+    """
+    return f'{META["anio"]} · {META["autor"]}'
+
+
+def descripcion_acerca_de() -> str:
+    """Copy EXACTO de la línea de descripción del bloque ACERCA DE:
+    la DESCRIPCION del .pro con guion largo antes de CTHolguin + el engine
+    detrás: ``Sistema de ranking, ELO y cloud-save para Call of Duty: Modern
+    Warfare 2 (2009) — CTHolguin · IW4x AlterWare r5318``.
+    """
+    base = META["descripcion"].replace("- CTHolguin", "— CTHolguin")
+    engine = META["engine"].replace(" - ", " ")
+    return f"{base} · {engine}"
+
+
 # --- Paleta (única fuente de color del launcher) --------------------------
 COLORS = {
     # Superficies (carbón verdoso, nunca gris puro)

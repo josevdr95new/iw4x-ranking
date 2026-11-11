@@ -2,7 +2,8 @@
 
 El botón JUGAR es el protagonista: bloque ámbar grande con strip de estado
 (● LISTO → ● CONECTANDO → ● EN PARTIDA / ● FALLO). La consola mini vive en
-una barra inferior tipo terminal.
+una barra inferior tipo terminal, con la línea de créditos META en su
+cabecera (franja inferior del home).
 
 El MISMO botón hace de JUGAR ⇄ DETENER según el proceso del juego: sin
 juego vivo es JUGAR (ámbar); con el juego que este launcher abrió sigue
@@ -47,7 +48,7 @@ from ui.hud import (
     status_chip,
 )
 from ui.stats_panel import StatsPanel
-from ui.theme import COLORS, RADIUS, SP, font, section_text
+from ui.theme import (COLORS, RADIUS, SP, credits_compact, font, section_text)
 
 if TYPE_CHECKING:
     from ui.main_window import App
@@ -192,6 +193,21 @@ class HomeFrame(ctk.CTkFrame):
             font=font(10, "bold", mono=True), text_color=COLORS["text_faint"],
             anchor="w",
         ).pack(side="left")
+        # Créditos META (única fuente: ui/theme.py) en la franja inferior:
+        # caption dim mono pequeño — copy EXACTO (credits_compact) que
+        # comparte fila con el título del registro, ADEMÁS recortado con
+        # '…' medido al ancho real (font.measure) en _fit_credits: nunca se
+        # corta feo por el borde derecho (bug del dueño con screenshot).
+        self._activity_label = head.winfo_children()[-1]
+        self._credits_text = credits_compact()
+        self._credits_font = font(9, "bold", mono=True)
+        self.credits_label = ctk.CTkLabel(
+            head, text=self._credits_text, font=self._credits_font,
+            text_color=COLORS["text_faint"], anchor="e",
+        )
+        self.credits_label.pack(side="right")
+        head.bind("<Configure>", lambda _e: self._fit_credits())
+        self._fit_credits()
         self.console = ctk.CTkTextbox(
             console_card, font=font(11, mono=True), fg_color=COLORS["console"],
             text_color=COLORS["text_dim"], wrap="word", height=170,
@@ -199,6 +215,39 @@ class HomeFrame(ctk.CTkFrame):
         self.console.pack(fill="both", expand=True, padx=SP["l"],
                          pady=(SP["xs"], SP["m"]))
         self.console.configure(state="disabled")
+
+    # --- Créditos de la franja inferior: recorte medido con '…' -----------
+    def _fit_credits(self) -> None:
+        """Recorta los créditos META con '…' al ancho REAL de la franja.
+
+        Comparten fila con el título REGISTRO DE ACTIVIDAD (label izquierdo):
+        se mide con font.measure el copy completo y, si no cabe, se busca el
+        prefijo más largo que quepa añadiendo '…'. Nunca se corta feo por el
+        borde derecho (bug del dueño con screenshot). El evento <Configure>
+        de la cabecera re-dispara el cálculo al redimensionar.
+        """
+        head = self.credits_label.master
+        head_w = head.winfo_width()
+        if head_w <= 1:
+            # Aún sin mapear (primer build del frame): winfo_width no dice
+            # nada útil; el <Configure> al mostrarse vuelve a llamar esto.
+            return
+        activity_w = max(1, self._activity_label.winfo_reqwidth())
+        avail = head_w - activity_w - SP["m"]
+        text = self._credits_text
+        if self._credits_font.measure(text) <= avail:
+            self.credits_label.configure(text=text)
+            return
+        # Mayor prefijo que quepa con '…' (búsqueda binaria sobre el copy).
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._credits_font.measure(text[:mid] + "…") <= avail:
+                lo = mid
+            else:
+                hi = mid - 1
+        self.credits_label.configure(
+            text=(text[:lo].rstrip() + "…") if lo else "…")
 
     # --- Datos y estado ---------------------------------------------------
     def set_user(self, user: Dict) -> None:
