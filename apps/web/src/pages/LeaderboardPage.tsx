@@ -257,7 +257,9 @@ export function LeaderboardPage() {
       <div className="flex flex-wrap items-end justify-between gap-2 pb-4">
         <h1 className="type-display-xl text-text">Ranking de la comunidad</h1>
         <p className="type-label text-text-2" aria-live="polite">
-          {data ? `${formatInt(data.total)} jugadores` : "\u00A0"}
+          {data
+            ? `${formatInt(data.total)} ${data.total === 1 ? "jugador" : "jugadores"}`
+            : "\u00A0"}
         </p>
       </div>
       <p className="type-caption -mt-2 pb-4 uppercase text-text-2">

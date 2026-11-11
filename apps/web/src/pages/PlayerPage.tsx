@@ -57,14 +57,31 @@ function EventTag({ label, title }: { label: string; title: string }) {
 }
 
 /**
+ * Variantes que llegan como PREFIJO del código en logs/mods viejos (el diccionario
+ * solo trae códigos base y el attachment infix "_gl_"): "gl_famas" → base "famas".
+ * Solo prefijos vistos en datos reales del feed.
+ */
+const WEAPON_CODE_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+  ["gl_", " + Lanzagranadas"],
+];
+
+/**
  * Arma del feed: SIEMPRE nombre humano (weaponName del evento; si una API previa
  * no lo trae, se decodifica con el diccionario público; el crudo es último recurso).
  */
 function weaponDisplay(event: KillEvent, dictionary: Map<string, string>): string {
   if (event.weaponName) return event.weaponName;
   const code = event.weaponCode ?? event.weapon;
-  if (code) return dictionary.get(code) ?? code;
-  return "—";
+  if (!code) return "—";
+  // Prefijo de variante (ej. "gl_famas"): se decodifica la base con el diccionario
+  // y la variante va al final → "FAMAS + Lanzagranadas" (nunca "Gl Famas").
+  for (const [prefix, suffix] of WEAPON_CODE_PREFIXES) {
+    if (code.startsWith(prefix)) {
+      const baseCode = code.slice(prefix.length).replace(/_mp$/, "");
+      return `${dictionary.get(baseCode) ?? baseCode}${suffix}`;
+    }
+  }
+  return dictionary.get(code) ?? code;
 }
 
 function ActivityTable({ detail, weaponNames }: { detail: PlayerDetail; weaponNames: Map<string, string> }) {

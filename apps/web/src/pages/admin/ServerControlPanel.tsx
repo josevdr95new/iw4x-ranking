@@ -417,6 +417,13 @@ function skillLegend(value: number): string {
   }
 }
 
+/** Modo del select desde difficulty.value: "7" → "7"; null/parse fail → "0 — Aleatorio". */
+function skillModeFromValue(value: string | null): string {
+  if (value === null || value.trim() === "") return "0";
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 9 ? String(parsed) : "0";
+}
+
 function BotsPanel() {
   const [data, setData] = useState<BotsOverview | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "unreachable" | "forbidden" | "error">("loading");
@@ -431,6 +438,8 @@ function BotsPanel() {
   const [applyResult, setApplyResult] = useState<string | null>(null);
 
   const [skillMode, setSkillMode] = useState("0");
+  /** Último valor sincronizado desde el GET (para no pisar una elección del usuario). */
+  const skillSyncedRef = useRef("0");
   const [teamCounts, setTeamCounts] = useState({
     alliesHard: "0",
     alliesMed: "0",
@@ -454,6 +463,11 @@ function BotsPanel() {
         setCountInput((previous) =>
           previous === "" || previous === String(data?.count ?? "") ? String(response.count) : previous,
         );
+        // Inicializa el select con el dvar real (ej. value "7" → "7 — Difícil");
+        // solo si el usuario no lo ha cambiado desde la última sincronización.
+        const nextSkill = skillModeFromValue(response.difficulty.value);
+        setSkillMode((previous) => (previous === skillSyncedRef.current ? nextSkill : previous));
+        skillSyncedRef.current = nextSkill;
       } catch (error) {
         if (cancelled) return;
         if (error instanceof ApiError && error.status === 403) {
@@ -519,6 +533,8 @@ function BotsPanel() {
           : { level: Number(skillMode) };
       const result = await api.setBotDifficulty(body);
       setDifficultyResult(result.note);
+      // Refresca el GET de bots para confirmar el valor del dvar tras aplicar.
+      setReloadKey((key) => key + 1);
     } catch (error) {
       setDifficultyError(rconErrorText(error));
     } finally {
